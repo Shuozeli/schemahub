@@ -2,3 +2,10 @@
 name    = "schemahub-plugin-protobuf"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+schemahub-types = { path = "../schemahub-types" }
+prost     = { workspace = true }
+bytes     = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }

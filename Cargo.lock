@@ -348,6 +348,13 @@ version = "0.1.0"
 [[package]]
 name = "schemahub-plugin-protobuf"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "schemahub-types",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "schemahub-server"
