@@ -6,3 +6,19 @@ edition = "2021"
 [[bin]]
 name = "schemahub-server"
 path = "src/main.rs"
+
+[dependencies]
+schemahub-types            = { path = "../../crates/schemahub-types" }
+schemahub-storage          = { path = "../../crates/schemahub-storage" }
+schemahub-core             = { path = "../../crates/schemahub-core" }
+schemahub-api              = { path = "../../crates/schemahub-api" }
+schemahub-plugin-protobuf  = { path = "../../crates/schemahub-plugin-protobuf" }
+schemahub-plugin-flatbuffers = { path = "../../crates/schemahub-plugin-flatbuffers" }
+schemahub-plugin-openapi   = { path = "../../crates/schemahub-plugin-openapi" }
+tokio    = { workspace = true }
+tonic    = { workspace = true }
+prost    = { workspace = true }
+bytes    = { workspace = true }
+anyhow   = { workspace = true }
+clap     = { workspace = true }
+tokio-stream = { version = "0.1" }
