@@ -1,0 +1,52 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/common.proto";
+
+service CodegenService {
+  // Returns the schema in its native descriptor format, reconstructed from
+  // the AST. Includes all transitive imports.
+  //   Protobuf    -> serialized FileDescriptorSet (binary proto)
+  //   FlatBuffers -> bundle of reconstructed .fbs source files (as a tar archive)
+  //   OpenAPI     -> resolved YAML document with all $ref inlined
+  rpc GetDescriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
+
+  // Renders generated code for a given language server-side.
+  // No files written; response contains the rendered source text.
+  // Returns UNIMPLEMENTED for language/format combinations not yet supported.
+  rpc PreviewCodegen(PreviewCodegenRequest) returns (PreviewCodegenResponse);
+}
+
+message GetDescriptorsRequest {
+  string     project     = 1;
+  string     repo        = 2;
+  string     schema_path = 3;
+  VersionRef at          = 4;
+}
+
+message GetDescriptorsResponse {
+  // The raw descriptor artifact bytes.
+  // Consumers should use the format field to interpret the bytes correctly.
+  bytes        descriptor_bytes = 1;
+  SchemaFormat format           = 2;
+  // The commit that was actually resolved.
+  string       at_commit        = 3;
+}
+
+message PreviewCodegenRequest {
+  string     project     = 1;
+  string     repo        = 2;
+  string     schema_path = 3;
+  VersionRef at          = 4;
+  Language   language    = 5;
+}
+
+message PreviewCodegenResponse {
+  // Generated source text. For multi-file outputs, this is a tar archive.
+  // Single-file outputs (e.g. a single .rs file) are returned directly as UTF-8.
+  bytes  content       = 1;
+  bool   is_archive    = 2;   // true if content is a tar archive
+  string at_commit     = 3;
+}

@@ -1,0 +1,142 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/common.proto";
+
+service ExplorationService {
+  // List all schema files in a repo at a given ref.
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+
+  // List all top-level declarations in a schema file.
+  rpc ListDeclarations(ListDeclarationsRequest) returns (ListDeclarationsResponse);
+
+  // Return full detail for one named declaration.
+  rpc GetDeclaration(GetDeclarationRequest) returns (GetDeclarationResponse);
+
+  // Follow a field's type reference, potentially crossing import boundaries.
+  rpc FollowType(FollowTypeRequest) returns (FollowTypeResponse);
+
+  // List all schemas imported by a schema, at their pinned resolved_commit.
+  rpc ListDependencies(ListDependenciesRequest) returns (ListDependenciesResponse);
+
+  // Search for declarations by name across schemas and repos.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+// ── ListSchemas ───────────────────────────────────────────────────────────────
+
+message ListSchemasRequest {
+  string     project = 1;
+  string     repo    = 2;
+  VersionRef at      = 3;  // defaults to HEAD of default branch
+}
+
+message ListSchemasResponse {
+  repeated SchemaInfo schemas = 1;
+}
+
+// ── ListDeclarations ──────────────────────────────────────────────────────────
+
+message ListDeclarationsRequest {
+  string     project     = 1;
+  string     repo        = 2;
+  string     schema_path = 3;  // e.g. "user.proto"
+  VersionRef at          = 4;
+  // Optional: filter by kind.
+  DeclKind   kind_filter = 5;
+}
+
+message ListDeclarationsResponse {
+  repeated DeclSummary declarations = 1;
+}
+
+// ── GetDeclaration ────────────────────────────────────────────────────────────
+
+message GetDeclarationRequest {
+  string     project          = 1;
+  string     repo             = 2;
+  string     schema_path      = 3;
+  string     declaration_name = 4;  // e.g. "UserRequest", "path:/users"
+  VersionRef at               = 5;
+}
+
+message GetDeclarationResponse {
+  DeclSummary summary    = 1;
+  // Full detail as format-specific bytes. The client-side plugin library
+  // deserializes this for display. The CLI renders it as human-readable text.
+  bytes       detail     = 2;
+  // The commit hash that was actually resolved (useful when `at` was a branch name).
+  string      at_commit  = 3;
+}
+
+// ── FollowType ────────────────────────────────────────────────────────────────
+
+message FollowTypeRequest {
+  string     project          = 1;
+  string     repo             = 2;
+  string     schema_path      = 3;
+  string     declaration_name = 4;  // the declaration containing the field
+  string     field_name       = 5;  // the field whose type to follow
+  VersionRef at               = 6;
+}
+
+message FollowTypeResponse {
+  // The schema and declaration where the field's type is defined.
+  // May be in a different project/repo (cross-repo import).
+  string resolved_project     = 1;
+  string resolved_repo        = 2;
+  string resolved_schema_path = 3;
+  string resolved_commit      = 4;  // the pinned import commit that was followed
+  DeclSummary summary         = 5;
+  bytes       detail          = 6;
+}
+
+// ── ListDependencies ──────────────────────────────────────────────────────────
+
+message ListDependenciesRequest {
+  string     project     = 1;
+  string     repo        = 2;
+  string     schema_path = 3;
+  VersionRef at          = 4;
+  // If true, return the transitive closure (all transitive imports).
+  // If false (default), return only direct imports.
+  bool       transitive  = 5;
+}
+
+message ListDependenciesResponse {
+  repeated DependencyEntry dependencies = 1;
+}
+
+message DependencyEntry {
+  string importing_schema  = 1;
+  string importing_decl    = 2;
+  string imported_project  = 3;
+  string imported_repo     = 4;
+  string imported_schema   = 5;
+  string imported_decl     = 6;
+  string resolved_commit   = 7;  // the pinned commit hash
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+message SearchRequest {
+  string   query   = 1;  // declaration name prefix to search for
+  // Optional scope filters. If omitted, searches all projects/repos visible to caller.
+  string   project = 2;
+  string   repo    = 3;
+  DeclKind kind    = 4;  // filter by kind; UNSPECIFIED = all kinds
+  uint32   limit   = 5;  // max results; default 50, max 200
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+message SearchResult {
+  string      project     = 1;
+  string      repo        = 2;
+  string      schema_path = 3;
+  DeclSummary declaration = 4;
+}

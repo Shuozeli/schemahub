@@ -1,0 +1,59 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+service AdminService {
+  // Run garbage collection. Removes unreachable objects older than the
+  // configured age threshold. Non-blocking: returns immediately with stats.
+  rpc RunGC(RunGCRequest) returns (RunGCResponse);
+
+  // Rebuild the deps/ and index/ derived indices by scanning all reachable blobs.
+  // Use when an index is suspected to be corrupted or out of sync.
+  // This is a slow operation on large repos.
+  rpc RebuildIndex(RebuildIndexRequest) returns (RebuildIndexResponse);
+
+  // Returns the live server configuration (limits, thresholds, backend info).
+  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse);
+}
+
+message RunGCRequest {
+  // Optional: restrict GC to objects belonging to one project/repo.
+  // If empty, GC runs across all projects/repos.
+  string project = 1;
+  string repo    = 2;
+  // If true, report what would be deleted without deleting anything.
+  bool   dry_run = 3;
+}
+
+message RunGCResponse {
+  uint64 objects_scanned   = 1;
+  uint64 objects_deleted   = 2;
+  uint64 bytes_reclaimed   = 3;
+  uint64 pending_entries_cleaned = 4;
+  uint64 idempotency_entries_cleaned = 5;
+}
+
+message RebuildIndexRequest {
+  string project = 1;
+  string repo    = 2;
+}
+
+message RebuildIndexResponse {
+  uint64 blobs_scanned     = 1;
+  uint64 index_entries_written = 2;
+  uint64 deps_entries_written  = 3;
+}
+
+message GetServerConfigRequest {}
+
+message GetServerConfigResponse {
+  uint32 max_ops_per_transaction    = 1;
+  uint32 max_schemas_per_transaction = 2;
+  uint32 transaction_timeout_secs   = 3;
+  uint32 pending_cleanup_threshold_secs = 4;
+  uint32 idempotency_ttl_hours      = 5;
+  uint32 gc_age_threshold_hours     = 6;
+  string storage_backend            = 7;  // e.g. "redb"
+  string server_version             = 8;
+}

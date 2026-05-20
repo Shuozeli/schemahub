@@ -1,0 +1,182 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/common.proto";
+
+service RefService {
+  // ── Commits ─────────────────────────────────────────────────────────────────
+  rpc GetCommit(GetCommitRequest) returns (GetCommitResponse);
+  // Streams commits in reverse chronological order (newest first).
+  // Terminate the stream when the client has received enough (standard gRPC cancellation).
+  rpc ListCommits(ListCommitsRequest) returns (stream CommitInfo);
+  // Returns the semantic diff between two refs (or two commits).
+  rpc Diff(DiffRequest) returns (DiffResponse);
+
+  // ── Branches ────────────────────────────────────────────────────────────────
+  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
+  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse);
+  rpc ListBranches(ListBranchesRequest) returns (ListBranchesResponse);
+  rpc GetBranch(GetBranchRequest) returns (GetBranchResponse);
+
+  // ── Tags ─────────────────────────────────────────────────────────────────────
+  rpc CreateTag(CreateTagRequest) returns (CreateTagResponse);
+  rpc DeleteTag(DeleteTagRequest) returns (DeleteTagResponse);
+  rpc ListTags(ListTagsRequest) returns (ListTagsResponse);
+
+  // ── Merge ────────────────────────────────────────────────────────────────────
+  // Fast-forward merge only in v1.
+  // Returns MergeConflictDetail in status details if not fast-forwardable.
+  rpc Merge(MergeRequest) returns (MergeResponse);
+}
+
+// ── Commits ───────────────────────────────────────────────────────────────────
+
+message GetCommitRequest {
+  string project = 1;
+  string repo    = 2;
+  string commit  = 3;  // commit hash
+}
+
+message GetCommitResponse {
+  CommitInfo commit = 1;
+}
+
+message ListCommitsRequest {
+  string     project = 1;
+  string     repo    = 2;
+  VersionRef from    = 3;  // start walking from here (default: HEAD of default branch)
+  // Optional: stop when this ref is reached (exclusive). Used to list only the
+  // commits on a feature branch: from=feature/xyz, stop_at=main.
+  string     stop_at_commit = 4;
+  // Optional: filter to commits that touched a specific schema file.
+  string     schema_path    = 5;
+}
+// Response: stream of CommitInfo, newest first.
+
+message DiffRequest {
+  string project = 1;
+  string repo    = 2;
+  // Two sides of the diff. Typically "base" is main and "head" is a feature branch.
+  VersionRef base = 3;
+  VersionRef head = 4;
+  // Optional: restrict diff to one schema file.
+  string schema_path = 5;
+}
+
+message DiffResponse {
+  repeated SchemaDiff schema_diffs = 1;
+}
+
+message SchemaDiff {
+  string schema_path   = 1;
+  // Each entry is a DeclarationChange for one top-level declaration.
+  repeated DeclarationChange changes = 2;
+}
+
+message DeclarationChange {
+  string change_type = 1;  // "added", "removed", "modified"
+  string decl_name   = 2;
+  // Format-specific change detail, opaque to the client UI layer.
+  // Deserialize with the appropriate client-side plugin library.
+  bytes  detail      = 3;
+}
+
+// ── Branches ──────────────────────────────────────────────────────────────────
+
+message CreateBranchRequest {
+  string project   = 1;
+  string repo      = 2;
+  string name      = 3;
+  // Start the branch from this ref. Defaults to the default branch HEAD.
+  VersionRef from  = 4;
+}
+
+message CreateBranchResponse {
+  BranchInfo branch = 1;
+}
+
+message DeleteBranchRequest {
+  string project = 1;
+  string repo    = 2;
+  string name    = 3;
+  // Protected branches cannot be deleted; returns FAILED_PRECONDITION.
+}
+
+message DeleteBranchResponse {}
+
+message ListBranchesRequest {
+  string project      = 1;
+  string repo         = 2;
+  string name_prefix  = 3;  // optional filter; e.g. "feature/" to list feature branches
+}
+
+message ListBranchesResponse {
+  repeated BranchInfo branches = 1;
+}
+
+message GetBranchRequest {
+  string project = 1;
+  string repo    = 2;
+  string name    = 3;
+}
+
+message GetBranchResponse {
+  BranchInfo branch = 1;
+}
+
+// ── Tags ──────────────────────────────────────────────────────────────────────
+
+message CreateTagRequest {
+  string     project  = 1;
+  string     repo     = 2;
+  string     name     = 3;
+  VersionRef target   = 4;  // commit/branch/tag to tag
+  // If message is set, an annotated tag object is created.
+  // If message is empty, a lightweight tag (ref only) is created.
+  string     message  = 5;
+}
+
+message CreateTagResponse {
+  TagInfo tag = 1;
+}
+
+message DeleteTagRequest {
+  string project = 1;
+  string repo    = 2;
+  string name    = 3;
+  // Requires --force equivalent (force=true) because tags are immutable.
+  // Returns FAILED_PRECONDITION if force is not set.
+  bool   force   = 4;
+}
+
+message DeleteTagResponse {}
+
+message ListTagsRequest {
+  string project     = 1;
+  string repo        = 2;
+  string name_prefix = 3;
+}
+
+message ListTagsResponse {
+  repeated TagInfo tags = 1;
+}
+
+// ── Merge ─────────────────────────────────────────────────────────────────────
+
+message MergeRequest {
+  string project         = 1;
+  string repo            = 2;
+  string source_branch   = 3;  // the branch to merge in
+  string target_branch   = 4;  // the branch to merge into
+  string base_revision   = 5;  // current HEAD of target_branch (OCC)
+  string idempotency_key = 6;
+  string message         = 7;  // optional; used in commit message if a merge commit is created
+}
+
+message MergeResponse {
+  // The commit that target_branch now points to after the merge.
+  // For fast-forward: this is the former HEAD of source_branch.
+  string new_commit = 1;
+}

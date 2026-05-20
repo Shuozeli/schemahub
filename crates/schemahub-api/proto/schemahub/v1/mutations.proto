@@ -1,0 +1,320 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+// ── Protobuf mutations ────────────────────────────────────────────────────────
+
+// All Protobuf mutations on one schema file.
+message ProtobufMutation {
+  // The schema file to mutate, e.g. "user.proto"
+  string schema_path = 1;
+
+  oneof operation {
+    // Field mutations
+    ProtoAddField      add_field      = 2;
+    ProtoRemoveField   remove_field   = 3;
+    ProtoRenameField   rename_field   = 4;
+    ProtoChangeFieldType change_field_type = 5;
+    ProtoChangeFieldLabel change_field_label = 6;
+    ProtoReorderFields reorder_fields = 7;
+
+    // Message mutations
+    ProtoAddMessage    add_message    = 10;
+    ProtoRemoveMessage remove_message = 11;
+    ProtoRenameMessage rename_message = 12;
+
+    // Enum mutations
+    ProtoAddEnum       add_enum       = 20;
+    ProtoRemoveEnum    remove_enum    = 21;
+    ProtoAddEnumValue  add_enum_value = 22;
+    ProtoRemoveEnumValue remove_enum_value = 23;
+    ProtoRenameEnumValue rename_enum_value = 24;
+
+    // Service mutations
+    ProtoAddService    add_service    = 30;
+    ProtoRemoveService remove_service = 31;
+    ProtoAddRpc        add_rpc        = 32;
+    ProtoRemoveRpc     remove_rpc     = 33;
+    ProtoRenameRpc     rename_rpc     = 34;
+
+    // Import mutations
+    ProtoUpdateImport  update_import  = 40;
+  }
+}
+
+// ── Protobuf field mutations ──────────────────────────────────────────────────
+
+message ProtoAddField {
+  string message_name  = 1;  // the message to add a field to
+  string field_name    = 2;
+  // Fully qualified type name: "string", "int32", "bytes",
+  // or a message/enum type like "payments.v1.Currency".
+  string field_type    = 3;
+  uint32 field_number  = 4;  // must not be in use or reserved
+  bool   repeated      = 5;
+  string doc_comment   = 6;
+}
+
+message ProtoRemoveField {
+  string message_name = 1;
+  string field_name   = 2;
+  // Server automatically adds a reservation for this field's number and name.
+  // No separate ReserveField mutation is needed.
+}
+
+message ProtoRenameField {
+  string message_name   = 1;
+  string old_field_name = 2;
+  string new_field_name = 3;
+}
+
+message ProtoChangeFieldType {
+  string message_name = 1;
+  string field_name   = 2;
+  // Must be wire-type compatible per the allowlist in design.md Section 4.2.
+  // Cross-wire-type changes are rejected at validation time.
+  string new_type     = 3;
+}
+
+message ProtoChangeFieldLabel {
+  string message_name = 1;
+  string field_name   = 2;
+  // "optional" or "repeated". Changing from repeated to optional is breaking;
+  // the validator enforces compatibility rules.
+  string new_label    = 3;
+}
+
+message ProtoReorderFields {
+  string message_name        = 1;
+  // All field names in the desired new order. Must be a permutation of all
+  // current field names. Field numbers are unchanged by reordering.
+  repeated string field_order = 2;
+}
+
+// ── Protobuf message mutations ────────────────────────────────────────────────
+
+message ProtoAddMessage {
+  string message_name = 1;
+  string doc_comment  = 2;
+  // Fields are added via subsequent ProtoAddField mutations.
+}
+
+message ProtoRemoveMessage {
+  string message_name = 1;
+  // Rejected if any field in the same schema references this message type,
+  // unless --force is set.
+}
+
+message ProtoRenameMessage {
+  string old_name    = 1;
+  string new_name    = 2;
+  // Automatically updates all same-file references. Cross-file references
+  // are flagged; the caller must issue UpdateImport or update referencing schemas.
+}
+
+// ── Protobuf enum mutations ───────────────────────────────────────────────────
+
+message ProtoAddEnum {
+  string enum_name   = 1;
+  string doc_comment = 2;
+  // The first value added must have number 0 (proto3 requirement).
+}
+
+message ProtoRemoveEnum {
+  string enum_name = 1;
+}
+
+message ProtoAddEnumValue {
+  string enum_name   = 1;
+  string value_name  = 2;
+  int32  number      = 3;
+  string doc_comment = 4;
+}
+
+message ProtoRemoveEnumValue {
+  string enum_name  = 1;
+  string value_name = 2;
+}
+
+message ProtoRenameEnumValue {
+  string enum_name      = 1;
+  string old_value_name = 2;
+  string new_value_name = 3;
+}
+
+// ── Protobuf service mutations ────────────────────────────────────────────────
+
+message ProtoAddService {
+  string service_name = 1;
+  string doc_comment  = 2;
+}
+
+message ProtoRemoveService {
+  string service_name = 1;
+}
+
+message ProtoAddRpc {
+  string service_name    = 1;
+  string rpc_name        = 2;
+  // Fully qualified message names, e.g. "payments.v1.GetUserRequest"
+  string request_type    = 3;
+  string response_type   = 4;
+  bool   client_streaming = 5;
+  bool   server_streaming = 6;
+  string doc_comment     = 7;
+}
+
+message ProtoRemoveRpc {
+  string service_name = 1;
+  string rpc_name     = 2;
+}
+
+message ProtoRenameRpc {
+  string service_name = 1;
+  string old_rpc_name = 2;
+  string new_rpc_name = 3;
+}
+
+// ── Protobuf import mutations ─────────────────────────────────────────────────
+
+message ProtoUpdateImport {
+  // Logical path of the imported schema: "project/repo/schema.proto"
+  string import_path  = 1;
+  // Exactly one of the following must be set.
+  // If none are set, re-pins to the latest commit on the imported schema's default branch.
+  string to_commit    = 2;  // pin to a specific commit hash
+  string to_tag       = 3;  // pin to a specific tag name
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FlatBuffers mutations
+// ═════════════════════════════════════════════════════════════════════════════
+
+message FlatBuffersMutation {
+  string schema_path = 1;  // e.g. "payments.fbs"
+
+  oneof operation {
+    // Field mutations (tables only)
+    FbsAddField      add_field      = 2;
+    FbsDeprecateField deprecate_field = 3;
+    FbsRenameField   rename_field   = 4;
+    // Note: RemoveField and ReorderFields are always rejected for FlatBuffers.
+
+    // Table mutations
+    FbsAddTable      add_table      = 10;
+    FbsRemoveTable   remove_table   = 11;
+    FbsRenameTable   rename_table   = 12;
+
+    // Enum mutations
+    FbsAddEnum       add_enum       = 20;
+    FbsAddEnumValue  add_enum_value = 21;
+
+    // Union mutations
+    FbsAddUnion      add_union      = 30;
+
+    // Import mutations
+    FbsUpdateImport  update_import  = 40;
+  }
+}
+
+// ── FlatBuffers field mutations ───────────────────────────────────────────────
+
+message FbsAddField {
+  string table_name    = 1;
+  string field_name    = 2;
+  // FlatBuffers scalar type or table/enum/union name.
+  // e.g. "string", "int32", "float64", "bool", "PaymentStatus", "[Order]"
+  string field_type    = 3;
+  // Default value for scalar fields only. Stored as string, parsed by the plugin.
+  // Fields at their default value are not written to the buffer.
+  string default_value = 4;
+  string doc_comment   = 5;
+  // The field is always appended at the end of the table (highest slot index).
+  // The caller cannot specify a position; the validator enforces this.
+}
+
+message FbsDeprecateField {
+  // Marks the field as deprecated. Its slot index is preserved.
+  // Use instead of RemoveField (which is permanently rejected for FlatBuffers).
+  string table_name = 1;
+  string field_name = 2;
+}
+
+message FbsRenameField {
+  // Safe: FlatBuffers wire identity is slot index, not name.
+  string table_name     = 1;
+  string old_field_name = 2;
+  string new_field_name = 3;
+}
+
+// ── FlatBuffers table mutations ───────────────────────────────────────────────
+
+message FbsAddTable {
+  string table_name  = 1;
+  string doc_comment = 2;
+  // Structs cannot be added via the mutation API; they are immutable once
+  // defined and should be included in CreateSchema / UpdateSchema source.
+}
+
+message FbsRemoveTable {
+  string table_name = 1;
+}
+
+message FbsRenameTable {
+  string old_name = 1;
+  string new_name = 2;
+}
+
+// ── FlatBuffers enum mutations ────────────────────────────────────────────────
+
+message FbsAddEnum {
+  string enum_name   = 1;
+  // The underlying integer type: "int8", "int16", "int32", "int64",
+  // "uint8", "uint16", "uint32", "uint64"
+  string base_type   = 2;
+  string doc_comment = 3;
+}
+
+message FbsAddEnumValue {
+  string enum_name   = 1;
+  string value_name  = 2;
+  int64  value       = 3;
+  string doc_comment = 4;
+}
+
+// ── FlatBuffers union mutations ───────────────────────────────────────────────
+
+message FbsAddUnion {
+  string          union_name   = 1;
+  repeated string member_types = 2;  // table names that are union members
+  string          doc_comment  = 3;
+}
+
+// ── FlatBuffers import mutations ──────────────────────────────────────────────
+
+message FbsUpdateImport {
+  string import_path = 1;  // "project/repo/schema.fbs"
+  string to_commit   = 2;
+  string to_tag      = 3;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// OpenAPI mutations (v1: whole-document only)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// In v1, the only OpenAPI mutation is a whole-document push.
+// This is called internally by UpdateSchema; clients use UpdateSchema directly.
+// Granular operations (AddOperation, RemoveParameter, etc.) are deferred to v2.
+message OpenApiMutation {
+  string schema_path  = 1;
+  // Exactly one variant must be set.
+  oneof operation {
+    OpenApiPushDocument push_document = 2;
+  }
+}
+
+message OpenApiPushDocument {
+  // Full YAML or JSON source text of the new document version.
+  string source = 1;
+}

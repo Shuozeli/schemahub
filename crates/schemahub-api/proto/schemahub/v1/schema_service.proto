@@ -1,0 +1,131 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/common.proto";
+import "schemahub/v1/mutations.proto";
+
+service SchemaService {
+  // ── Schema lifecycle ────────────────────────────────────────────────────────
+  // Create a new schema file on a branch.
+  // Returns ALREADY_EXISTS if the schema name exists on the branch.
+  rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
+
+  // Update an existing schema (whole-document push for all formats;
+  // also the only update path for OpenAPI in v1).
+  // Returns NOT_FOUND if the schema does not exist.
+  // Runs compatibility check if the branch is protected.
+  rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
+
+  // Delete a schema from a branch. Rejected if other schemas on the same branch
+  // import it, unless --force is set.
+  rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
+
+  // ── Mutations ───────────────────────────────────────────────────────────────
+  // Apply a single granular mutation to one declaration.
+  rpc ApplyMutation(ApplyMutationRequest) returns (ApplyMutationResponse);
+
+  // Apply a sequence of mutations across one or more schemas atomically.
+  // All schemas in one transaction must use the same format.
+  // Limits: <= 500 operations, <= 20 schemas, 30-second server-side timeout.
+  rpc ApplyTransaction(ApplyTransactionRequest) returns (ApplyTransactionResponse);
+}
+
+// ── CreateSchema ──────────────────────────────────────────────────────────────
+
+message CreateSchemaRequest {
+  string       project     = 1;
+  string       repo        = 2;
+  string       branch      = 3;
+  string       schema_name = 4;  // e.g. "user.proto"
+  SchemaFormat format      = 5;  // required; server does not infer from content
+  string       source      = 6;  // full source text
+  string       base_revision    = 7;  // current HEAD commit hash (OCC)
+  string       idempotency_key  = 8;
+}
+
+message CreateSchemaResponse {
+  string new_commit = 1;  // hash of the commit created
+}
+
+// ── UpdateSchema ──────────────────────────────────────────────────────────────
+
+message UpdateSchemaRequest {
+  string project         = 1;
+  string repo            = 2;
+  string branch          = 3;
+  string schema_name     = 4;
+  string source          = 5;  // full source text of the new version
+  string base_revision   = 6;
+  string idempotency_key = 7;
+  bool   force           = 8;  // skip compatibility check; requires Maintainer role
+}
+
+message UpdateSchemaResponse {
+  string new_commit = 1;
+}
+
+// ── DeleteSchema ──────────────────────────────────────────────────────────────
+
+message DeleteSchemaRequest {
+  string project         = 1;
+  string repo            = 2;
+  string branch          = 3;
+  string schema_name     = 4;
+  string base_revision   = 5;
+  string idempotency_key = 6;
+  bool   force           = 7;  // delete even if dependents exist
+}
+
+message DeleteSchemaResponse {
+  string new_commit = 1;
+}
+
+// ── ApplyMutation ─────────────────────────────────────────────────────────────
+
+message ApplyMutationRequest {
+  string project         = 1;
+  string repo            = 2;
+  string branch          = 3;
+  string base_revision   = 4;
+  string idempotency_key = 5;
+  bool   force           = 6;
+  oneof operation {
+    ProtobufMutation    protobuf_op = 7;
+    FlatBuffersMutation fbs_op      = 8;
+    OpenApiMutation     openapi_op  = 9;
+  }
+}
+
+message ApplyMutationResponse {
+  string new_commit = 1;
+}
+
+// ── ApplyTransaction ──────────────────────────────────────────────────────────
+
+message ApplyTransactionRequest {
+  string project         = 1;
+  string repo            = 2;
+  string branch          = 3;
+  string base_revision   = 4;
+  string idempotency_key = 5;
+  bool   force           = 6;
+  // All operations must target the same format.
+  // Mixed-format transactions are rejected with INVALID_ARGUMENT.
+  repeated TransactionOp operations = 7;
+}
+
+// One operation within a transaction. The oneof mirrors ApplyMutationRequest
+// but without the top-level fields (project, repo, branch) which are shared.
+message TransactionOp {
+  oneof operation {
+    ProtobufMutation    protobuf_op = 1;
+    FlatBuffersMutation fbs_op      = 2;
+    // OpenApi granular ops are v2; use UpdateSchema for OpenAPI in v1.
+  }
+}
+
+message ApplyTransactionResponse {
+  string new_commit = 1;
+}
