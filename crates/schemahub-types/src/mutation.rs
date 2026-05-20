@@ -10,6 +10,10 @@ pub struct Mutation {
     pub schema_path: SchemaPath,
     /// Which plugin handles this mutation, e.g. "protobuf", "flatbuffers", "openapi".
     pub format_id: String,
+    /// The name of the declaration to load from the schema tree before calling
+    /// apply_mutation. For new declarations (e.g. ProtoAddMessage), this is the
+    /// name to create. For existing ones it's the lookup key.
+    pub declaration_name: String,
     /// Format-specific operation bytes. Deserialized only by the plugin.
     pub operation: Bytes,
 }
