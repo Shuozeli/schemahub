@@ -6,3 +6,15 @@ edition = "2021"
 [[bin]]
 name = "schemahub"
 path = "src/main.rs"
+
+[dependencies]
+schemahub-api = { path = "../../crates/schemahub-api" }
+tokio    = { workspace = true }
+tonic    = { workspace = true }
+prost    = { workspace = true }
+clap     = { workspace = true }
+anyhow   = { workspace = true }
+serde    = { workspace = true }
+toml     = { workspace = true }
+bytes    = { workspace = true }
+uuid     = { workspace = true }

@@ -285,7 +285,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use bytes::Bytes;
     use schemahub_storage::RedbBackend;
@@ -305,8 +304,8 @@ mod tests {
     use crate::version_control::commit::create_commit;
 
     fn ephemeral_storage() -> RedbBackend {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let path = format!("/tmp/schemahub-core-test-{}.redb", COUNTER.fetch_add(1, Ordering::Relaxed));
+        // Use a UUID path so stale files from previous test runs never interfere.
+        let path = format!("/tmp/schemahub-core-test-{}.redb", Uuid::new_v4());
         RedbBackend::open(&path).unwrap()
     }
 

@@ -115,10 +115,11 @@ impl StorageBackend for RedbBackend {
                 .map(|v| v.value().to_vec());
             match current_bytes {
                 Some(bytes) => {
-                        let expected_hex = expected.to_hex();
+                    let expected_hex = expected.to_hex();
                     let current_hex = std::str::from_utf8(&bytes).unwrap_or("");
                     if current_hex == expected_hex {
-                        table.insert(key, new.to_hex().as_bytes())?;
+                        let new_hex = new.to_hex();
+                        table.insert(key, new_hex.as_bytes())?;
                         true
                     } else {
                         false
