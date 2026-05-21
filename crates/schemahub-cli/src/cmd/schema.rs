@@ -1,7 +1,9 @@
 use anyhow::{bail, Context};
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
-    schema_service_client::SchemaServiceClient, CreateSchemaRequest, SchemaFormat,
+    codegen_service_client::CodegenServiceClient,
+    schema_service_client::SchemaServiceClient,
+    CreateSchemaRequest, GetDescriptorsRequest, SchemaFormat, VersionRef,
 };
 use std::path::PathBuf;
 use tonic::transport::Channel;
@@ -146,7 +148,25 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
             println!("Updated commit: {}", resp.into_inner().new_commit);
         }
         SchemaAction::Pull { schema_path, branch } => {
-            println!("TODO: pull {schema_path} from branch {branch}");
+            // schema_path is "project/repo/schema_name"
+            let parts = parse_schema_path_3(&schema_path)?;
+            let mut client = CodegenServiceClient::new(channel);
+            let resp = client
+                .get_descriptors(GetDescriptorsRequest {
+                    project: parts.0,
+                    repo: parts.1,
+                    schema_path: parts.2,
+                    at: Some(VersionRef {
+                        r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(branch)),
+                    }),
+                })
+                .await
+                .context("GetDescriptors RPC")?;
+
+            let inner = resp.into_inner();
+            let source = String::from_utf8(inner.descriptor_bytes.to_vec())
+                .unwrap_or_else(|_| "(binary descriptor — not printable as UTF-8)".to_string());
+            print!("{source}");
         }
         SchemaAction::Delete {
             schema_path,

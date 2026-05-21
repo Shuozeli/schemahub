@@ -2,7 +2,7 @@ mod client;
 mod cmd;
 mod config;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use cmd::{branch, codegen, field, log, schema, tag};
 
@@ -39,16 +39,28 @@ enum Commands {
     Log(log::LogArgs),
     /// Code generation
     Codegen(codegen::CodegenArgs),
-    /// Print diff between two refs (not yet implemented)
+    /// Print diff between two refs
     Diff {
+        /// project/repo
         repo: String,
+        /// base..head (e.g. "main..feature/xyz" or two branch names separated by "..")
         range: String,
+        /// Optional: restrict diff to one schema file
+        #[arg(long, default_value = "")]
+        schema_path: String,
     },
-    /// Fast-forward merge a branch (not yet implemented)
+    /// Fast-forward merge a branch
     Merge {
+        /// source branch name
         source: String,
+        /// target branch name
         #[arg(long)]
         into: String,
+        /// project/repo
+        #[arg(long)]
+        repo: String,
+        #[arg(long, default_value = "")]
+        base_revision: String,
     },
 }
 
@@ -88,12 +100,81 @@ async fn main() -> anyhow::Result<()> {
             let ch = client::build_channel(&cfg.server).await?;
             codegen::run(args, ch).await
         }
-        Commands::Diff { repo, range } => {
-            println!("TODO: diff {repo} {range}");
+        Commands::Diff { repo, range, schema_path } => {
+            let parts: Vec<&str> = repo.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                bail!("repo must be 'project/repo'");
+            }
+            let (project, repo_name) = (parts[0].to_string(), parts[1].to_string());
+
+            // Parse range as "base..head"
+            let range_parts: Vec<&str> = range.splitn(2, "..").collect();
+            if range_parts.len() != 2 {
+                bail!("range must be 'base..head'");
+            }
+            let (base_ref, head_ref) = (range_parts[0].to_string(), range_parts[1].to_string());
+
+            use schemahub_api::schemahub_v1::{
+                ref_service_client::RefServiceClient, DiffRequest, VersionRef,
+                version_ref::Ref as VersionRefKind,
+            };
+            let ch = client::build_channel(&cfg.server).await?;
+            let mut client = RefServiceClient::new(ch);
+            let resp = client
+                .diff(DiffRequest {
+                    project,
+                    repo: repo_name,
+                    base: Some(VersionRef { r#ref: Some(VersionRefKind::Branch(base_ref)) }),
+                    head: Some(VersionRef { r#ref: Some(VersionRefKind::Branch(head_ref)) }),
+                    schema_path,
+                })
+                .await
+                .context("Diff RPC")?;
+
+            let diffs = resp.into_inner().schema_diffs;
+            if diffs.is_empty() {
+                println!("(no changes)");
+            }
+            for schema_diff in diffs {
+                println!("schema: {}", schema_diff.schema_path);
+                for change in schema_diff.changes {
+                    println!("  {} {}", change.change_type, change.decl_name);
+                }
+            }
             Ok(())
         }
-        Commands::Merge { source, into } => {
-            println!("TODO: merge {source} --into {into}");
+        Commands::Merge { source, into, repo, base_revision } => {
+            let parts: Vec<&str> = repo.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                bail!("repo must be 'project/repo'");
+            }
+            let (project, repo_name) = (parts[0].to_string(), parts[1].to_string());
+
+            use schemahub_api::schemahub_v1::{
+                ref_service_client::RefServiceClient, MergeRequest,
+            };
+            use uuid::Uuid;
+            let ch = client::build_channel(&cfg.server).await?;
+            let mut client = RefServiceClient::new(ch);
+            let resp = client
+                .merge(MergeRequest {
+                    project,
+                    repo: repo_name,
+                    source_branch: source.clone(),
+                    target_branch: into.clone(),
+                    base_revision,
+                    idempotency_key: Uuid::new_v4().to_string(),
+                    message: String::new(),
+                })
+                .await
+                .context("Merge RPC")?;
+
+            println!(
+                "Merged '{}' into '{}': {}",
+                source,
+                into,
+                resp.into_inner().new_commit
+            );
             Ok(())
         }
     }
