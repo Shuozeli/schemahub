@@ -9,11 +9,13 @@ use tonic::{Request, Response, Status};
 use schemahub_api::schemahub_v1::{
     ApplyMutationRequest, ApplyMutationResponse, ApplyTransactionRequest,
     ApplyTransactionResponse, CreateSchemaRequest, CreateSchemaResponse, DeleteSchemaRequest,
-    DeleteSchemaResponse, FlatBuffersMutation, OpenApiMutation, ProtobufMutation,
+    DeleteSchemaResponse, FlatBuffersMutation, ProtobufMutation,
     UpdateSchemaRequest, UpdateSchemaResponse,
     apply_mutation_request::Operation as MutationOperation,
     schema_service_server::SchemaService,
+    transaction_op::Operation as TxOp,
 };
+use schemahub_core::mutation::batch::BatchMutateRequest;
 
 use crate::error::core_to_status;
 
@@ -189,9 +191,73 @@ impl SchemaService for SchemaServiceImpl {
 
     async fn apply_transaction(
         &self,
-        _request: Request<ApplyTransactionRequest>,
+        request: Request<ApplyTransactionRequest>,
     ) -> Result<Response<ApplyTransactionResponse>, Status> {
-        Err(Status::unimplemented("ApplyTransaction not yet implemented"))
+        let req = request.into_inner();
+
+        if req.operations.is_empty() {
+            return Err(Status::invalid_argument(
+                "ApplyTransactionRequest: operations must not be empty",
+            ));
+        }
+
+        let mut mutations: Vec<Mutation> = Vec::new();
+
+        for tx_op in req.operations {
+            let mutation = match tx_op.operation {
+                Some(TxOp::ProtobufOp(ref proto_mut)) => {
+                    let schema_path_str = proto_mut.schema_path.clone();
+                    let decl_name = extract_proto_decl_name(proto_mut);
+                    let bytes = encode_proto(proto_mut);
+                    Mutation {
+                        schema_path: SchemaPath::new(
+                            req.project.clone(),
+                            req.repo.clone(),
+                            schema_path_str,
+                        ),
+                        format_id: "protobuf".to_string(),
+                        declaration_name: decl_name,
+                        operation: bytes,
+                    }
+                }
+                Some(TxOp::FbsOp(ref fbs_mut)) => {
+                    let schema_path_str = fbs_mut.schema_path.clone();
+                    let decl_name = extract_fbs_decl_name(fbs_mut);
+                    let bytes = encode_proto(fbs_mut);
+                    Mutation {
+                        schema_path: SchemaPath::new(
+                            req.project.clone(),
+                            req.repo.clone(),
+                            schema_path_str,
+                        ),
+                        format_id: "flatbuffers".to_string(),
+                        declaration_name: decl_name,
+                        operation: bytes,
+                    }
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "TransactionOp: operation oneof must be set",
+                    ));
+                }
+            };
+            mutations.push(mutation);
+        }
+
+        let batch_req = BatchMutateRequest {
+            project: req.project,
+            repo: req.repo,
+            branch: req.branch,
+            base_revision: req.base_revision,
+            idempotency_key: req.idempotency_key,
+            force: req.force,
+            mutations,
+            token: None,
+            author: "schemahub-server".to_string(),
+        };
+
+        let new_commit = self.core.apply_mutations(batch_req).map_err(core_to_status)?;
+        Ok(Response::new(ApplyTransactionResponse { new_commit }))
     }
 }
 

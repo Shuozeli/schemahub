@@ -1,16 +1,19 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use prost_types::Timestamp;
 use schemahub_core::Core;
+use schemahub_core::objects::{KIND_BLOB, KIND_SUBTREE};
 use schemahub_types::Hash;
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1::{
     BranchInfo, CommitInfo, CreateBranchRequest, CreateBranchResponse, CreateTagRequest,
-    CreateTagResponse, DeleteBranchRequest, DeleteBranchResponse, DeleteTagRequest,
-    DeleteTagResponse, DiffRequest, DiffResponse, GetBranchRequest, GetBranchResponse,
-    GetCommitRequest, GetCommitResponse, ListBranchesRequest, ListBranchesResponse,
-    ListCommitsRequest, ListTagsRequest, ListTagsResponse, MergeRequest, MergeResponse, TagInfo,
+    CreateTagResponse, DeclarationChange, DeleteBranchRequest, DeleteBranchResponse,
+    DeleteTagRequest, DeleteTagResponse, DiffRequest, DiffResponse, GetBranchRequest,
+    GetBranchResponse, GetCommitRequest, GetCommitResponse, ListBranchesRequest,
+    ListBranchesResponse, ListCommitsRequest, ListTagsRequest, ListTagsResponse, MergeRequest,
+    MergeResponse, SchemaDiff, TagInfo,
     ref_service_server::RefService,
     version_ref::Ref as VersionRefKind,
 };
@@ -139,9 +142,164 @@ impl RefService for RefServiceImpl {
 
     async fn diff(
         &self,
-        _request: Request<DiffRequest>,
+        request: Request<DiffRequest>,
     ) -> Result<Response<DiffResponse>, Status> {
-        Err(Status::unimplemented("Diff not yet implemented"))
+        let req = request.into_inner();
+
+        // Resolve base and head commit hashes.
+        let base_hash = resolve_version_ref(&self.core, &req.project, &req.repo, req.base)?;
+        let head_hash = resolve_version_ref(&self.core, &req.project, &req.repo, req.head)?;
+
+        if base_hash == head_hash {
+            return Ok(Response::new(DiffResponse { schema_diffs: vec![] }));
+        }
+
+        // Read root trees for both commits.
+        let base_commit = self.core
+            .get_commit(&req.project, &req.repo, &base_hash.to_hex())
+            .map_err(core_to_status)?;
+        let head_commit = self.core
+            .get_commit(&req.project, &req.repo, &head_hash.to_hex())
+            .map_err(core_to_status)?;
+
+        let base_tree = {
+            let storage = self.core.storage.as_ref();
+            let commit_obj = schemahub_core::objects::decode_commit(
+                &storage.read_object(&base_hash)
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .ok_or_else(|| Status::not_found("base commit not found"))?,
+            ).map_err(|e| Status::internal(e.to_string()))?;
+            let tree_hash = Hash::from_hex(&commit_obj.tree_hash)
+                .map_err(|_| Status::internal("invalid base tree hash"))?;
+            let tree_data = storage.read_object(&tree_hash)
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("base root tree not found"))?;
+            schemahub_core::objects::decode_tree(&tree_data)
+                .map_err(|e| Status::internal(e.to_string()))?
+        };
+        let head_tree = {
+            let storage = self.core.storage.as_ref();
+            let commit_obj = schemahub_core::objects::decode_commit(
+                &storage.read_object(&head_hash)
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .ok_or_else(|| Status::not_found("head commit not found"))?,
+            ).map_err(|e| Status::internal(e.to_string()))?;
+            let tree_hash = Hash::from_hex(&commit_obj.tree_hash)
+                .map_err(|_| Status::internal("invalid head tree hash"))?;
+            let tree_data = storage.read_object(&tree_hash)
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("head root tree not found"))?;
+            schemahub_core::objects::decode_tree(&tree_data)
+                .map_err(|e| Status::internal(e.to_string()))?
+        };
+
+        // Build maps: schema_name → hash for base and head.
+        let base_schemas: HashMap<String, String> = base_tree.entries.iter()
+            .filter(|e| e.kind == KIND_SUBTREE)
+            .map(|e| (e.name.clone(), e.hash.clone()))
+            .collect();
+        let head_schemas: HashMap<String, String> = head_tree.entries.iter()
+            .filter(|e| e.kind == KIND_SUBTREE)
+            .map(|e| (e.name.clone(), e.hash.clone()))
+            .collect();
+
+        let mut schema_diffs = Vec::new();
+
+        // Determine which schemas to diff.
+        let mut all_schema_names: Vec<String> = base_schemas.keys()
+            .chain(head_schemas.keys())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        all_schema_names.sort();
+
+        if !req.schema_path.is_empty() {
+            all_schema_names.retain(|n| n == &req.schema_path);
+        }
+
+        let storage = self.core.storage.as_ref();
+
+        for schema_name in all_schema_names {
+            let base_hash_opt = base_schemas.get(&schema_name);
+            let head_hash_opt = head_schemas.get(&schema_name);
+
+            // Skip schemas that are identical.
+            if base_hash_opt == head_hash_opt {
+                continue;
+            }
+
+            let mut changes = Vec::new();
+
+            // Load declaration-level entries from both trees.
+            let base_decls: HashMap<String, String> = match base_hash_opt {
+                None => HashMap::new(),
+                Some(h) => {
+                    let tree_hash = Hash::from_hex(h)
+                        .map_err(|_| Status::internal(format!("invalid schema tree hash for {schema_name}")))?;
+                    let tree_data = storage.read_object(&tree_hash)
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .unwrap_or_default();
+                    schemahub_core::objects::decode_tree(&tree_data)
+                        .map(|t| t.entries.into_iter()
+                            .filter(|e| e.kind == KIND_BLOB)
+                            .map(|e| (e.name, e.hash))
+                            .collect())
+                        .unwrap_or_default()
+                }
+            };
+            let head_decls: HashMap<String, String> = match head_hash_opt {
+                None => HashMap::new(),
+                Some(h) => {
+                    let tree_hash = Hash::from_hex(h)
+                        .map_err(|_| Status::internal(format!("invalid schema tree hash for {schema_name}")))?;
+                    let tree_data = storage.read_object(&tree_hash)
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .unwrap_or_default();
+                    schemahub_core::objects::decode_tree(&tree_data)
+                        .map(|t| t.entries.into_iter()
+                            .filter(|e| e.kind == KIND_BLOB)
+                            .map(|e| (e.name, e.hash))
+                            .collect())
+                        .unwrap_or_default()
+                }
+            };
+
+            // Find added, removed, and modified declarations.
+            let mut all_decl_names: Vec<String> = base_decls.keys()
+                .chain(head_decls.keys())
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            all_decl_names.sort();
+
+            for decl_name in all_decl_names {
+                let in_base = base_decls.get(&decl_name);
+                let in_head = head_decls.get(&decl_name);
+                let change_type = match (in_base, in_head) {
+                    (None, Some(_)) => "added",
+                    (Some(_), None) => "removed",
+                    (Some(bh), Some(hh)) if bh != hh => "modified",
+                    _ => continue, // identical hash, no change
+                };
+                changes.push(DeclarationChange {
+                    change_type: change_type.to_string(),
+                    decl_name,
+                    detail: vec![],
+                });
+            }
+
+            if !changes.is_empty() {
+                schema_diffs.push(SchemaDiff { schema_path: schema_name, changes });
+            }
+        }
+
+        // Suppress unused variable warnings for commit objects we loaded but only used
+        // for tree retrieval via the storage path.
+        let _ = (base_commit, head_commit);
+
+        Ok(Response::new(DiffResponse { schema_diffs }))
     }
 
     async fn create_branch(
