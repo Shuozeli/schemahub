@@ -68,59 +68,21 @@ impl SchemaService for SchemaServiceImpl {
         // Map SchemaFormat to format_id string.
         let format_id = schema_format_to_id(req.format)?;
 
-        // Encode the source as an OpenApiMutation (push document) for OpenAPI,
-        // or as a ProtobufMutation / FlatBuffersMutation for the others.
-        // For CreateSchema, we always use a whole-document push, so we encode the
-        // source as the appropriate mutation type.
-        let (operation_bytes, decl_name) = match format_id.as_str() {
-            "openapi" => {
-                let op = OpenApiMutation {
-                    schema_path: req.schema_name.clone(),
-                    operation: Some(
-                        schemahub_api::schemahub_v1::open_api_mutation::Operation::PushDocument(
-                            schemahub_api::schemahub_v1::OpenApiPushDocument {
-                                source: req.source.clone(),
-                            },
-                        ),
-                    ),
-                };
-                (encode_proto(&op), "__document__".to_string())
-            }
-            _ => {
-                // For protobuf/flatbuffers, treat the source as the raw bytes
-                // of a whole-file parse. We encode an empty mutation operation
-                // and rely on the plugin to handle it as a PushDocument.
-                // Since the core mutation flow requires a typed operation,
-                // we use the source bytes directly.
-                (
-                    Bytes::from(req.source.into_bytes()),
-                    "__source__".to_string(),
-                )
-            }
-        };
+        let new_commit = self.core
+            .create_schema(
+                &req.project,
+                &req.repo,
+                &req.branch,
+                &req.schema_name,
+                req.source.as_bytes(),
+                &format_id,
+                &req.base_revision,
+                &req.idempotency_key,
+                "schemahub-server",
+                None,
+            )
+            .map_err(core_to_status)?;
 
-        let mutation = Mutation {
-            schema_path: SchemaPath::new(
-                req.project.clone(),
-                req.repo.clone(),
-                req.schema_name.clone(),
-            ),
-            format_id: format_id.clone(),
-            declaration_name: decl_name,
-            operation: operation_bytes,
-        };
-
-        let mutate_req = make_mutate_request(
-            req.project,
-            req.repo,
-            req.branch,
-            req.base_revision,
-            req.idempotency_key,
-            false,
-            mutation,
-        );
-
-        let new_commit = self.core.apply_mutation(mutate_req).map_err(core_to_status)?;
         Ok(Response::new(CreateSchemaResponse { new_commit }))
     }
 
@@ -128,24 +90,47 @@ impl SchemaService for SchemaServiceImpl {
         &self,
         request: Request<UpdateSchemaRequest>,
     ) -> Result<Response<UpdateSchemaResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // UpdateSchema is a whole-document push — we don't have a format in the
-        // request (it's inferred from the existing schema). For now use openapi
-        // detection heuristic or default to protobuf. In practice, the core
-        // would look up the existing schema's format; for v1 we stub this.
-        // We'll encode the source as raw bytes with format_id unknown.
-        // Return Unimplemented for now since we'd need to look up the format.
-        Err(Status::unimplemented(
-            "UpdateSchema: format detection from existing schema not yet implemented",
-        ))
+        let new_commit = self.core
+            .update_schema(
+                &req.project,
+                &req.repo,
+                &req.branch,
+                &req.schema_name,
+                req.source.as_bytes(),
+                &req.base_revision,
+                &req.idempotency_key,
+                req.force,
+                "schemahub-server",
+                None,
+            )
+            .map_err(core_to_status)?;
+
+        Ok(Response::new(UpdateSchemaResponse { new_commit }))
     }
 
     async fn delete_schema(
         &self,
-        _request: Request<DeleteSchemaRequest>,
+        request: Request<DeleteSchemaRequest>,
     ) -> Result<Response<DeleteSchemaResponse>, Status> {
-        Err(Status::unimplemented("DeleteSchema not yet implemented"))
+        let req = request.into_inner();
+
+        let new_commit = self.core
+            .delete_schema(
+                &req.project,
+                &req.repo,
+                &req.branch,
+                &req.schema_name,
+                &req.base_revision,
+                &req.idempotency_key,
+                req.force,
+                "schemahub-server",
+                None,
+            )
+            .map_err(core_to_status)?;
+
+        Ok(Response::new(DeleteSchemaResponse { new_commit }))
     }
 
     async fn apply_mutation(

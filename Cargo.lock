@@ -1031,6 +1031,7 @@ dependencies = [
  "bytes",
  "clap",
  "prost",
+ "prost-types",
  "schemahub-api",
  "schemahub-core",
  "schemahub-plugin-flatbuffers",
