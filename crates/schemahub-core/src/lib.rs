@@ -881,6 +881,197 @@ impl Core {
 
         Ok(new_root_tree_hash)
     }
+
+    // ── Project management ────────────────────────────────────────────────────
+
+    pub fn create_project(&self, name: &str, is_public: bool) -> Result<(), CoreError> {
+        let key = format!("project-meta/{name}");
+        if self.storage.get(&key)?.is_some() {
+            return Err(CoreError::AlreadyExists(format!("project '{name}' already exists")));
+        }
+        let meta = serde_json::json!({ "name": name, "is_public": is_public, "owner": "" });
+        let bytes = serde_json::to_vec(&meta)
+            .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
+        self.storage.put(&key, &bytes)?;
+        Ok(())
+    }
+
+    pub fn get_project_meta(&self, name: &str) -> Result<Option<serde_json::Value>, CoreError> {
+        let key = format!("project-meta/{name}");
+        match self.storage.get(&key)? {
+            None => Ok(None),
+            Some(bytes) => {
+                let v = serde_json::from_slice(&bytes)
+                    .map_err(|e| CoreError::ObjectCorrupted(e.to_string()))?;
+                Ok(Some(v))
+            }
+        }
+    }
+
+    pub fn list_projects(&self, prefix: &str) -> Result<Vec<serde_json::Value>, CoreError> {
+        let scan_prefix = format!("project-meta/{prefix}");
+        let entries = self.storage.scan_prefix(&scan_prefix)?;
+        let mut results = Vec::new();
+        for (_, bytes) in entries {
+            match serde_json::from_slice(&bytes) {
+                Ok(v) => results.push(v),
+                Err(_) => {} // skip malformed
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn delete_project(&self, name: &str, force: bool) -> Result<(), CoreError> {
+        let key = format!("project-meta/{name}");
+        if self.storage.get(&key)?.is_none() {
+            return Err(CoreError::NotFound(format!("project '{name}' not found")));
+        }
+        if !force {
+            // Check if there are any repos in this project.
+            let repo_prefix = format!("config/{name}/");
+            let repos = self.storage.scan_prefix(&repo_prefix)?;
+            if !repos.is_empty() {
+                return Err(CoreError::InvalidArgument(
+                    "project has repos; use force=true to delete anyway".to_string(),
+                ));
+            }
+        }
+        self.storage.delete(&key)?;
+        Ok(())
+    }
+
+    // ── Repo management ───────────────────────────────────────────────────────
+
+    /// Initialize a new repo: stores config and creates the initial empty commit on the default branch.
+    pub fn initialize_repo(
+        &self,
+        project: &str,
+        repo: &str,
+        config: &RepoConfig,
+    ) -> Result<(), CoreError> {
+        use objects::{CommitObject, TreeObject, encode_commit, encode_tree, hash_of_bytes, unix_now};
+
+        // Check not already initialized.
+        let config_key = format!("config/{project}/{repo}");
+        if self.storage.get(&config_key)?.is_some() {
+            return Err(CoreError::AlreadyExists(format!(
+                "repo '{project}/{repo}' already exists"
+            )));
+        }
+
+        // Create empty root tree.
+        let root_tree = TreeObject { blob_version: 1, entries: vec![], created_at_unix: unix_now() };
+        let root_tree_encoded = encode_tree(&root_tree);
+        let root_tree_hash = hash_of_bytes(&root_tree_encoded);
+        self.storage.write_object(&root_tree_hash, &root_tree_encoded)?;
+
+        // Create initial commit.
+        let now = unix_now();
+        let init_commit = CommitObject {
+            blob_version: 1,
+            tree_hash: root_tree_hash.to_hex(),
+            parent_hashes: vec![],
+            timestamp_unix: now,
+            author: "schemahub".to_string(),
+            message: "initial commit".to_string(),
+            force: false,
+            format_id: String::new(),
+            created_at_unix: now,
+        };
+        let init_commit_encoded = encode_commit(&init_commit);
+        let init_commit_hash = hash_of_bytes(&init_commit_encoded);
+        self.storage.write_object(&init_commit_hash, &init_commit_encoded)?;
+
+        // Create default branch.
+        version_control::branch::set_branch_head(
+            self.storage.as_ref(),
+            project,
+            repo,
+            &config.default_branch,
+            &init_commit_hash,
+        )?;
+
+        // Persist config.
+        self.set_repo_config(project, repo, config)?;
+        Ok(())
+    }
+
+    pub fn list_repos(&self, project: &str, prefix: &str) -> Result<Vec<(String, RepoConfig)>, CoreError> {
+        let scan_prefix = format!("config/{project}/{prefix}");
+        let entries = self.storage.scan_prefix(&scan_prefix)?;
+        let config_prefix = format!("config/{project}/");
+        let mut results = Vec::new();
+        for (key, bytes) in entries {
+            let repo_name = key
+                .strip_prefix(&config_prefix)
+                .unwrap_or(&key)
+                .to_string();
+            match serde_json::from_slice::<RepoConfig>(&bytes) {
+                Ok(cfg) => results.push((repo_name, cfg)),
+                Err(_) => {} // skip malformed
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn delete_repo(&self, project: &str, repo: &str, force: bool) -> Result<(), CoreError> {
+        let config_key = format!("config/{project}/{repo}");
+        if self.storage.get(&config_key)?.is_none() {
+            return Err(CoreError::NotFound(format!("repo '{project}/{repo}' not found")));
+        }
+        if !force {
+            // Check if there are schemas.
+            let branch_prefix = keys::branch_refs_prefix(project, repo);
+            let branches = self.storage.scan_prefix(&branch_prefix)?;
+            // Check if the default branch's commit has a non-empty root tree.
+            if let Some((_, head_hash_bytes)) = branches.first() {
+                if let Ok(hex) = std::str::from_utf8(head_hash_bytes) {
+                    if let Ok(hash) = Hash::from_hex(hex) {
+                        if let Ok(commit) = version_control::commit::read_commit(self.storage.as_ref(), &hash) {
+                            if let Ok((_, root_tree)) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &commit) {
+                                if !root_tree.entries.is_empty() {
+                                    return Err(CoreError::InvalidArgument(
+                                        "repo has schemas; use force=true to delete anyway".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Delete config and all refs for this repo.
+        self.storage.delete(&config_key)?;
+        let refs_prefix = keys::refs_prefix(project, repo);
+        self.storage.delete_prefix(&refs_prefix)?;
+        Ok(())
+    }
+
+    // ── Member/ACL management ─────────────────────────────────────────────────
+
+    pub fn add_member(&self, project: &str, identity: &str, role: &str) -> Result<(), CoreError> {
+        let key = keys::role_key(project, identity);
+        self.storage.put(&key, role.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn remove_member(&self, project: &str, identity: &str) -> Result<(), CoreError> {
+        let key = keys::role_key(project, identity);
+        self.storage.delete(&key)?;
+        Ok(())
+    }
+
+    pub fn list_members(&self, project: &str) -> Result<Vec<(String, String)>, CoreError> {
+        let prefix = keys::roles_prefix(project);
+        let entries = self.storage.scan_prefix(&prefix)?;
+        let mut members = Vec::new();
+        for (key, value) in entries {
+            let identity = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
+            let role = String::from_utf8(value).unwrap_or_else(|_| "unknown".to_string());
+            members.push((identity, role));
+        }
+        Ok(members)
+    }
 }
 
 // ── VersionRef enum (internal) ────────────────────────────────────────────────
