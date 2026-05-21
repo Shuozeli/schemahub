@@ -319,10 +319,13 @@ impl RefService for RefServiceImpl {
                     h.to_hex()
                 }
                 Some(VersionRefKind::Commit(hash)) => hash,
-                Some(VersionRefKind::Tag(_)) => {
-                    return Err(Status::unimplemented(
-                        "CreateBranch from tag not yet implemented",
-                    ));
+                Some(VersionRefKind::Tag(tag)) => {
+                    let key = schemahub_storage::keys::tag_ref_key(&req.project, &req.repo, &tag);
+                    self.core.storage
+                        .get_ref(&key)
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .ok_or_else(|| Status::not_found(format!("tag '{tag}' not found")))?
+                        .to_hex()
                 }
                 None => {
                     return Err(Status::invalid_argument(
