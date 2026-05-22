@@ -159,10 +159,30 @@ fn proto_to_envelope(m: &ProtobufMutation) -> Result<Bytes, Status> {
             };
             (proto_ops::op_tag::REMOVE_RPC, inner.encode_to_vec())
         }
-        Some(ApiOp::RemoveEnumValue(_))
-        | Some(ApiOp::RenameEnumValue(_))
-        | Some(ApiOp::RenameRpc(_))
-        | Some(ApiOp::UpdateImport(_)) => {
+        Some(ApiOp::RemoveEnumValue(o)) => {
+            let inner = proto_ops::OpRemoveEnumValue {
+                enum_name: o.enum_name.clone(),
+                value_name: o.value_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_ENUM_VALUE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameEnumValue(o)) => {
+            let inner = proto_ops::OpRenameEnumValue {
+                enum_name: o.enum_name.clone(),
+                old_value_name: o.old_value_name.clone(),
+                new_value_name: o.new_value_name.clone(),
+            };
+            (proto_ops::op_tag::RENAME_ENUM_VALUE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameRpc(o)) => {
+            // service_name flows into mutation.declaration_name via extract_proto_decl_name
+            let inner = proto_ops::OpRenameRpc {
+                old_rpc_name: o.old_rpc_name.clone(),
+                new_rpc_name: o.new_rpc_name.clone(),
+            };
+            (proto_ops::op_tag::RENAME_RPC, inner.encode_to_vec())
+        }
+        Some(ApiOp::UpdateImport(_)) => {
             return Err(Status::unimplemented(
                 "this protobuf mutation operation is not yet implemented",
             ));

@@ -280,6 +280,25 @@ impl FormatPlugin for ProtobufPlugin {
                             doc_comment: o.doc_comment.clone(),
                         });
                     }
+                    ProtoOp::RemoveEnumValue(o) => {
+                        let before = e.values.len();
+                        e.values.retain(|v| v.name != o.value_name);
+                        if e.values.len() == before {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "enum value '{}' not found in enum '{}'",
+                                o.value_name, e.name
+                            )));
+                        }
+                    }
+                    ProtoOp::RenameEnumValue(o) => {
+                        let v = e.values.iter_mut()
+                            .find(|v| v.name == o.old_value_name)
+                            .ok_or_else(|| MutationError::InvalidOperation(format!(
+                                "enum value '{}' not found in enum '{}'",
+                                o.old_value_name, e.name
+                            )))?;
+                        v.name = o.new_value_name.clone();
+                    }
                     _ => return Err(MutationError::UnsupportedInV1),
                 }
                 wrap_enum(&e)
@@ -312,6 +331,21 @@ impl FormatPlugin for ProtobufPlugin {
                                 o.rpc_name, svc.name
                             )));
                         }
+                    }
+                    ProtoOp::RenameRpc(o) => {
+                        if svc.rpcs.iter().any(|r| r.name == o.new_rpc_name) {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "rpc '{}' already exists in service '{}'",
+                                o.new_rpc_name, svc.name
+                            )));
+                        }
+                        let rpc = svc.rpcs.iter_mut()
+                            .find(|r| r.name == o.old_rpc_name)
+                            .ok_or_else(|| MutationError::InvalidOperation(format!(
+                                "rpc '{}' not found in service '{}'",
+                                o.old_rpc_name, svc.name
+                            )))?;
+                        rpc.name = o.new_rpc_name.clone();
                     }
                     _ => return Err(MutationError::UnsupportedInV1),
                 }
@@ -1182,5 +1216,102 @@ mod tests {
         let mutation = make_mutation("PaySvc", op_tag::REMOVE_RPC, op.encode_to_vec());
         let result = plugin.apply_mutation(&blob, &mutation);
         assert!(result.is_err(), "removing nonexistent rpc should be rejected");
+    }
+
+    #[test]
+    fn apply_mutation_rename_rpc() {
+        use crate::operations::{op_tag, OpRenameRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3";
+            service PaySvc { rpc Process (Req) returns (Resp); }
+            message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRenameRpc { old_rpc_name: "Process".into(), new_rpc_name: "Execute".into() };
+        let mutation = make_mutation("PaySvc", op_tag::RENAME_RPC, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let text = plugin.print(&new_blob).unwrap();
+        assert!(!text.contains("rpc Process"), "old name should be gone: {text}");
+        assert!(text.contains("rpc Execute"), "new name should appear: {text}");
+    }
+
+    #[test]
+    fn apply_mutation_rename_rpc_conflict_rejected() {
+        use crate::operations::{op_tag, OpRenameRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3";
+            service PaySvc {
+              rpc Process (Req) returns (Resp);
+              rpc Execute (Req) returns (Resp);
+            }
+            message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRenameRpc { old_rpc_name: "Process".into(), new_rpc_name: "Execute".into() };
+        let mutation = make_mutation("PaySvc", op_tag::RENAME_RPC, op.encode_to_vec());
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "renaming to an existing rpc name should be rejected");
+    }
+
+    #[test]
+    fn apply_mutation_remove_enum_value() {
+        use crate::operations::{op_tag, OpRemoveEnumValue};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3";
+            enum Status { UNKNOWN = 0; ACTIVE = 1; DISABLED = 2; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRemoveEnumValue { enum_name: "Status".into(), value_name: "DISABLED".into() };
+        let mutation = make_mutation("Status", op_tag::REMOVE_ENUM_VALUE, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let text = plugin.print(&new_blob).unwrap();
+        assert!(!text.contains("DISABLED"), "DISABLED should be removed: {text}");
+        assert!(text.contains("ACTIVE"), "ACTIVE should remain: {text}");
+    }
+
+    #[test]
+    fn apply_mutation_remove_enum_value_not_found_rejected() {
+        use crate::operations::{op_tag, OpRemoveEnumValue};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; enum Status { UNKNOWN = 0; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRemoveEnumValue { enum_name: "Status".into(), value_name: "NONEXISTENT".into() };
+        let mutation = make_mutation("Status", op_tag::REMOVE_ENUM_VALUE, op.encode_to_vec());
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "removing nonexistent enum value should be rejected");
+    }
+
+    #[test]
+    fn apply_mutation_rename_enum_value() {
+        use crate::operations::{op_tag, OpRenameEnumValue};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3";
+            enum Status { UNKNOWN = 0; ACTIVE = 1; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRenameEnumValue {
+            enum_name: "Status".into(),
+            old_value_name: "ACTIVE".into(),
+            new_value_name: "ENABLED".into(),
+        };
+        let mutation = make_mutation("Status", op_tag::RENAME_ENUM_VALUE, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let text = plugin.print(&new_blob).unwrap();
+        assert!(!text.contains("ACTIVE"), "old name should be gone: {text}");
+        assert!(text.contains("ENABLED"), "new name should appear: {text}");
     }
 }

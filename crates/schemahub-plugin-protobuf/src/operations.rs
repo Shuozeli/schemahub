@@ -98,6 +98,24 @@ pub struct OpAddEnumValue {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+pub struct OpRemoveEnumValue {
+    #[prost(string, tag = "1")]
+    pub enum_name: String,
+    #[prost(string, tag = "2")]
+    pub value_name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OpRenameEnumValue {
+    #[prost(string, tag = "1")]
+    pub enum_name: String,
+    #[prost(string, tag = "2")]
+    pub old_value_name: String,
+    #[prost(string, tag = "3")]
+    pub new_value_name: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 pub struct OpRemoveEnum {
     #[prost(string, tag = "1")]
     pub enum_name: String,
@@ -139,6 +157,14 @@ pub struct OpRemoveRpc {
     pub rpc_name: String,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OpRenameRpc {
+    #[prost(string, tag = "1")]
+    pub old_rpc_name: String,
+    #[prost(string, tag = "2")]
+    pub new_rpc_name: String,
+}
+
 // ── Top-level discriminator ───────────────────────────────────────────────────
 
 /// Tag values for the top-level ProtoOperation oneof.
@@ -155,10 +181,13 @@ pub mod op_tag {
     pub const ADD_ENUM: u32 = 20;
     pub const ADD_ENUM_VALUE: u32 = 21;
     pub const REMOVE_ENUM: u32 = 22;
+    pub const REMOVE_ENUM_VALUE: u32 = 23;
+    pub const RENAME_ENUM_VALUE: u32 = 24;
     pub const ADD_SERVICE: u32 = 30;
     pub const REMOVE_SERVICE: u32 = 31;
     pub const ADD_RPC: u32 = 32;
     pub const REMOVE_RPC: u32 = 33;
+    pub const RENAME_RPC: u32 = 34;
 }
 
 /// The decoded operation, represented as an enum rather than a prost oneof
@@ -177,10 +206,13 @@ pub enum ProtoOp {
     AddEnum(OpAddEnum),
     AddEnumValue(OpAddEnumValue),
     RemoveEnum(OpRemoveEnum),
+    RemoveEnumValue(OpRemoveEnumValue),
+    RenameEnumValue(OpRenameEnumValue),
     AddService(OpAddService),
     RemoveService(OpRemoveService),
     AddRpc(OpAddRpc),
     RemoveRpc(OpRemoveRpc),
+    RenameRpc(OpRenameRpc),
 }
 
 /// A thin envelope that carries the tag and the raw inner bytes.
@@ -266,6 +298,16 @@ pub fn decode_operation(bytes: &[u8]) -> Result<ProtoOp, MutationError> {
                 .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
             ProtoOp::RemoveEnum(inner)
         }
+        op_tag::REMOVE_ENUM_VALUE => {
+            let inner = OpRemoveEnumValue::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            ProtoOp::RemoveEnumValue(inner)
+        }
+        op_tag::RENAME_ENUM_VALUE => {
+            let inner = OpRenameEnumValue::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            ProtoOp::RenameEnumValue(inner)
+        }
         op_tag::ADD_SERVICE => {
             let inner = OpAddService::decode(env.payload.as_slice())
                 .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
@@ -285,6 +327,11 @@ pub fn decode_operation(bytes: &[u8]) -> Result<ProtoOp, MutationError> {
             let inner = OpRemoveRpc::decode(env.payload.as_slice())
                 .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
             ProtoOp::RemoveRpc(inner)
+        }
+        op_tag::RENAME_RPC => {
+            let inner = OpRenameRpc::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            ProtoOp::RenameRpc(inner)
         }
         other => {
             return Err(MutationError::InvalidOperationBytes(
