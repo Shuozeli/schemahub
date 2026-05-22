@@ -229,6 +229,119 @@ impl Core {
         }
     }
 
+    // ── Search ────────────────────────────────────────────────────────────────
+
+    /// Search declarations in a repo using the KV search index for prefix
+    /// matching, then loading blobs only for schemas that have hits.
+    ///
+    /// Returns `(DeclSummary, schema_name)` pairs. Applies substring matching
+    /// within each candidate schema so the semantics match the previous full-scan
+    /// implementation, but only loads the schemas the index identifies as having
+    /// at least one declaration whose name starts with `query`.
+    ///
+    /// Falls back to scanning all schemas when `query` is empty.
+    pub fn search_declarations(
+        &self,
+        project: &str,
+        repo: &str,
+        query: &str,
+        commit_hex: &str,
+        limit: usize,
+    ) -> Result<Vec<(schemahub_types::DeclSummary, String)>, CoreError> {
+        use std::collections::{HashMap, HashSet};
+
+        let commit_hash = Hash::from_hex(commit_hex)
+            .map_err(|_| CoreError::InvalidArgument(format!("invalid commit hex: {commit_hex}")))?;
+        let commit = version_control::commit::read_commit(self.storage.as_ref(), &commit_hash)?;
+        let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &commit)?;
+
+        // ── Step 1: Determine candidate schema names ──────────────────────────
+        // When query is non-empty, scan the search index for all entries whose
+        // declaration name starts with `query` and belong to this project/repo.
+        // When query is empty, fall back to all schemas at the commit.
+        let candidate_schemas: Vec<String> = if !query.is_empty() {
+            let prefix = format!("search/{query}");
+            let repo_infix = format!("/{project}/{repo}/");
+            let entries = self.storage.scan_prefix(&prefix)
+                .map_err(CoreError::Storage)?;
+            let mut seen: HashSet<String> = HashSet::new();
+            for (key, _) in &entries {
+                // key = "search/{name}/{project}/{repo}/{schema}"
+                let after_search = match key.strip_prefix("search/") {
+                    Some(s) => s,
+                    None => continue,
+                };
+                // Split off the decl name to get "/{project}/{repo}/{schema}"
+                let slash = match after_search.find('/') {
+                    Some(i) => i,
+                    None => continue,
+                };
+                let rest = &after_search[slash..];
+                if !rest.starts_with(&repo_infix) {
+                    continue;
+                }
+                let schema_name = rest[repo_infix.len()..].to_string();
+                if !schema_name.is_empty() {
+                    seen.insert(schema_name);
+                }
+            }
+            seen.into_iter().collect()
+        } else {
+            root_tree.entries.iter()
+                .filter(|e| e.kind == objects::KIND_SUBTREE)
+                .map(|e| e.name.clone())
+                .collect()
+        };
+
+        // ── Step 2: Load each candidate schema and collect matching decls ─────
+        let query_lower = query.to_lowercase();
+        let mut results: Vec<(schemahub_types::DeclSummary, String)> = Vec::new();
+
+        'outer: for schema_name in &candidate_schemas {
+            let format_id = detect_format_from_name(schema_name)
+                .unwrap_or_else(|| commit.format_id.clone());
+            let plugin = match self.plugins.get(&format_id) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let (_, schema_tree) = match version_control::tree::schema_tree_from_root(
+                self.storage.as_ref(), &root_tree, schema_name,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let entry = match schema_tree.entries.iter()
+                .find(|e| e.name == "__schema__" && e.kind == objects::KIND_BLOB)
+            {
+                Some(e) => e,
+                None => continue,
+            };
+            let blob_hash = match Hash::from_hex(&entry.hash) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let blob_data = match self.storage.read_object(&blob_hash) {
+                Ok(Some(d)) => d,
+                _ => continue,
+            };
+            let blob = Blob::new(blob_data);
+
+            if let Ok(decls) = plugin.list_declarations(&blob) {
+                for decl in decls {
+                    if decl.name.to_lowercase().contains(&query_lower) {
+                        results.push((decl, schema_name.clone()));
+                        if results.len() >= limit {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     // ── Schema lifecycle ──────────────────────────────────────────────────────
 
     /// Create a new schema (first push of a schema file).

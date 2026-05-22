@@ -233,48 +233,39 @@ impl ExplorationService for ExplorationServiceImpl {
             Err(_) => return Ok(Response::new(SearchResponse { results: vec![] })),
         };
 
-        // Enumerate all schemas in the repo.
-        let schemas = match self.core.list_schemas(&req.project, &req.repo, &commit_hex) {
-            Ok(s) => s,
+        let limit = if req.limit == 0 { 50 } else { req.limit.min(200) } as usize;
+
+        // Use index-backed search: only loads blobs for schemas that the KV
+        // search index identifies as having a declaration starting with the query.
+        let hits = match self.core.search_declarations(
+            &req.project,
+            &req.repo,
+            &req.query,
+            &commit_hex,
+            limit,
+        ) {
+            Ok(h) => h,
             Err(_) => return Ok(Response::new(SearchResponse { results: vec![] })),
         };
 
-        let limit = if req.limit == 0 { 50 } else { req.limit.min(200) } as usize;
-        let query_lower = req.query.to_lowercase();
         let mut results = Vec::new();
-
-        'outer: for (schema_name, _) in schemas {
-            let decls = match self.core.list_declarations(
-                &req.project,
-                &req.repo,
-                &schema_name,
-                &commit_hex,
-            ) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            for decl in decls {
-                if !decl.name.to_lowercase().contains(&query_lower) {
-                    continue;
-                }
-                let proto_kind = decl_kind_to_proto(decl.kind);
-                if req.kind != 0 && proto_kind != req.kind as i32 {
-                    continue;
-                }
-                results.push(schemahub_api::schemahub_v1::SearchResult {
-                    project: req.project.clone(),
-                    repo: req.repo.clone(),
-                    schema_path: schema_name.clone(),
-                    declaration: Some(schemahub_api::schemahub_v1::DeclSummary {
-                        name: decl.name,
-                        kind: proto_kind,
-                        doc_comment: decl.doc_comment,
-                    }),
-                });
-                if results.len() >= limit {
-                    break 'outer;
-                }
+        for (decl, schema_name) in hits {
+            let proto_kind = decl_kind_to_proto(decl.kind);
+            if req.kind != 0 && proto_kind != req.kind as i32 {
+                continue;
+            }
+            results.push(schemahub_api::schemahub_v1::SearchResult {
+                project: req.project.clone(),
+                repo: req.repo.clone(),
+                schema_path: schema_name,
+                declaration: Some(schemahub_api::schemahub_v1::DeclSummary {
+                    name: decl.name,
+                    kind: proto_kind,
+                    doc_comment: decl.doc_comment,
+                }),
+            });
+            if results.len() >= limit {
+                break;
             }
         }
 
