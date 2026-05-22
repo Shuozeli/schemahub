@@ -275,7 +275,21 @@ pub fn apply_mutation(
         24,
     )?;
 
-    // ── Step 14: Return new commit hash ──────────────────────────────────────
+    // ── Step 14: Update search index (best-effort) ────────────────────────────
+    if let Ok(old_decls) = plugin.list_declarations(&old_blob) {
+        for decl in &old_decls {
+            let key = keys::search_key(&decl.name, &req.project, &req.repo, schema_name);
+            let _ = storage.delete(&key);
+        }
+    }
+    if let Ok(new_decls) = plugin.list_declarations(&new_blob) {
+        for decl in &new_decls {
+            let key = keys::search_key(&decl.name, &req.project, &req.repo, schema_name);
+            let _ = storage.put(&key, schema_name.as_bytes());
+        }
+    }
+
+    // ── Step 15: Return new commit hash ──────────────────────────────────────
     Ok(commit_hex)
 }
 

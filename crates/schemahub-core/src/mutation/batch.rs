@@ -271,5 +271,24 @@ pub fn apply_mutations(
         24,
     )?;
 
+    // ── Step 15: Update search index for changed schemas (best-effort) ─────────
+    for (schema_path, new_blob) in &updated_blobs {
+        let schema_name = &schema_path.schema_name;
+        if let Some(old_blob) = old_blobs.get(schema_path) {
+            if let Ok(old_decls) = plugin.list_declarations(old_blob) {
+                for decl in &old_decls {
+                    let key = keys::search_key(&decl.name, &req.project, &req.repo, schema_name);
+                    let _ = storage.delete(&key);
+                }
+            }
+        }
+        if let Ok(new_decls) = plugin.list_declarations(new_blob) {
+            for decl in &new_decls {
+                let key = keys::search_key(&decl.name, &req.project, &req.repo, schema_name);
+                let _ = storage.put(&key, schema_name.as_bytes());
+            }
+        }
+    }
+
     Ok(commit_hex)
 }

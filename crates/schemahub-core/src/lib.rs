@@ -340,6 +340,15 @@ impl Core {
             IdempotencyResult::Success { commit_hash: commit_hex.clone() },
             24,
         )?;
+
+        // Update search index (best-effort — commit already succeeded).
+        if let Ok(decls) = plugin.list_declarations(&envelope_blob) {
+            for decl in &decls {
+                let key = keys::search_key(&decl.name, project, repo, schema_name);
+                let _ = self.storage.put(&key, schema_name.as_bytes());
+            }
+        }
+
         Ok(commit_hex)
     }
 
@@ -475,6 +484,21 @@ impl Core {
             IdempotencyResult::Success { commit_hash: commit_hex.clone() },
             24,
         )?;
+
+        // Update search index: remove stale entries, write fresh ones (best-effort).
+        if let Ok(old_decls) = plugin.list_declarations(&old_blob) {
+            for decl in &old_decls {
+                let key = keys::search_key(&decl.name, project, repo, schema_name);
+                let _ = self.storage.delete(&key);
+            }
+        }
+        if let Ok(new_decls) = plugin.list_declarations(&envelope_blob) {
+            for decl in &new_decls {
+                let key = keys::search_key(&decl.name, project, repo, schema_name);
+                let _ = self.storage.put(&key, schema_name.as_bytes());
+            }
+        }
+
         Ok(commit_hex)
     }
 
@@ -533,8 +557,15 @@ impl Core {
         let head_commit = version_control::commit::read_commit(self.storage.as_ref(), &current_head)?;
         let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &head_commit)?;
 
-        // Ensure schema exists.
-        version_control::tree::schema_tree_from_root(self.storage.as_ref(), &root_tree, schema_name)?;
+        // Ensure schema exists and load the __schema__ blob for search index cleanup.
+        let (_, existing_schema_tree) = version_control::tree::schema_tree_from_root(
+            self.storage.as_ref(), &root_tree, schema_name,
+        )?;
+        let old_schema_blob = version_control::tree::blob_hash_from_schema_tree(
+            &existing_schema_tree, "__schema__",
+        ).ok().and_then(|h| {
+            self.storage.read_object(&h).ok().flatten().map(Blob::new)
+        });
 
         // Build new root tree without the schema entry.
         let new_entries: Vec<TreeEntryProto> = root_tree
@@ -585,6 +616,21 @@ impl Core {
             IdempotencyResult::Success { commit_hash: commit_hex.clone() },
             24,
         )?;
+
+        // Remove search index entries for the deleted schema (best-effort).
+        if let Some(blob) = &old_schema_blob {
+            if let Some(fid) = detect_format_from_name(schema_name) {
+                if let Some(plugin) = self.plugins.get(&fid) {
+                    if let Ok(decls) = plugin.list_declarations(blob) {
+                        for decl in &decls {
+                            let key = keys::search_key(&decl.name, project, repo, schema_name);
+                            let _ = self.storage.delete(&key);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(commit_hex)
     }
 
