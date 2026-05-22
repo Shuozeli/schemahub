@@ -1314,4 +1314,71 @@ mod tests {
         assert!(!text.contains("ACTIVE"), "old name should be gone: {text}");
         assert!(text.contains("ENABLED"), "new name should appear: {text}");
     }
+
+    // ── BFS / multi-blob descriptor test ─────────────────────────────────────
+
+    #[test]
+    fn generate_descriptors_multi_blob_includes_imports() {
+        use prost::Message as _;
+        use prost_types::FileDescriptorSet;
+
+        let plugin = ProtobufPlugin;
+
+        // common.proto — a shared schema imported by payment.proto
+        let common_src = r#"
+            syntax = "proto3";
+            package common;
+            message Money { int64 amount_cents = 1; string currency = 2; }
+        "#;
+        let common_blob = plugin.parse(common_src).unwrap();
+        let common_path = SchemaPath::new("acme", "billing", "common.proto");
+
+        // payment.proto — imports common.proto
+        let payment_src = r#"
+            syntax = "proto3";
+            package payments;
+            import "common.proto";
+            message CreatePaymentRequest { string user_id = 1; }
+        "#;
+        let payment_blob = plugin.parse(payment_src).unwrap();
+        let payment_path = SchemaPath::new("acme", "billing", "payment.proto");
+
+        // Simulate BFS result: both blobs present
+        let blobs = HashMap::from([
+            (payment_path, payment_blob),
+            (common_path, common_blob),
+        ]);
+
+        let bytes = plugin.generate_descriptors(&blobs)
+            .expect("generate_descriptors should succeed with multiple blobs");
+
+        let fds = FileDescriptorSet::decode(bytes.as_ref())
+            .expect("output must be a valid FileDescriptorSet");
+
+        // Both files must appear in the descriptor set
+        assert_eq!(fds.file.len(), 2, "expected 2 files in descriptor set: {fds:?}");
+        let names: Vec<_> = fds.file.iter().filter_map(|f| f.name.as_deref()).collect();
+        assert!(names.contains(&"payment.proto"), "payment.proto missing: {names:?}");
+        assert!(names.contains(&"common.proto"), "common.proto missing: {names:?}");
+    }
+
+    #[test]
+    fn imports_returns_declared_import_paths() {
+        let plugin = ProtobufPlugin;
+        let src = r#"
+            syntax = "proto3";
+            import "common.proto";
+            import "google/protobuf/timestamp.proto";
+            message Foo { string id = 1; }
+        "#;
+        let blob = plugin.parse(src).unwrap();
+        let imports = plugin.imports(&blob).expect("imports() should succeed");
+
+        let paths: Vec<_> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&"common.proto"), "common.proto missing: {paths:?}");
+        assert!(
+            paths.contains(&"google/protobuf/timestamp.proto"),
+            "timestamp import missing: {paths:?}"
+        );
+    }
 }
