@@ -856,6 +856,144 @@ else
   fail "T70: RunGC live run succeeds" "exit=$EXIT | $(echo "$OUT" | head -2)"
 fi
 
+# ─── Group 18: OpenAPI granular mutations ────────────────────────────────────
+
+echo ""
+echo "=== Group 18: OpenAPI granular mutations ==="
+
+# Setup: create api.yaml
+OUT=$($CLI schema create --project acme --repo platform "$TEST_DIR/api.yaml" 2>&1)
+EXIT=$?
+if [[ $EXIT -ne 0 ]]; then
+  fail "G18-setup: schema create api.yaml" "exit=$EXIT | $(echo "$OUT" | head -1)"
+fi
+
+# T71 — AddPath adds /orders to api.yaml
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","add_path":{"path_pattern":"/orders","summary":"Orders"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T71: AddPath adds /orders to api.yaml"
+else
+  fail "T71: AddPath adds /orders to api.yaml" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T72 — schema pull shows /orders in source
+OUT=$($CLI schema pull acme/platform/api.yaml 2>&1)
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "/orders"; then
+  pass "T72: schema pull api.yaml shows /orders after AddPath"
+else
+  fail "T72: schema pull api.yaml shows /orders after AddPath" "$(echo "$OUT" | head -5)"
+fi
+
+# T73 — AddPath duplicate returns error
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","add_path":{"path_pattern":"/orders"}}}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]] || echo "$OUT" | grep -qi "error\|already exists"; then
+  pass "T73: AddPath duplicate /orders returns error"
+else
+  fail "T73: AddPath duplicate /orders returns error" "expected failure"
+fi
+
+# T74 — AddOperation adds POST to /users
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","add_operation":{"path_pattern":"/users","method":"post","operation_id":"createUser","summary":"Create user"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T74: AddOperation adds POST to /users"
+else
+  fail "T74: AddOperation adds POST to /users" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T75 — schema pull shows post under /users
+OUT=$($CLI schema pull acme/platform/api.yaml 2>&1)
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "createUser"; then
+  pass "T75: schema pull api.yaml shows createUser operationId after AddOperation"
+else
+  fail "T75: schema pull api.yaml shows createUser operationId after AddOperation" "$(echo "$OUT" | head -5)"
+fi
+
+# T76 — AddOperation duplicate method returns error
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","add_operation":{"path_pattern":"/users","method":"get"}}}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]] || echo "$OUT" | grep -qi "error\|already exists"; then
+  pass "T76: AddOperation duplicate GET on /users returns error"
+else
+  fail "T76: AddOperation duplicate GET on /users returns error" "expected failure"
+fi
+
+# T77 — RemoveOperation removes GET from /orders
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","remove_operation":{"path_pattern":"/users","method":"post"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T77: RemoveOperation removes POST from /users"
+else
+  fail "T77: RemoveOperation removes POST from /users" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T78 — AddComponentSchema adds Order schema
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","add_component_schema":{"schema_name":"Order","schema_type":"object","description":"An order"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T78: AddComponentSchema adds Order component schema"
+else
+  fail "T78: AddComponentSchema adds Order component schema" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T79 — schema pull shows Order schema
+OUT=$($CLI schema pull acme/platform/api.yaml 2>&1)
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "Order"; then
+  pass "T79: schema pull api.yaml shows Order schema after AddComponentSchema"
+else
+  fail "T79: schema pull api.yaml shows Order schema after AddComponentSchema" "$(echo "$OUT" | head -5)"
+fi
+
+# T80 — RemoveComponentSchema removes User component schema
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","remove_component_schema":{"schema_name":"User"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T80: RemoveComponentSchema removes User schema"
+else
+  fail "T80: RemoveComponentSchema removes User schema" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T81 — RemoveComponentSchema non-existent returns error
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","remove_component_schema":{"schema_name":"Ghost"}}}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]] || echo "$OUT" | grep -qi "error\|not found"; then
+  pass "T81: RemoveComponentSchema non-existent schema returns error"
+else
+  fail "T81: RemoveComponentSchema non-existent schema returns error" "expected failure"
+fi
+
+# T82 — RemovePath removes /orders
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","openapi_op":{"schema_path":"api.yaml","remove_path":{"path_pattern":"/orders"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "newCommit"; then
+  pass "T82: RemovePath removes /orders from api.yaml"
+else
+  fail "T82: RemovePath removes /orders from api.yaml" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T83 — schema pull confirms /orders is gone
+OUT=$($CLI schema pull acme/platform/api.yaml 2>&1)
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && ! echo "$OUT" | grep -qF "/orders"; then
+  pass "T83: schema pull api.yaml confirms /orders removed"
+else
+  fail "T83: schema pull api.yaml confirms /orders removed" "$(echo "$OUT" | head -5)"
+fi
+
 # ─── Report ───────────────────────────────────────────────────────────────────
 
 echo ""
