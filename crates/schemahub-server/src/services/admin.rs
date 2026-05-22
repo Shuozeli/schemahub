@@ -165,12 +165,19 @@ impl AdminService for AdminServiceImpl {
             pending_entries.len() as u64
         };
 
+        // Clean up expired idempotency entries.
+        let idempotency_entries_cleaned = schemahub_core::mutation::idempotency::gc_idempotency_entries(
+            storage,
+            req.dry_run,
+        )
+        .map_err(|e| Status::internal(e.to_string()))?;
+
         Ok(Response::new(RunGcResponse {
             objects_scanned,
             objects_deleted,
             bytes_reclaimed,
             pending_entries_cleaned,
-            idempotency_entries_cleaned: 0, // TTL-based cleanup not yet implemented
+            idempotency_entries_cleaned,
         }))
     }
 

@@ -92,6 +92,22 @@ pub struct OpUpdateImport {
     pub remove: bool,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OpAddUnionMember {
+    #[prost(string, tag = "1")]
+    pub union_name: String,
+    #[prost(string, tag = "2")]
+    pub member_type: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OpRemoveUnionMember {
+    #[prost(string, tag = "1")]
+    pub union_name: String,
+    #[prost(string, tag = "2")]
+    pub member_type: String,
+}
+
 // ── Tag constants ─────────────────────────────────────────────────────────────
 
 pub mod op_tag {
@@ -104,6 +120,8 @@ pub mod op_tag {
     pub const ADD_ENUM: u32 = 20;
     pub const ADD_ENUM_VALUE: u32 = 21;
     pub const ADD_UNION: u32 = 30;
+    pub const ADD_UNION_MEMBER: u32 = 31;
+    pub const REMOVE_UNION_MEMBER: u32 = 32;
     pub const UPDATE_IMPORT: u32 = 40;
 }
 
@@ -119,6 +137,8 @@ pub enum FbsOp {
     AddEnum(OpAddEnum),
     AddEnumValue(OpAddEnumValue),
     AddUnion(OpAddUnion),
+    AddUnionMember(OpAddUnionMember),
+    RemoveUnionMember(OpRemoveUnionMember),
     UpdateImport(OpUpdateImport),
 }
 
@@ -187,6 +207,16 @@ pub fn decode_operation(bytes: &[u8]) -> Result<FbsOp, MutationError> {
             let inner = OpAddUnion::decode(env.payload.as_slice())
                 .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
             FbsOp::AddUnion(inner)
+        }
+        op_tag::ADD_UNION_MEMBER => {
+            let inner = OpAddUnionMember::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            FbsOp::AddUnionMember(inner)
+        }
+        op_tag::REMOVE_UNION_MEMBER => {
+            let inner = OpRemoveUnionMember::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            FbsOp::RemoveUnionMember(inner)
         }
         op_tag::UPDATE_IMPORT => {
             let inner = OpUpdateImport::decode(env.payload.as_slice())

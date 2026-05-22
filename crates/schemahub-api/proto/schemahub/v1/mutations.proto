@@ -211,7 +211,9 @@ message FlatBuffersMutation {
     FbsAddEnumValue  add_enum_value = 21;
 
     // Union mutations
-    FbsAddUnion      add_union      = 30;
+    FbsAddUnion            add_union             = 30;
+    FbsAddUnionMember      add_union_member      = 31;
+    FbsRemoveUnionMember   remove_union_member   = 32;
 
     // Import mutations
     FbsUpdateImport  update_import  = 40;
@@ -289,6 +291,16 @@ message FbsAddUnion {
   string          union_name   = 1;
   repeated string member_types = 2;  // table names that are union members
   string          doc_comment  = 3;
+}
+
+message FbsAddUnionMember {
+  string union_name  = 1;
+  string member_type = 2;  // table name to add as a union member
+}
+
+message FbsRemoveUnionMember {
+  string union_name  = 1;
+  string member_type = 2;  // table name to remove from the union
 }
 
 // ── FlatBuffers import mutations ──────────────────────────────────────────────

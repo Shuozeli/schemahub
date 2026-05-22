@@ -246,7 +246,32 @@ impl FormatPlugin for FlatBuffersPlugin {
                 unreachable!()
             }
             KIND_UNION => {
-                return Err(MutationError::UnsupportedInV1);
+                let mut u = crate::ast::unwrap_union(&decl_blob)?;
+                match &op {
+                    FbsOp::AddUnionMember(o) => {
+                        if u.members.iter().any(|m| m == &o.member_type) {
+                            return Err(MutationError::InvalidOperation(
+                                format!("member '{}' already exists in union '{}'", o.member_type, u.name),
+                            ));
+                        }
+                        u.members.push(o.member_type.clone());
+                    }
+                    FbsOp::RemoveUnionMember(o) => {
+                        let before = u.members.len();
+                        u.members.retain(|m| m != &o.member_type);
+                        if u.members.len() == before {
+                            return Err(MutationError::InvalidOperation(
+                                format!("member '{}' not found in union '{}'", o.member_type, u.name),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(MutationError::InvalidOperation(
+                            "operation is not valid for a union declaration".into(),
+                        ));
+                    }
+                }
+                crate::ast::wrap_union(&u)
             }
             KIND_METADATA => {
                 return Err(MutationError::InvalidOperation(

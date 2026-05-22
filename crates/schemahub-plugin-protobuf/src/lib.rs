@@ -216,6 +216,31 @@ impl FormatPlugin for ProtobufPlugin {
                 envelope.declarations.retain(|d| d.tree_key != o.service_name);
                 return Ok(Blob::from(encode_envelope(&envelope)));
             }
+            ProtoOp::UpdateImport(o) => {
+                // Find the __metadata__ declaration and update its imports list.
+                if let Some(meta_decl) = envelope.declarations.iter_mut()
+                    .find(|d| d.tree_key == "__metadata__")
+                {
+                    let meta_db = decode_decl_blob(&meta_decl.blob_bytes)?;
+                    let mut meta = unwrap_metadata(&meta_db)?;
+                    if o.remove {
+                        meta.imports.retain(|i| i.path != o.import_path);
+                    } else if let Some(existing) = meta.imports.iter_mut()
+                        .find(|i| i.path == o.import_path)
+                    {
+                        // Update resolved_commit on existing import.
+                        existing.resolved_commit = o.resolved_commit.clone();
+                    } else {
+                        meta.imports.push(ImportDef {
+                            path: o.import_path.clone(),
+                            resolved_commit: o.resolved_commit.clone(),
+                        });
+                    }
+                    let new_meta_db = wrap_metadata(&meta);
+                    meta_decl.blob_bytes = encode_decl_blob(&new_meta_db);
+                }
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
             _ => {}
         }
 

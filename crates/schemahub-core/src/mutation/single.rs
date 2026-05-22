@@ -241,7 +241,6 @@ pub fn apply_mutation(
         StorageOp::Delete {
             key: pending_key.clone(),
         },
-        // TODO: deps/index/search updates — deferred to plugin layer
     ];
 
     // Execute the transaction.

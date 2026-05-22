@@ -156,6 +156,11 @@ pub fn apply_to_message(
                 "service operation applied to a message blob".into(),
             ))
         }
+        ProtoOp::UpdateImport(_) => {
+            Err(MutationError::InvalidOperation(
+                "UpdateImport is a schema-level operation, not a message-level operation".into(),
+            ))
+        }
     }
 }
 

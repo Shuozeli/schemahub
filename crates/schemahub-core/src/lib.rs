@@ -282,6 +282,90 @@ impl Core {
         }
     }
 
+    // ── Dependencies ──────────────────────────────────────────────────────────
+
+    /// List import dependencies for a schema at a given commit.
+    /// If `transitive` is false, returns only direct imports.
+    /// If `transitive` is true, returns the full transitive closure.
+    /// Each entry is (importing_schema, imported_path, resolved_commit).
+    pub fn list_dependencies(
+        &self,
+        _project: &str,
+        _repo: &str,
+        schema_name: &str,
+        commit_hex: &str,
+        transitive: bool,
+    ) -> Result<Vec<(String, String, String)>, CoreError> {
+        use std::collections::{HashSet, VecDeque};
+
+        let commit_hash = Hash::from_hex(commit_hex)
+            .map_err(|_| CoreError::InvalidArgument(format!("invalid commit hex: {commit_hex}")))?;
+        let commit = version_control::commit::read_commit(self.storage.as_ref(), &commit_hash)?;
+        let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &commit)?;
+
+        // Build schema index for this commit.
+        let mut schema_index = std::collections::HashMap::new();
+        for entry in &root_tree.entries {
+            if entry.kind == objects::KIND_SUBTREE {
+                schema_index.insert(entry.name.clone(), entry.hash.clone());
+            }
+        }
+
+        let mut results = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut frontier: VecDeque<String> = VecDeque::new();
+        frontier.push_back(schema_name.to_string());
+
+        while let Some(current) = frontier.pop_front() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current.clone());
+
+            let Some(tree_hash_hex) = schema_index.get(&current) else { continue; };
+            let tree_hash = match Hash::from_hex(tree_hash_hex) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let (_, schema_tree) = match version_control::tree::schema_tree_from_root(
+                self.storage.as_ref(),
+                &root_tree,
+                &current,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let _ = tree_hash; // used implicitly via schema_tree_from_root
+
+            let format_id = detect_format_from_name(&current)
+                .unwrap_or_else(|| commit.format_id.clone());
+            let Some(plugin) = self.plugins.get(&format_id) else { continue; };
+
+            let schema_entry = schema_tree.entries.iter()
+                .find(|e| e.name == "__schema__" && e.kind == objects::KIND_BLOB);
+            let Some(blob_entry) = schema_entry else { continue; };
+            let Ok(blob_hash) = Hash::from_hex(&blob_entry.hash) else { continue; };
+            let Ok(Some(blob_data)) = self.storage.read_object(&blob_hash) else { continue; };
+            let blob = Blob::new(blob_data);
+
+            if let Ok(imports) = plugin.imports(&blob) {
+                for imp in imports {
+                    results.push((current.clone(), imp.path.clone(), imp.resolved_commit.clone()));
+                    if transitive && !visited.contains(&imp.path) {
+                        frontier.push_back(imp.path);
+                    }
+                }
+            }
+
+            // Only BFS past the root schema when transitive.
+            if !transitive {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────────
 
     /// Search declarations in a repo using the KV search index for prefix

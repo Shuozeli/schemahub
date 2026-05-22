@@ -46,6 +46,29 @@ pub fn check_idempotency(
     }
 }
 
+/// Scan the idempotency/ namespace and delete all expired entries.
+/// Returns the count of entries deleted (or that would be deleted in dry_run mode).
+pub fn gc_idempotency_entries(
+    storage: &dyn StorageBackend,
+    dry_run: bool,
+) -> Result<u64, CoreError> {
+    let now = unix_now();
+    let all = storage.scan_prefix("idempotency/")?;
+    let mut cleaned = 0u64;
+    for (key, value) in &all {
+        let expired = serde_json::from_slice::<IdempotencyEntry>(value)
+            .map(|e| e.expires_at_unix <= now)
+            .unwrap_or(true); // malformed entry — treat as expired
+        if expired {
+            if !dry_run {
+                let _ = storage.delete(key);
+            }
+            cleaned += 1;
+        }
+    }
+    Ok(cleaned)
+}
+
 /// Store an idempotency result with a TTL in hours.
 pub fn store_idempotency(
     storage: &dyn StorageBackend,

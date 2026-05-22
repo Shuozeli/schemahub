@@ -182,10 +182,24 @@ fn proto_to_envelope(m: &ProtobufMutation) -> Result<Bytes, Status> {
             };
             (proto_ops::op_tag::RENAME_RPC, inner.encode_to_vec())
         }
-        Some(ApiOp::UpdateImport(_)) => {
-            return Err(Status::unimplemented(
-                "this protobuf mutation operation is not yet implemented",
-            ));
+        Some(ApiOp::UpdateImport(o)) => {
+            // UpdateImport: add or update a pinned import in the __metadata__ blob.
+            // to_commit / to_tag are stored as the resolved_commit hint; the plugin
+            // layer uses them when printing the schema. If neither is set, the entry
+            // is added/updated with an empty resolved_commit (re-pins to latest).
+            let resolved = if !o.to_commit.is_empty() {
+                o.to_commit.clone()
+            } else if !o.to_tag.is_empty() {
+                o.to_tag.clone()
+            } else {
+                String::new()
+            };
+            let inner = proto_ops::OpUpdateImport {
+                import_path: o.import_path.clone(),
+                resolved_commit: resolved,
+                remove: false,
+            };
+            (proto_ops::op_tag::UPDATE_IMPORT, inner.encode_to_vec())
         }
         None => {
             return Err(Status::invalid_argument(
@@ -268,6 +282,20 @@ fn fbs_to_envelope(m: &FlatBuffersMutation) -> Result<Bytes, Status> {
                 doc_comment: o.doc_comment.clone(),
             };
             (fbs_ops::op_tag::ADD_UNION, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddUnionMember(o)) => {
+            let inner = fbs_ops::OpAddUnionMember {
+                union_name: o.union_name.clone(),
+                member_type: o.member_type.clone(),
+            };
+            (fbs_ops::op_tag::ADD_UNION_MEMBER, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveUnionMember(o)) => {
+            let inner = fbs_ops::OpRemoveUnionMember {
+                union_name: o.union_name.clone(),
+                member_type: o.member_type.clone(),
+            };
+            (fbs_ops::op_tag::REMOVE_UNION_MEMBER, inner.encode_to_vec())
         }
         Some(ApiOp::UpdateImport(o)) => {
             // to_commit / to_tag are pinning hints not yet modelled in the plugin;
@@ -584,6 +612,8 @@ fn extract_fbs_decl_name(m: &FlatBuffersMutation) -> String {
         Some(FbsOp::AddEnum(o)) => o.enum_name.clone(),
         Some(FbsOp::AddEnumValue(o)) => o.enum_name.clone(),
         Some(FbsOp::AddUnion(o)) => o.union_name.clone(),
+        Some(FbsOp::AddUnionMember(o)) => o.union_name.clone(),
+        Some(FbsOp::RemoveUnionMember(o)) => o.union_name.clone(),
         Some(FbsOp::UpdateImport(_)) => "__metadata__".to_string(),
         None => "__root__".to_string(),
     }

@@ -165,6 +165,19 @@ pub struct OpRenameRpc {
     pub new_rpc_name: String,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OpUpdateImport {
+    /// Logical import path to add/update: "project/repo/schema.proto"
+    #[prost(string, tag = "1")]
+    pub import_path: String,
+    /// Pinned commit or tag hint stored in resolved_commit field.
+    #[prost(string, tag = "2")]
+    pub resolved_commit: String,
+    /// If true, remove the import instead of adding/updating it.
+    #[prost(bool, tag = "3")]
+    pub remove: bool,
+}
+
 // ── Top-level discriminator ───────────────────────────────────────────────────
 
 /// Tag values for the top-level ProtoOperation oneof.
@@ -188,6 +201,7 @@ pub mod op_tag {
     pub const ADD_RPC: u32 = 32;
     pub const REMOVE_RPC: u32 = 33;
     pub const RENAME_RPC: u32 = 34;
+    pub const UPDATE_IMPORT: u32 = 40;
 }
 
 /// The decoded operation, represented as an enum rather than a prost oneof
@@ -213,6 +227,7 @@ pub enum ProtoOp {
     AddRpc(OpAddRpc),
     RemoveRpc(OpRemoveRpc),
     RenameRpc(OpRenameRpc),
+    UpdateImport(OpUpdateImport),
 }
 
 /// A thin envelope that carries the tag and the raw inner bytes.
@@ -332,6 +347,11 @@ pub fn decode_operation(bytes: &[u8]) -> Result<ProtoOp, MutationError> {
             let inner = OpRenameRpc::decode(env.payload.as_slice())
                 .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
             ProtoOp::RenameRpc(inner)
+        }
+        op_tag::UPDATE_IMPORT => {
+            let inner = OpUpdateImport::decode(env.payload.as_slice())
+                .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))?;
+            ProtoOp::UpdateImport(inner)
         }
         other => {
             return Err(MutationError::InvalidOperationBytes(

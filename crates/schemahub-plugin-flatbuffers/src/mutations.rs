@@ -16,6 +16,8 @@ pub fn apply_to_table(blob: &TableBlob, op: &FbsOp) -> Result<TableBlob, Mutatio
         | FbsOp::AddEnum(_)
         | FbsOp::AddEnumValue(_)
         | FbsOp::AddUnion(_)
+        | FbsOp::AddUnionMember(_)
+        | FbsOp::RemoveUnionMember(_)
         | FbsOp::UpdateImport(_) => Err(MutationError::InvalidOperation(
             "declaration-level operation applied to a table blob".into(),
         )),
