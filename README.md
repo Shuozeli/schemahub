@@ -80,11 +80,8 @@ Use `--profile prod` to select a non-default profile, or override per-invocation
 ### Quick example
 
 ```bash
-# Create a project and repo
-schemahub project create mycompany
-schemahub repo create --project mycompany payments \
-    --compat full \
-    --protected-branch main
+# Create project + repo in one step
+schemahub repo init mycompany/payments
 
 # Push a schema
 schemahub schema create --project mycompany --repo payments payments/v1/payment.proto
@@ -111,6 +108,14 @@ Global flags (apply to all subcommands):
 | `--server` | `SCHEMAHUB_SERVER` | `http://[::1]:50051` | Server address |
 | `--token` | `SCHEMAHUB_TOKEN` | _(empty)_ | Auth token |
 | `--profile` | — | `default` | Config profile |
+
+### `repo` — project and repo initialization
+
+```
+schemahub repo init [--public] [--default-branch B] <project/repo>
+```
+
+Creates the project and repo in one idempotent step. If the project already exists, it is reused. Use this instead of calling `CreateProject` and `CreateRepo` separately.
 
 ### `schema` — schema lifecycle
 
@@ -232,9 +237,10 @@ message VersionRef {
 | `ListSchemas` | All schema names in a repo at a given ref. |
 | `ListDeclarations` | Top-level declarations in a schema, with optional kind filter. |
 | `GetDeclaration` | Full detail for a named declaration (fields, RPCs, enum values, etc.). |
+| `GetSchemaSource` | Return the reconstructed source text of a schema at a given ref. |
 | `Search` | Search declarations by name prefix across all schemas in a repo. Supports kind filter and a limit. |
-| `FollowType` | _(not yet implemented)_ Follow a field's type reference cross-schema. |
-| `ListDependencies` | _(not yet implemented)_ List schemas a given schema imports, with optional transitive closure. |
+| `FollowType` | Resolve a type name to its declaration, following imports. `declaration_name` anchors the search; `field_name` is the type name to look up. |
+| `ListDependencies` | List schemas a given schema imports, with optional transitive closure. Returns `(importing_schema, import_path, resolved_commit)` tuples. |
 
 ### CodegenService
 
@@ -318,6 +324,12 @@ Granular mutations are applied via `ApplyMutation` (single) or `ApplyTransaction
 | `RemoveRpc` | Remove an RPC. |
 | `RenameRpc` | Rename an RPC. Rejects if the new name already exists. |
 
+**Imports** (schema-level)
+
+| Mutation | Description |
+|---|---|
+| `UpdateImport` | Register or update an import dependency. Stores the logical path (`project/repo/schema.proto`) and an optional pin (`to_commit` or `to_tag`). Used by `ListDependencies` to track the import graph. |
+
 ### FlatBuffers
 
 **Fields** (target: a table declaration)
@@ -344,7 +356,9 @@ Granular mutations are applied via `ApplyMutation` (single) or `ApplyTransaction
 |---|---|
 | `AddEnum` | Add an enum with a base integer type (`int8`–`uint64`). |
 | `AddEnumValue` | Add a value to an existing enum. |
-| `AddUnion` | Add a union with a list of member table names. |
+| `AddUnion` | Add a union with a list of initial member table names. |
+| `AddUnionMember` | Add a table to an existing union. Rejects duplicates. |
+| `RemoveUnionMember` | Remove a table from an existing union. Rejects if the member is not present. |
 
 **Imports**
 
@@ -488,10 +502,7 @@ Resolution order (first wins): CLI flags → config file profile → environment
 | Feature | Status |
 |---|---|
 | OpenAPI granular mutations | Not supported. Use `UpdateSchema` (whole-document replacement). |
-| `ExplorationService.FollowType` | Not implemented. |
-| `ExplorationService.ListDependencies` | Not implemented. |
 | `CodegenService.PreviewCodegen` | Not implemented. |
-| Protobuf `UpdateImport` pinning | Not implemented (import paths are stored; pin-to-commit is a no-op). |
-| FlatBuffers union mutations | Union creation (`AddUnion`) is supported; mutations on existing unions are not. |
+| Protobuf `UpdateImport` remove | The API proto does not expose a `remove` flag; import entries can be added/updated but not removed via the API in v1. |
 | 3-way merge | Not supported. Merge is fast-forward only. |
 | Multiple storage backends | Only redb is implemented. The trait is ready for other backends. |
