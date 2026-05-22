@@ -473,11 +473,25 @@ impl FormatPlugin for FlatBuffersPlugin {
 
     fn generate_descriptors(
         &self,
-        _blobs: &HashMap<SchemaPath, Blob>,
+        blobs: &HashMap<SchemaPath, Blob>,
     ) -> Result<Bytes, DescriptorError> {
-        Err(DescriptorError::Other(
-            "FlatBuffers descriptor generation not yet implemented".into(),
-        ))
+        // Return the reconstructed .fbs source(s) as raw bytes.
+        // Each blob is a ParseEnvelope; print_envelope reconstructs the .fbs source.
+        let mut out = Vec::new();
+        // Sort by schema path for deterministic output.
+        let mut sorted: Vec<(&SchemaPath, &Blob)> = blobs.iter().collect();
+        sorted.sort_by_key(|(path, _)| path.schema_name.as_str());
+        for (_, blob) in sorted {
+            let envelope = decode_envelope_mutation(blob.as_bytes())
+                .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+            let source = print_envelope(&envelope)
+                .map_err(|e| DescriptorError::Other(e.to_string()))?;
+            if !out.is_empty() {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(source.as_bytes());
+        }
+        Ok(Bytes::from(out))
     }
 
     // ── generate_code ─────────────────────────────────────────────────────────

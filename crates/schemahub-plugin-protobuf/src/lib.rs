@@ -21,7 +21,7 @@ use crate::ast::{
     KIND_METADATA, KIND_SERVICE, decode_decl_blob, decode_decl_blob_print, decode_decl_blob_read,
     decode_envelope, decode_envelope_mutation, decode_envelope_print, encode_decl_blob,
     encode_envelope, unwrap_enum, unwrap_enum_print, unwrap_enum_read, unwrap_message,
-    unwrap_message_print, unwrap_message_read, unwrap_metadata_print,
+    unwrap_message_print, unwrap_message_read, unwrap_metadata, unwrap_metadata_print,
     unwrap_metadata_read, unwrap_service, unwrap_service_print, unwrap_service_read, wrap_enum,
     wrap_message, wrap_metadata, wrap_service,
 };
@@ -470,10 +470,114 @@ impl FormatPlugin for ProtobufPlugin {
 
     fn generate_descriptors(
         &self,
-        _blobs: &HashMap<SchemaPath, Blob>,
+        blobs: &HashMap<SchemaPath, Blob>,
     ) -> Result<Bytes, DescriptorError> {
-        // TODO: implement FileDescriptorSet generation using prost-types
-        Err(DescriptorError::Other("not yet implemented".into()))
+        use prost::Message as _;
+        use prost_types::{
+            DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto,
+            FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+            MethodDescriptorProto, ServiceDescriptorProto,
+            field_descriptor_proto::Label,
+        };
+
+        let mut files: Vec<FileDescriptorProto> = Vec::new();
+
+        for (schema_path, blob) in blobs {
+            let envelope = decode_envelope_mutation(blob.as_bytes())
+                .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+
+            let mut fdp = FileDescriptorProto {
+                name: Some(schema_path.schema_name.clone()),
+                syntax: Some("proto3".to_owned()),
+                ..Default::default()
+            };
+
+            for decl in &envelope.declarations {
+                let db = decode_decl_blob(&decl.blob_bytes)
+                    .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+
+                match db.kind {
+                    KIND_METADATA => {
+                        let meta = unwrap_metadata(&db)
+                            .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+                        if !meta.syntax.is_empty() {
+                            fdp.syntax = Some(meta.syntax);
+                        }
+                        if !meta.package.is_empty() {
+                            fdp.package = Some(meta.package);
+                        }
+                        for imp in &meta.imports {
+                            fdp.dependency.push(imp.path.clone());
+                        }
+                    }
+                    KIND_MESSAGE => {
+                        let msg = unwrap_message(&db)
+                            .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+                        let mut dp = DescriptorProto {
+                            name: Some(msg.name.clone()),
+                            ..Default::default()
+                        };
+                        for field in &msg.fields {
+                            let (ftype, type_name) = proto_scalar_type(&field.field_type);
+                            dp.field.push(FieldDescriptorProto {
+                                name: Some(field.name.clone()),
+                                number: Some(field.number as i32),
+                                label: Some(if field.repeated {
+                                    Label::Repeated as i32
+                                } else {
+                                    Label::Optional as i32
+                                }),
+                                r#type: Some(ftype as i32),
+                                type_name,
+                                ..Default::default()
+                            });
+                        }
+                        fdp.message_type.push(dp);
+                    }
+                    KIND_ENUM => {
+                        let en = unwrap_enum(&db)
+                            .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+                        let mut edp = EnumDescriptorProto {
+                            name: Some(en.name.clone()),
+                            ..Default::default()
+                        };
+                        for v in &en.values {
+                            edp.value.push(EnumValueDescriptorProto {
+                                name: Some(v.name.clone()),
+                                number: Some(v.number),
+                                options: None,
+                            });
+                        }
+                        fdp.enum_type.push(edp);
+                    }
+                    KIND_SERVICE => {
+                        let svc = unwrap_service(&db)
+                            .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
+                        let mut sdp = ServiceDescriptorProto {
+                            name: Some(svc.name.clone()),
+                            ..Default::default()
+                        };
+                        for rpc in &svc.rpcs {
+                            sdp.method.push(MethodDescriptorProto {
+                                name: Some(rpc.name.clone()),
+                                input_type: Some(qualify(&rpc.request_type, fdp.package.as_deref())),
+                                output_type: Some(qualify(&rpc.response_type, fdp.package.as_deref())),
+                                client_streaming: Some(rpc.client_streaming),
+                                server_streaming: Some(rpc.server_streaming),
+                                ..Default::default()
+                            });
+                        }
+                        fdp.service.push(sdp);
+                    }
+                    _ => {}
+                }
+            }
+
+            files.push(fdp);
+        }
+
+        let fds = FileDescriptorSet { file: files };
+        Ok(Bytes::from(fds.encode_to_vec()))
     }
 
     // ── generate_code ─────────────────────────────────────────────────────────
@@ -488,6 +592,48 @@ impl FormatPlugin for ProtobufPlugin {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Map a Protobuf scalar type name to a (Type, Option<type_name>) pair.
+/// Unknown names are treated as message/enum references.
+fn proto_scalar_type(
+    field_type: &str,
+) -> (prost_types::field_descriptor_proto::Type, Option<String>) {
+    use prost_types::field_descriptor_proto::Type;
+    match field_type {
+        "double"   => (Type::Double, None),
+        "float"    => (Type::Float, None),
+        "int32"    => (Type::Int32, None),
+        "int64"    => (Type::Int64, None),
+        "uint32"   => (Type::Uint32, None),
+        "uint64"   => (Type::Uint64, None),
+        "sint32"   => (Type::Sint32, None),
+        "sint64"   => (Type::Sint64, None),
+        "fixed32"  => (Type::Fixed32, None),
+        "fixed64"  => (Type::Fixed64, None),
+        "sfixed32" => (Type::Sfixed32, None),
+        "sfixed64" => (Type::Sfixed64, None),
+        "bool"     => (Type::Bool, None),
+        "string"   => (Type::String, None),
+        "bytes"    => (Type::Bytes, None),
+        other => (Type::Message, Some(qualify(other, None))),
+    }
+}
+
+/// Turn a type reference into a fully-qualified `.package.TypeName` form.
+fn qualify(type_ref: &str, package: Option<&str>) -> String {
+    if type_ref.starts_with('.') {
+        return type_ref.to_owned();
+    }
+    // If the reference already has dots (e.g. "acme.User"), use as-is from root
+    if type_ref.contains('.') {
+        return format!(".{}", type_ref);
+    }
+    // Unqualified name: scope under current package if known
+    match package {
+        Some(pkg) if !pkg.is_empty() => format!(".{}.{}", pkg, type_ref),
+        _ => format!(".{}", type_ref),
+    }
+}
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_owned()
@@ -782,5 +928,54 @@ mod tests {
         let rules = CompatibilityRules { direction: CompatibilityDirection::Full };
         let result = plugin.check_compatibility(&old_decl, &new_decl, &rules);
         assert!(result.is_ok(), "adding a field should be FULL compatible: {result:?}");
+    }
+
+    #[test]
+    fn generate_descriptors_produces_valid_file_descriptor_set() {
+        use prost::Message as _;
+        use prost_types::FileDescriptorSet;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"
+            syntax = "proto3";
+            package payments;
+            message CreatePaymentRequest {
+                string user_id = 1;
+                int64 amount_cents = 2;
+            }
+            enum Status { UNKNOWN = 0; ACTIVE = 1; }
+        "#;
+
+        let blob = plugin.parse(source).unwrap();
+        let schema_path = SchemaPath::new("acme", "billing", "payment.proto");
+        let blobs = HashMap::from([(schema_path, blob)]);
+
+        let bytes = plugin.generate_descriptors(&blobs)
+            .expect("generate_descriptors should succeed");
+        assert!(!bytes.is_empty(), "descriptor bytes should not be empty");
+
+        let fds = FileDescriptorSet::decode(bytes.as_ref())
+            .expect("output must be a valid FileDescriptorSet");
+        assert_eq!(fds.file.len(), 1);
+
+        let fdp = &fds.file[0];
+        assert_eq!(fdp.name.as_deref(), Some("payment.proto"));
+        assert_eq!(fdp.package.as_deref(), Some("payments"));
+        assert_eq!(fdp.syntax.as_deref(), Some("proto3"));
+
+        // Message
+        assert_eq!(fdp.message_type.len(), 1);
+        let msg = &fdp.message_type[0];
+        assert_eq!(msg.name.as_deref(), Some("CreatePaymentRequest"));
+        assert_eq!(msg.field.len(), 2);
+        let f0 = &msg.field[0];
+        assert_eq!(f0.name.as_deref(), Some("user_id"));
+        assert_eq!(f0.number, Some(1));
+
+        // Enum
+        assert_eq!(fdp.enum_type.len(), 1);
+        let en = &fdp.enum_type[0];
+        assert_eq!(en.name.as_deref(), Some("Status"));
+        assert_eq!(en.value.len(), 2);
     }
 }

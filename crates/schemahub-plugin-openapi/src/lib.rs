@@ -191,90 +191,25 @@ impl FormatPlugin for OpenApiPlugin {
         &self,
         blobs: &HashMap<SchemaPath, Blob>,
     ) -> Result<Bytes, DescriptorError> {
-        // Assemble complete OpenAPI YAML from all blobs
-        let mut paths_map = serde_yaml::Mapping::new();
-        let mut schemas_map = serde_yaml::Mapping::new();
-        let mut params_map = serde_yaml::Mapping::new();
-        let mut responses_map = serde_yaml::Mapping::new();
-        let mut request_bodies_map = serde_yaml::Mapping::new();
-        let mut openapi_version = "3.1.0".to_owned();
-        let mut info_val = serde_yaml::Value::Null;
-        let mut servers_val = serde_yaml::Value::Sequence(vec![]);
+        // For a single schema (the common case) return its full YAML.
+        // For multiple schemas (cross-file $ref), concatenate their YAML documents
+        // separated by "---" so the result is a valid multi-document YAML stream.
+        let mut sorted: Vec<(&SchemaPath, &Blob)> = blobs.iter().collect();
+        sorted.sort_by_key(|(path, _)| path.schema_name.as_str());
 
-        for blob in blobs.values() {
+        let mut out = String::new();
+        for (_, blob) in sorted {
             let result = decode_parse_result(blob.as_bytes())
                 .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
-
-            for decl in &result.declarations {
-                if decl.tree_key == "__metadata__" {
-                    let meta = decode_metadata(&decl.blob_bytes)
-                        .map_err(|e| DescriptorError::MalformedBlob(e.to_string()))?;
-                    openapi_version = meta.openapi_version.clone();
-                    if let Some(info) = &meta.info {
-                        let mut m = serde_yaml::Mapping::new();
-                        m.insert("title".into(), info.title.clone().into());
-                        m.insert("version".into(), info.version.clone().into());
-                        if let Some(d) = &info.description {
-                            m.insert("description".into(), d.clone().into());
-                        }
-                        info_val = serde_yaml::Value::Mapping(m);
-                    }
-                    if !meta.servers.is_empty() {
-                        let svs: Vec<serde_yaml::Value> = meta
-                            .servers
-                            .iter()
-                            .map(|s| {
-                                let mut m = serde_yaml::Mapping::new();
-                                m.insert("url".into(), s.url.clone().into());
-                                if let Some(d) = &s.description {
-                                    m.insert("description".into(), d.clone().into());
-                                }
-                                serde_yaml::Value::Mapping(m)
-                            })
-                            .collect();
-                        servers_val = serde_yaml::Value::Sequence(svs);
-                    }
-                } else if let Some(path) = decl.tree_key.strip_prefix("path:") {
-                    paths_map.insert(path.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                } else if let Some(name) = decl.tree_key.strip_prefix("schema:") {
-                    schemas_map.insert(name.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                } else if let Some(name) = decl.tree_key.strip_prefix("param:") {
-                    params_map.insert(name.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                } else if let Some(name) = decl.tree_key.strip_prefix("response:") {
-                    responses_map.insert(name.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                } else if let Some(name) = decl.tree_key.strip_prefix("requestBody:") {
-                    request_bodies_map.insert(name.into(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                }
+            let yaml = print_envelope(&result)
+                .map_err(|e| DescriptorError::Other(e.to_string()))?;
+            if !out.is_empty() {
+                out.push_str("---\n");
             }
+            out.push_str(&yaml);
         }
 
-        let mut root = serde_yaml::Mapping::new();
-        root.insert("openapi".into(), openapi_version.into());
-        root.insert("info".into(), info_val);
-        root.insert("servers".into(), servers_val);
-        root.insert("paths".into(), serde_yaml::Value::Mapping(paths_map));
-
-        let mut components = serde_yaml::Mapping::new();
-        if !schemas_map.is_empty() {
-            components.insert("schemas".into(), serde_yaml::Value::Mapping(schemas_map));
-        }
-        if !params_map.is_empty() {
-            components.insert("parameters".into(), serde_yaml::Value::Mapping(params_map));
-        }
-        if !responses_map.is_empty() {
-            components.insert("responses".into(), serde_yaml::Value::Mapping(responses_map));
-        }
-        if !request_bodies_map.is_empty() {
-            components.insert("requestBodies".into(), serde_yaml::Value::Mapping(request_bodies_map));
-        }
-        if !components.is_empty() {
-            root.insert("components".into(), serde_yaml::Value::Mapping(components));
-        }
-
-        let yaml_str = serde_yaml::to_string(&root)
-            .map_err(|e| DescriptorError::Other(e.to_string()))?;
-
-        Ok(Bytes::from(yaml_str.into_bytes()))
+        Ok(Bytes::from(out.into_bytes()))
     }
 
     // ── generate_code ─────────────────────────────────────────────────────────

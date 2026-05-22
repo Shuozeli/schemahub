@@ -93,7 +93,7 @@ impl CodegenService for CodegenServiceImpl {
             .find(|(name, _)| name == &req.schema_path)
             .ok_or_else(|| Status::not_found(format!("schema '{}' not found", req.schema_path)))?;
 
-        // Load the schema tree object to get declaration blobs.
+        // Load the schema tree to find the __schema__ blob (whole-schema ParseEnvelope).
         let schema_tree_data = self.core.storage
             .read_object(schema_tree_hash)
             .map_err(|e| Status::internal(e.to_string()))?
@@ -101,39 +101,31 @@ impl CodegenService for CodegenServiceImpl {
         let schema_tree = schemahub_core::objects::decode_tree(&schema_tree_data)
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Build blobs map and print reconstructed source.
-        let mut printed_parts = Vec::new();
-        let schema_path = SchemaPath::new(req.project.clone(), req.repo.clone(), req.schema_path.clone());
+        let schema_entry = schema_tree
+            .entries
+            .iter()
+            .find(|e| e.name == "__schema__")
+            .ok_or_else(|| Status::internal("__schema__ blob not found in schema tree"))?;
 
-        for entry in &schema_tree.entries {
-            if entry.kind != schemahub_core::objects::KIND_BLOB {
-                continue;
-            }
-            let blob_hash = schemahub_types::Hash::from_hex(&entry.hash)
-                .map_err(|_| Status::internal(format!("invalid blob hash: {}", entry.hash)))?;
-            let blob_data = self.core.storage
-                .read_object(&blob_hash)
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::internal(format!("blob {} not found", entry.hash)))?;
-            let blob = Blob::new(blob_data);
+        let blob_hash = schemahub_types::Hash::from_hex(&schema_entry.hash)
+            .map_err(|_| Status::internal(format!("invalid blob hash: {}", schema_entry.hash)))?;
+        let blob_data = self.core.storage
+            .read_object(&blob_hash)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::internal(format!("blob {} not found", schema_entry.hash)))?;
+        let blob = Blob::new(blob_data);
 
-            match plugin.print(&blob) {
-                Ok(source) => printed_parts.push(source),
-                Err(_) => {} // skip unrepresentable blobs
-            }
-        }
+        // Build the blobs map (single entry — BFS transitive closure not yet implemented).
+        let schema_path = SchemaPath::new(
+            req.project.clone(),
+            req.repo.clone(),
+            req.schema_path.clone(),
+        );
+        let blobs = std::collections::HashMap::from([(schema_path, blob)]);
 
-        // Try generate_descriptors using print-reconstructed blobs.
-        let descriptor_bytes = if printed_parts.is_empty() {
-            vec![]
-        } else {
-            // For a simple implementation: return the reconstructed source as UTF-8 bytes.
-            // A full implementation would call plugin.generate_descriptors() with the blobs map.
-            let full_source = printed_parts.join("\n\n");
-            full_source.into_bytes()
-        };
-
-        let _ = schema_path; // suppress unused warning
+        let descriptor_bytes = plugin
+            .generate_descriptors(&blobs)
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(GetDescriptorsResponse {
             descriptor_bytes: descriptor_bytes.into(),
