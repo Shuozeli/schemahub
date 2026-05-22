@@ -3,7 +3,9 @@ package schemahub.v1;
 
 option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
 
-import "schemahub/v1/common.proto";
+import "schemahub/v1/refs.proto";
+import "schemahub/v1/resources.proto";
+import "schemahub/v1/errors.proto";
 
 service RefService {
   // ── Commits ─────────────────────────────────────────────────────────────────

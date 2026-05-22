@@ -1,0 +1,15 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+// A pointer to a specific point in history.
+// Used in read RPCs to specify which version to read.
+// Exactly one field must be set.
+message VersionRef {
+  oneof ref {
+    string branch = 1;  // resolves to HEAD of the branch at request time
+    string tag    = 2;  // resolves to the tagged commit
+    string commit = 3;  // pinned commit hash; never changes
+  }
+}

@@ -5,7 +5,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .compile_protos(
             &[
-                "proto/schemahub/v1/common.proto",
+                "proto/schemahub/v1/enums.proto",
+                "proto/schemahub/v1/refs.proto",
+                "proto/schemahub/v1/resources.proto",
+                "proto/schemahub/v1/errors.proto",
                 "proto/schemahub/v1/mutations.proto",
                 "proto/schemahub/v1/schema_service.proto",
                 "proto/schemahub/v1/ref_service.proto",

@@ -1,0 +1,53 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "google/protobuf/timestamp.proto";
+import "schemahub/v1/enums.proto";
+
+// A commit in the version history.
+message CommitInfo {
+  string                    hash          = 1;
+  repeated string           parent_hashes = 2;
+  google.protobuf.Timestamp timestamp     = 3;
+  string                    author        = 4;
+  string                    message       = 5;
+  bool                      force         = 6;
+  string                    format_id     = 7;  // "protobuf", "flatbuffers", "openapi"
+}
+
+// A summary of one top-level declaration within a schema file.
+message DeclSummary {
+  string   name        = 1;  // e.g. "UserRequest", "path:/users", "schema:User"
+  DeclKind kind        = 2;
+  string   doc_comment = 3;  // first line of leading comment; empty if none
+}
+
+// A schema file within a repo.
+message SchemaInfo {
+  string       name      = 1;  // e.g. "user.proto"
+  SchemaFormat format    = 2;
+  string       head_blob = 3;  // hash of the schema tree at HEAD
+}
+
+// A branch ref.
+message BranchInfo {
+  string project     = 1;
+  string repo        = 2;
+  string name        = 3;
+  string head_commit = 4;
+  bool   protected   = 5;
+}
+
+// A tag ref (lightweight or annotated).
+message TagInfo {
+  string                    project     = 1;
+  string                    repo        = 2;
+  string                    name        = 3;
+  string                    commit_hash = 4;  // resolved commit (even for annotated tags)
+  bool                      annotated   = 5;
+  string                    tagger      = 6;  // empty for lightweight tags
+  string                    message     = 7;  // empty for lightweight tags
+  google.protobuf.Timestamp timestamp   = 8;
+}

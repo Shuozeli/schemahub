@@ -1,0 +1,52 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/enums.proto";
+
+// ── Structured error detail types ─────────────────────────────────────────────
+// Embedded in gRPC status details[] so callers can inspect failures
+// programmatically rather than parsing error message strings.
+
+// Returned when base_revision does not match the current branch HEAD.
+// gRPC status: FAILED_PRECONDITION
+message ConflictDetail {
+  string current_head  = 1;  // what the branch is actually at
+  string provided_base = 2;  // what the caller sent
+  string branch        = 3;
+}
+
+// One compatibility violation found during a check.
+message CompatibilityViolation {
+  string                 schema_path      = 1;
+  string                 declaration_name = 2;
+  string                 field_name       = 3;  // empty if declaration-level
+  string                 message          = 4;  // human-readable explanation
+  CompatibilityDirection direction        = 5;  // the direction that was violated
+}
+
+// Returned when a compatibility check fails.
+// gRPC status: FAILED_PRECONDITION
+message CompatibilityError {
+  repeated CompatibilityViolation violations = 1;
+}
+
+// Returned when a mutation is rejected by the format validator.
+// gRPC status: INVALID_ARGUMENT
+message MutationValidationError {
+  string schema_path      = 1;
+  string declaration_name = 2;
+  string field_name       = 3;
+  string reason           = 4;
+}
+
+// Returned when a merge cannot fast-forward.
+// gRPC status: FAILED_PRECONDITION
+message MergeConflictDetail {
+  string          source_branch         = 1;
+  string          target_branch         = 2;
+  string          diverged_at_commit    = 3;  // the LCA
+  repeated string source_only_commits   = 4;
+  repeated string target_only_commits   = 5;
+}

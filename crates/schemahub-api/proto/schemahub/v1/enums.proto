@@ -1,0 +1,61 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+// Schema wire format. Determines which plugin handles parse/print/mutation.
+enum SchemaFormat {
+  SCHEMA_FORMAT_UNSPECIFIED  = 0;
+  SCHEMA_FORMAT_PROTOBUF     = 1;
+  SCHEMA_FORMAT_FLATBUFFERS  = 2;
+  SCHEMA_FORMAT_OPENAPI      = 3;
+}
+
+// Compatibility enforcement direction for a repo's protected branches.
+enum CompatibilityDirection {
+  COMPATIBILITY_DIRECTION_UNSPECIFIED = 0;
+  COMPATIBILITY_DIRECTION_BACKWARD    = 1;
+  COMPATIBILITY_DIRECTION_FORWARD     = 2;
+  COMPATIBILITY_DIRECTION_FULL        = 3;
+  COMPATIBILITY_DIRECTION_DISABLED    = 4;  // no checks (dev repos)
+}
+
+// Kind of a top-level declaration within a schema file.
+enum DeclKind {
+  DECL_KIND_UNSPECIFIED            = 0;
+  // Protobuf
+  DECL_KIND_MESSAGE                = 1;
+  DECL_KIND_ENUM                   = 2;
+  DECL_KIND_SERVICE                = 3;
+  // FlatBuffers
+  DECL_KIND_TABLE                  = 4;
+  DECL_KIND_STRUCT                 = 5;
+  DECL_KIND_FBS_ENUM               = 6;
+  DECL_KIND_UNION                  = 7;
+  // OpenAPI
+  DECL_KIND_PATH_ITEM              = 8;
+  DECL_KIND_COMPONENT_SCHEMA       = 9;
+  DECL_KIND_COMPONENT_PARAMETER    = 10;
+  DECL_KIND_COMPONENT_RESPONSE     = 11;
+  DECL_KIND_COMPONENT_REQUEST_BODY = 12;
+  DECL_KIND_DOCUMENT_METADATA      = 13;
+}
+
+// Role of a project member.
+enum Role {
+  ROLE_UNSPECIFIED  = 0;
+  ROLE_READER       = 1;
+  ROLE_WRITER       = 2;
+  ROLE_MAINTAINER   = 3;
+  ROLE_OWNER        = 4;
+}
+
+// Target language for server-side code generation (PreviewCodegen).
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0;
+  LANGUAGE_RUST        = 1;
+  LANGUAGE_GO          = 2;
+  LANGUAGE_TYPESCRIPT  = 3;
+  LANGUAGE_PYTHON      = 4;
+  LANGUAGE_JAVA        = 5;
+}

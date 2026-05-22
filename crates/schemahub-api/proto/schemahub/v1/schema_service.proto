@@ -3,7 +3,7 @@ package schemahub.v1;
 
 option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
 
-import "schemahub/v1/common.proto";
+import "schemahub/v1/enums.proto";
 import "schemahub/v1/mutations.proto";
 
 service SchemaService {
