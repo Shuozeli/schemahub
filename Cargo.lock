@@ -980,6 +980,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "prost",
+ "schemahub-plugin-flatbuffers",
+ "schemahub-plugin-openapi",
+ "schemahub-plugin-protobuf",
  "schemahub-storage",
  "schemahub-types",
  "serde",

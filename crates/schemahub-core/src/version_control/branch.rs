@@ -31,6 +31,7 @@ pub fn set_branch_head(
 
 /// Create a new branch pointing at `from_hash`.
 /// Returns `CoreError::AlreadyExists` if the branch already exists.
+/// Returns `CoreError::NotFound` if the commit does not exist in storage.
 pub fn create_branch(
     storage: &dyn StorageBackend,
     project: &str,
@@ -42,6 +43,13 @@ pub fn create_branch(
     if storage.get_ref(&key)?.is_some() {
         return Err(CoreError::AlreadyExists(format!(
             "branch '{name}' already exists in {project}/{repo}"
+        )));
+    }
+    // Validate that the commit actually exists in storage.
+    let obj_key = schemahub_storage::keys::object_key(from_hash);
+    if storage.get(&obj_key)?.is_none() {
+        return Err(CoreError::NotFound(format!(
+            "commit {} not found in storage", from_hash.to_hex()
         )));
     }
     storage.set_ref(&key, from_hash)?;

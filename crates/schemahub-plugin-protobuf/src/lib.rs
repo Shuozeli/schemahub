@@ -19,7 +19,7 @@ use schemahub_types::{
 use crate::ast::{
     DeclBlob, FileMetadataBlob, ImportDef, ParseEnvelope, ParsedDecl, KIND_ENUM, KIND_MESSAGE,
     KIND_METADATA, KIND_SERVICE, decode_decl_blob, decode_decl_blob_print, decode_decl_blob_read,
-    decode_envelope, decode_envelope_print, encode_decl_blob,
+    decode_envelope, decode_envelope_mutation, decode_envelope_print, encode_decl_blob,
     encode_envelope, unwrap_enum, unwrap_enum_print, unwrap_enum_read, unwrap_message,
     unwrap_message_print, unwrap_message_read, unwrap_metadata_print,
     unwrap_metadata_read, unwrap_service, unwrap_service_print, unwrap_service_read, wrap_enum,
@@ -138,86 +138,140 @@ impl FormatPlugin for ProtobufPlugin {
     // ── apply_mutation ────────────────────────────────────────────────────────
 
     fn apply_mutation(&self, blob: &Blob, mutation: &Mutation) -> Result<Blob, MutationError> {
+        use crate::ast::{FieldDef, MessageBlob, EnumValueDef};
         let op = decode_operation(&mutation.operation)?;
+        let decl_name = &mutation.declaration_name;
 
-        // Handle declaration-level ops that create/delete blobs
+        // Decode existing ParseEnvelope, or start empty
+        let mut envelope = if blob.as_bytes().is_empty() {
+            ParseEnvelope { blob_version: 1, declarations: vec![] }
+        } else {
+            decode_envelope_mutation(blob.as_bytes())?
+        };
+
+        // Schema-level (declaration create/delete/rename) ops
         match &op {
             ProtoOp::AddMessage(o) => {
-                let new_msg = crate::ast::MessageBlob {
+                let msg = MessageBlob {
                     blob_version: 1,
                     name: o.message_name.clone(),
-                    fields: vec![],
-                    reserved_numbers: vec![],
-                    reserved_names: vec![],
                     doc_comment: o.doc_comment.clone(),
+                    ..Default::default()
                 };
-                let decl_blob = wrap_message(&new_msg);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.message_name.clone(),
+                    blob_bytes: encode_decl_blob(&wrap_message(&msg)),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
+            ProtoOp::RemoveMessage(o) => {
+                envelope.declarations.retain(|d| d.tree_key != o.message_name);
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
+            ProtoOp::RenameMessage(o) => {
+                if let Some(decl) = envelope.declarations.iter_mut().find(|d| d.tree_key == o.old_name) {
+                    decl.tree_key = o.new_name.clone();
+                    if let Ok(mut db) = decode_decl_blob(&decl.blob_bytes) {
+                        if let Ok(mut msg) = unwrap_message(&db) {
+                            msg.name = o.new_name.clone();
+                            db = wrap_message(&msg);
+                            decl.blob_bytes = encode_decl_blob(&db);
+                        }
+                    }
+                }
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             ProtoOp::AddEnum(o) => {
-                let new_enum = crate::ast::EnumBlob {
+                use crate::ast::EnumBlob;
+                let e = EnumBlob {
                     blob_version: 1,
                     name: o.enum_name.clone(),
-                    values: vec![],
                     doc_comment: o.doc_comment.clone(),
+                    ..Default::default()
                 };
-                let decl_blob = wrap_enum(&new_enum);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
-            }
-            ProtoOp::RemoveMessage(_) => {
-                // Signal deletion with a special sentinel
-                let sentinel = crate::ast::MessageBlob {
-                    blob_version: 1,
-                    name: "__deleted__".into(),
-                    fields: vec![],
-                    reserved_numbers: vec![],
-                    reserved_names: vec![],
-                    doc_comment: String::new(),
-                };
-                let decl_blob = wrap_message(&sentinel);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.enum_name.clone(),
+                    blob_bytes: encode_decl_blob(&wrap_enum(&e)),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             _ => {}
         }
 
-        // Decode the current DeclBlob
-        let decl_blob = decode_decl_blob(blob.as_bytes())?;
+        // Declaration-level (field/value) ops: find the target declaration
+        let decl_idx = envelope.declarations.iter()
+            .position(|d| d.tree_key == *decl_name)
+            .ok_or_else(|| MutationError::InvalidOperation(
+                format!("declaration '{}' not found in schema", decl_name)
+            ))?;
+
+        let decl_blob = decode_decl_blob(&envelope.declarations[decl_idx].blob_bytes)?;
 
         let new_decl_blob = match decl_blob.kind {
             KIND_MESSAGE => {
-                let msg = unwrap_message(&decl_blob)?;
-                let new_msg = apply_to_message(&msg, &op)?;
-                wrap_message(&new_msg)
+                let mut msg = unwrap_message(&decl_blob)?;
+                match &op {
+                    ProtoOp::AddField(o) => {
+                        msg.fields.push(FieldDef {
+                            name: o.field_name.clone(),
+                            field_type: o.field_type.clone(),
+                            number: o.field_number,
+                            repeated: o.repeated,
+                            doc_comment: o.doc_comment.clone(),
+                        });
+                    }
+                    ProtoOp::RemoveField(o) => {
+                        msg.fields.retain(|f| f.name != o.field_name);
+                    }
+                    ProtoOp::RenameField(o) => {
+                        if let Some(f) = msg.fields.iter_mut().find(|f| f.name == o.old_field_name) {
+                            f.name = o.new_field_name.clone();
+                        }
+                    }
+                    ProtoOp::ChangeFieldType(o) => {
+                        if let Some(f) = msg.fields.iter_mut().find(|f| f.name == o.field_name) {
+                            f.field_type = o.new_type.clone();
+                        }
+                    }
+                    ProtoOp::ChangeFieldLabel(o) => {
+                        if let Some(f) = msg.fields.iter_mut().find(|f| f.name == o.field_name) {
+                            f.repeated = o.new_label == "repeated";
+                        }
+                    }
+                    ProtoOp::ReorderFields(o) => {
+                        let ordered: Vec<FieldDef> = o.field_order.iter()
+                            .filter_map(|name| msg.fields.iter().find(|f| f.name == *name).cloned())
+                            .collect();
+                        msg.fields = ordered;
+                    }
+                    _ => return Err(MutationError::UnsupportedInV1),
+                }
+                wrap_message(&msg)
             }
             KIND_ENUM => {
-                let e = unwrap_enum(&decl_blob)?;
-                let new_enum = match &op {
-                    ProtoOp::AddEnumValue(o) => apply_add_enum_value(&e, o)?,
-                    _ => {
-                        return Err(MutationError::InvalidOperation(format!(
-                            "operation {:?} cannot be applied to an enum blob",
-                            std::mem::discriminant(&op)
-                        )));
+                let mut e = unwrap_enum(&decl_blob)?;
+                match &op {
+                    ProtoOp::AddEnumValue(o) => {
+                        e.values.push(EnumValueDef {
+                            name: o.value_name.clone(),
+                            number: o.number,
+                            doc_comment: o.doc_comment.clone(),
+                        });
                     }
-                };
-                wrap_enum(&new_enum)
+                    _ => return Err(MutationError::UnsupportedInV1),
+                }
+                wrap_enum(&e)
             }
             KIND_SERVICE => {
                 return Err(MutationError::UnsupportedInV1);
             }
-            KIND_METADATA => {
-                return Err(MutationError::InvalidOperation(
-                    "cannot mutate __metadata__ blob directly".into(),
-                ));
-            }
             other => {
-                return Err(MutationError::MalformedBlob(format!(
-                    "unknown DeclBlob kind {other}"
-                )));
+                return Err(MutationError::MalformedBlob(format!("unknown DeclBlob kind {other}")));
             }
         };
 
-        Ok(Blob::from(encode_decl_blob(&new_decl_blob)))
+        envelope.declarations[decl_idx].blob_bytes = encode_decl_blob(&new_decl_blob);
+        Ok(Blob::from(encode_envelope(&envelope)))
     }
 
     // ── apply_mutations ───────────────────────────────────────────────────────
@@ -255,79 +309,61 @@ impl FormatPlugin for ProtobufPlugin {
     ) -> Result<(), Vec<CompatibilityViolation>> {
         let direction = rules.direction;
 
-        let old_decl = decode_decl_blob(old.as_bytes())
-            .map_err(|e| vec![CompatibilityViolation {
-                declaration_name: "unknown".into(),
-                field_name: None,
-                message: format!("malformed old blob: {e}"),
-            }])?;
+        let old_env = decode_envelope_mutation(old.as_bytes())
+            .unwrap_or_else(|_| ParseEnvelope { blob_version: 1, declarations: vec![] });
+        let new_env = decode_envelope_mutation(new.as_bytes())
+            .unwrap_or_else(|_| ParseEnvelope { blob_version: 1, declarations: vec![] });
 
-        let new_decl = decode_decl_blob(new.as_bytes())
-            .map_err(|e| vec![CompatibilityViolation {
-                declaration_name: "unknown".into(),
-                field_name: None,
-                message: format!("malformed new blob: {e}"),
-            }])?;
+        let mut all_violations: Vec<CompatibilityViolation> = Vec::new();
 
-        let violations = match (old_decl.kind, new_decl.kind) {
-            (KIND_MESSAGE, KIND_MESSAGE) => {
-                let old_msg = unwrap_message(&old_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                let new_msg = unwrap_message(&new_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                check_message_compat(&old_msg, &new_msg, direction)
+        for new_decl in &new_env.declarations {
+            if new_decl.tree_key == "__metadata__" {
+                continue;
             }
-            (KIND_ENUM, KIND_ENUM) => {
-                let old_e = unwrap_enum(&old_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                let new_e = unwrap_enum(&new_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                check_enum_compat(&old_e, &new_e, direction)
-            }
-            (KIND_SERVICE, KIND_SERVICE) => {
-                let old_svc = unwrap_service(&old_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                let new_svc = unwrap_service(&new_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                check_service_compat(&old_svc, &new_svc, direction)
-            }
-            _ => vec![],
-        };
+            let old_bytes = old_env.declarations.iter()
+                .find(|d| d.tree_key == new_decl.tree_key)
+                .map(|d| d.blob_bytes.as_slice());
 
-        if violations.is_empty() {
+            let old_db = match old_bytes {
+                Some(b) => match decode_decl_blob(b) {
+                    Ok(db) => db,
+                    Err(_) => continue,
+                },
+                None => continue, // new declaration — no compat constraint
+            };
+            let new_db = match decode_decl_blob(&new_decl.blob_bytes) {
+                Ok(db) => db,
+                Err(_) => continue,
+            };
+
+            let violations = match (old_db.kind, new_db.kind) {
+                (KIND_MESSAGE, KIND_MESSAGE) => {
+                    match (unwrap_message(&old_db), unwrap_message(&new_db)) {
+                        (Ok(old_msg), Ok(new_msg)) => check_message_compat(&old_msg, &new_msg, direction),
+                        _ => vec![],
+                    }
+                }
+                (KIND_ENUM, KIND_ENUM) => {
+                    match (unwrap_enum(&old_db), unwrap_enum(&new_db)) {
+                        (Ok(old_e), Ok(new_e)) => check_enum_compat(&old_e, &new_e, direction),
+                        _ => vec![],
+                    }
+                }
+                (KIND_SERVICE, KIND_SERVICE) => {
+                    match (unwrap_service(&old_db), unwrap_service(&new_db)) {
+                        (Ok(old_svc), Ok(new_svc)) => check_service_compat(&old_svc, &new_svc, direction),
+                        _ => vec![],
+                    }
+                }
+                _ => vec![],
+            };
+            all_violations.extend(violations);
+        }
+
+        if all_violations.is_empty() {
             Ok(())
         } else {
-            Err(violations)
+            Err(all_violations)
         }
     }
 

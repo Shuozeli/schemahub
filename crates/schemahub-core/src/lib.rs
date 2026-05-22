@@ -166,25 +166,20 @@ impl Core {
         })?;
 
         let mut result = Vec::new();
-        for entry in &schema_tree.entries {
-            if entry.kind == objects::KIND_BLOB {
-                let blob_hash = Hash::from_hex(&entry.hash).map_err(|_| {
-                    CoreError::ObjectCorrupted(format!(
-                        "schema tree entry '{}' has invalid hash: {}",
-                        entry.name, entry.hash
-                    ))
-                })?;
-                let blob_data = self
-                    .storage
-                    .read_object(&blob_hash)?
-                    .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
-                let blob = Blob::new(blob_data);
-                let decls = plugin
-                    .list_declarations(&blob)
-                    .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
-                result.extend(decls);
-            }
-        }
+
+        // Find __schema__ blob
+        let schema_entry = schema_tree.entries.iter()
+            .find(|e| e.name == "__schema__" && e.kind == objects::KIND_BLOB);
+        let Some(entry) = schema_entry else { return Ok(result); };
+        let blob_hash = Hash::from_hex(&entry.hash).map_err(|_| {
+            CoreError::ObjectCorrupted(format!("__schema__ entry has invalid hash: {}", entry.hash))
+        })?;
+        let blob_data = self.storage.read_object(&blob_hash)?
+            .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
+        let blob = Blob::new(blob_data);
+        result = plugin.list_declarations(&blob)
+            .map_err(|e| CoreError::InvalidArgument(format!("blob is malformed: {e}")))?;
+
         Ok(result)
     }
 
@@ -217,29 +212,21 @@ impl Core {
             CoreError::InvalidArgument(format!("unknown format_id: {format_id}"))
         })?;
 
-        // Search all blobs in schema tree for the declaration.
-        for entry in &schema_tree.entries {
-            if entry.kind != objects::KIND_BLOB {
-                continue;
-            }
-            let blob_hash = Hash::from_hex(&entry.hash).map_err(|_| {
-                CoreError::ObjectCorrupted(format!(
-                    "schema tree entry '{}' has invalid hash: {}",
-                    entry.name, entry.hash
-                ))
-            })?;
-            let blob_data = self
-                .storage
-                .read_object(&blob_hash)?
-                .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
-            let blob = Blob::new(blob_data);
-            match plugin.get_declaration(&blob, decl_name) {
-                Ok(detail) => return Ok(Some(detail)),
-                Err(schemahub_types::ReadError::NotFound(_)) => continue,
-                Err(e) => return Err(CoreError::InvalidArgument(e.to_string())),
-            }
+        // Find __schema__ blob
+        let schema_entry = schema_tree.entries.iter()
+            .find(|e| e.name == "__schema__" && e.kind == objects::KIND_BLOB);
+        let Some(entry) = schema_entry else { return Ok(None); };
+        let blob_hash = Hash::from_hex(&entry.hash).map_err(|_| {
+            CoreError::ObjectCorrupted(format!("__schema__ entry has invalid hash: {}", entry.hash))
+        })?;
+        let blob_data = self.storage.read_object(&blob_hash)?
+            .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
+        let blob = Blob::new(blob_data);
+        match plugin.get_declaration(&blob, decl_name) {
+            Ok(detail) => return Ok(Some(detail)),
+            Err(schemahub_types::ReadError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(CoreError::InvalidArgument(e.to_string())),
         }
-        Ok(None)
     }
 
     // ── Schema lifecycle ──────────────────────────────────────────────────────
@@ -410,6 +397,11 @@ impl Core {
         // Load root tree.
         let head_commit = version_control::commit::read_commit(self.storage.as_ref(), &current_head)?;
         let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &head_commit)?;
+
+        // Check schema exists before updating.
+        if version_control::tree::schema_tree_from_root(self.storage.as_ref(), &root_tree, schema_name).is_err() {
+            return Err(CoreError::NotFound(format!("schema '{schema_name}' not found")));
+        }
 
         // Detect format from schema name.
         let format_id = detect_format_from_name(schema_name)
@@ -813,40 +805,17 @@ impl Core {
     ) -> Result<Hash, CoreError> {
         use objects::{TreeEntryProto, TreeObject, encode_tree, hash_of_bytes, unix_now, KIND_BLOB, KIND_SUBTREE};
 
-        // List all declarations in the envelope.
-        let decl_summaries = plugin
-            .list_declarations(envelope_blob)
-            .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
-
         let mut schema_entries: Vec<TreeEntryProto> = Vec::new();
 
-        if decl_summaries.is_empty() {
-            // Store the whole envelope as a single blob keyed by "__source__".
-            let blob_data = envelope_blob.as_bytes().to_vec();
-            let blob_hash = Hash::of(&blob_data);
-            self.storage.write_object(&blob_hash, &blob_data)?;
-            schema_entries.push(TreeEntryProto {
-                name: "__source__".to_string(),
-                kind: KIND_BLOB,
-                hash: blob_hash.to_hex(),
-            });
-        } else {
-            for summary in &decl_summaries {
-                let detail = plugin
-                    .get_declaration(envelope_blob, &summary.name)
-                    .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
-                let blob_data: Vec<u8> = detail.as_bytes().to_vec();
-                let blob_hash = Hash::of(&blob_data);
-                self.storage.write_object(&blob_hash, &blob_data)?;
-                schema_entries.push(TreeEntryProto {
-                    name: summary.name.clone(),
-                    kind: KIND_BLOB,
-                    hash: blob_hash.to_hex(),
-                });
-            }
-        }
-
-        schema_entries.sort_by(|a, b| a.name.cmp(&b.name));
+        // Store the whole parse result blob as __schema__.
+        let blob_data = envelope_blob.as_bytes().to_vec();
+        let blob_hash = Hash::of(&blob_data);
+        self.storage.write_object(&blob_hash, &blob_data)?;
+        schema_entries.push(TreeEntryProto {
+            name: "__schema__".to_string(),
+            kind: KIND_BLOB,
+            hash: blob_hash.to_hex(),
+        });
         let schema_tree = TreeObject {
             blob_version: 1,
             entries: schema_entries,

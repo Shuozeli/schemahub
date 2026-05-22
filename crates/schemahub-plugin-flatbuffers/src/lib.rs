@@ -133,8 +133,16 @@ impl FormatPlugin for FlatBuffersPlugin {
 
     fn apply_mutation(&self, blob: &Blob, mutation: &Mutation) -> Result<Blob, MutationError> {
         let op = decode_operation(&mutation.operation)?;
+        let decl_name = &mutation.declaration_name;
 
-        // Declaration-level ops that create new blobs
+        // Decode existing ParseEnvelope, or start empty
+        let mut envelope = if blob.as_bytes().is_empty() {
+            ParseEnvelope { declarations: vec![] }
+        } else {
+            decode_envelope_mutation(blob.as_bytes())?
+        };
+
+        // Schema-level (declaration create/delete/rename) ops
         match &op {
             FbsOp::AddTable(o) => {
                 let new_table = crate::ast::TableBlob {
@@ -143,7 +151,11 @@ impl FormatPlugin for FlatBuffersPlugin {
                     doc_comment: o.doc_comment.clone(),
                 };
                 let decl_blob = wrap_table(&new_table);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.table_name.clone(),
+                    blob_bytes: encode_decl_blob(&decl_blob),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             FbsOp::AddEnum(o) => {
                 let new_enum = crate::ast::EnumBlob {
@@ -153,7 +165,11 @@ impl FormatPlugin for FlatBuffersPlugin {
                     doc_comment: o.doc_comment.clone(),
                 };
                 let decl_blob = wrap_enum(&new_enum);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.enum_name.clone(),
+                    blob_bytes: encode_decl_blob(&decl_blob),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             FbsOp::AddUnion(o) => {
                 let new_union = crate::ast::UnionBlob {
@@ -162,36 +178,33 @@ impl FormatPlugin for FlatBuffersPlugin {
                     doc_comment: o.doc_comment.clone(),
                 };
                 let decl_blob = wrap_union(&new_union);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.union_name.clone(),
+                    blob_bytes: encode_decl_blob(&decl_blob),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             FbsOp::RemoveTable(o) => {
-                // Signal deletion with a sentinel
-                let sentinel = crate::ast::TableBlob {
-                    name: "__deleted__".into(),
-                    fields: vec![],
-                    doc_comment: format!("deleted: {}", o.table_name),
-                };
-                let decl_blob = wrap_table(&sentinel);
-                return Ok(Blob::from(encode_decl_blob(&decl_blob)));
+                envelope.declarations.retain(|d| d.tree_key != o.table_name);
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             FbsOp::RenameTable(o) => {
-                // Load current blob, rename
-                let decl_blob = decode_decl_blob(blob.as_bytes())?;
-                if decl_blob.kind == KIND_TABLE {
-                    let mut tbl = unwrap_table(&decl_blob)?;
-                    tbl.name = o.new_name.clone();
-                    let new_decl = wrap_table(&tbl);
-                    return Ok(Blob::from(encode_decl_blob(&new_decl)));
+                if let Some(decl) = envelope.declarations.iter_mut().find(|d| d.tree_key == o.old_name) {
+                    decl.tree_key = o.new_name.clone();
+                    if let Ok(db) = decode_decl_blob(&decl.blob_bytes) {
+                        if db.kind == KIND_TABLE {
+                            if let Ok(mut tbl) = unwrap_table(&db) {
+                                tbl.name = o.new_name.clone();
+                                let new_db = wrap_table(&tbl);
+                                decl.blob_bytes = encode_decl_blob(&new_db);
+                            }
+                        }
+                    }
                 }
-                return Err(MutationError::InvalidOperation(
-                    "RenameTable applied to non-table blob".into(),
-                ));
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             FbsOp::UpdateImport(o) => {
-                // Apply to the envelope's __metadata__ blob
-                let envelope = decode_envelope_mutation(blob.as_bytes())?;
-                let mut declarations = envelope.declarations.clone();
-                if let Some(meta_decl) = declarations.iter_mut().find(|d| d.tree_key == "__metadata__") {
+                if let Some(meta_decl) = envelope.declarations.iter_mut().find(|d| d.tree_key == "__metadata__") {
                     let meta_db = decode_decl_blob(&meta_decl.blob_bytes)?;
                     let mut meta = unwrap_metadata(&meta_db)?;
                     if o.remove {
@@ -202,14 +215,19 @@ impl FormatPlugin for FlatBuffersPlugin {
                     let new_meta_db = wrap_metadata(&meta);
                     meta_decl.blob_bytes = encode_decl_blob(&new_meta_db);
                 }
-                let new_envelope = ParseEnvelope { declarations };
-                return Ok(Blob::from(encode_envelope(&new_envelope)));
+                return Ok(Blob::from(encode_envelope(&envelope)));
             }
             _ => {}
         }
 
-        // Field-level ops: load the current DeclBlob
-        let decl_blob = decode_decl_blob(blob.as_bytes())?;
+        // Declaration-level (field/value) ops: find the target declaration
+        let decl_idx = envelope.declarations.iter()
+            .position(|d| d.tree_key == *decl_name)
+            .ok_or_else(|| MutationError::InvalidOperation(
+                format!("declaration '{}' not found in schema", decl_name)
+            ))?;
+
+        let decl_blob = decode_decl_blob(&envelope.declarations[decl_idx].blob_bytes)?;
 
         let new_decl_blob = match decl_blob.kind {
             KIND_TABLE => {
@@ -242,7 +260,8 @@ impl FormatPlugin for FlatBuffersPlugin {
             }
         };
 
-        Ok(Blob::from(encode_decl_blob(&new_decl_blob)))
+        envelope.declarations[decl_idx].blob_bytes = encode_decl_blob(&new_decl_blob);
+        Ok(Blob::from(encode_envelope(&envelope)))
     }
 
     // ── apply_mutations ───────────────────────────────────────────────────────
@@ -367,7 +386,7 @@ impl FormatPlugin for FlatBuffersPlugin {
                     let t = unwrap_table_read(&decl_blob)?;
                     DeclSummary {
                         name: t.name.clone(),
-                        kind: DeclKind::Message, // use Message as proxy for Table
+                        kind: DeclKind::Table,
                         doc_comment: first_line(&t.doc_comment),
                     }
                 }
@@ -375,7 +394,7 @@ impl FormatPlugin for FlatBuffersPlugin {
                     let s = unwrap_struct_read(&decl_blob)?;
                     DeclSummary {
                         name: s.name.clone(),
-                        kind: DeclKind::Message,
+                        kind: DeclKind::Struct,
                         doc_comment: first_line(&s.doc_comment),
                     }
                 }
@@ -383,7 +402,7 @@ impl FormatPlugin for FlatBuffersPlugin {
                     let e = unwrap_enum_read(&decl_blob)?;
                     DeclSummary {
                         name: e.name.clone(),
-                        kind: DeclKind::Enum,
+                        kind: DeclKind::FbsEnum,
                         doc_comment: first_line(&e.doc_comment),
                     }
                 }
@@ -391,7 +410,7 @@ impl FormatPlugin for FlatBuffersPlugin {
                     let u = unwrap_union_read(&decl_blob)?;
                     DeclSummary {
                         name: u.name.clone(),
-                        kind: DeclKind::Message,
+                        kind: DeclKind::Union,
                         doc_comment: first_line(&u.doc_comment),
                     }
                 }
@@ -665,10 +684,10 @@ mod tests {
         let decls = plugin.list_declarations(&blob).unwrap();
 
         let order = decls.iter().find(|d| d.name == "Order").unwrap();
-        assert_eq!(order.kind, DeclKind::Message);
+        assert_eq!(order.kind, DeclKind::Table);
 
         let status = decls.iter().find(|d| d.name == "PaymentStatus").unwrap();
-        assert_eq!(status.kind, DeclKind::Enum);
+        assert_eq!(status.kind, DeclKind::FbsEnum);
     }
 
     #[test]
@@ -748,14 +767,14 @@ mod tests {
         assert!(!changes.is_empty(), "should detect field addition");
     }
 
+    fn decl_from_result<'a>(envelope: &'a crate::ast::ParseEnvelope, name: &str) -> &'a crate::ast::ParsedDecl {
+        envelope.declarations.iter().find(|d| d.tree_key == name).unwrap()
+    }
+
     #[test]
     fn apply_mutation_add_field() {
         let plugin = FlatBuffersPlugin;
         let blob = plugin.parse("table Order { id: string; }").unwrap();
-
-        let envelope = decode_envelope(blob.as_bytes()).unwrap();
-        let decl = envelope.declarations.iter().find(|d| d.tree_key == "Order").unwrap();
-        let decl_blob = Blob::from(decl.blob_bytes.clone());
 
         let payload = OpAddField {
             field_name: "amount".into(),
@@ -765,10 +784,11 @@ mod tests {
         }.encode_to_vec();
 
         let mutation = make_mutation("schema.fbs", "Order", op_tag::ADD_FIELD, payload);
-        let new_blob = plugin.apply_mutation(&decl_blob, &mutation).unwrap();
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
 
-        let decl_blob_new = decode_decl_blob(new_blob.as_bytes()).unwrap();
-        let tbl = unwrap_table(&decl_blob_new).unwrap();
+        let envelope = decode_envelope(new_blob.as_bytes()).unwrap();
+        let decl = decl_from_result(&envelope, "Order");
+        let tbl = unwrap_table(&decode_decl_blob(&decl.blob_bytes).unwrap()).unwrap();
         assert_eq!(tbl.fields.len(), 2);
         assert_eq!(tbl.fields[1].name, "amount");
         assert_eq!(tbl.fields[1].slot_index, 1);
@@ -779,16 +799,13 @@ mod tests {
         let plugin = FlatBuffersPlugin;
         let blob = plugin.parse("table Order { id: string; old_field: string; }").unwrap();
 
-        let envelope = decode_envelope(blob.as_bytes()).unwrap();
-        let decl = envelope.declarations.iter().find(|d| d.tree_key == "Order").unwrap();
-        let decl_blob = Blob::from(decl.blob_bytes.clone());
-
         let payload = OpDeprecateField { field_name: "old_field".into() }.encode_to_vec();
         let mutation = make_mutation("schema.fbs", "Order", op_tag::DEPRECATE_FIELD, payload);
-        let new_blob = plugin.apply_mutation(&decl_blob, &mutation).unwrap();
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
 
-        let decl_blob_new = decode_decl_blob(new_blob.as_bytes()).unwrap();
-        let tbl = unwrap_table(&decl_blob_new).unwrap();
+        let envelope = decode_envelope(new_blob.as_bytes()).unwrap();
+        let decl = decl_from_result(&envelope, "Order");
+        let tbl = unwrap_table(&decode_decl_blob(&decl.blob_bytes).unwrap()).unwrap();
         let f = tbl.fields.iter().find(|f| f.name == "old_field").unwrap();
         assert!(f.deprecated, "field should be deprecated");
         assert_eq!(f.slot_index, 1, "slot must be unchanged");
@@ -799,19 +816,16 @@ mod tests {
         let plugin = FlatBuffersPlugin;
         let blob = plugin.parse("table Order { id: string; }").unwrap();
 
-        let envelope = decode_envelope(blob.as_bytes()).unwrap();
-        let decl = envelope.declarations.iter().find(|d| d.tree_key == "Order").unwrap();
-        let decl_blob = Blob::from(decl.blob_bytes.clone());
-
         let payload = OpRenameField {
             old_field_name: "id".into(),
             new_field_name: "order_id".into(),
         }.encode_to_vec();
         let mutation = make_mutation("schema.fbs", "Order", op_tag::RENAME_FIELD, payload);
-        let new_blob = plugin.apply_mutation(&decl_blob, &mutation).unwrap();
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
 
-        let decl_blob_new = decode_decl_blob(new_blob.as_bytes()).unwrap();
-        let tbl = unwrap_table(&decl_blob_new).unwrap();
+        let envelope = decode_envelope(new_blob.as_bytes()).unwrap();
+        let decl = decl_from_result(&envelope, "Order");
+        let tbl = unwrap_table(&decode_decl_blob(&decl.blob_bytes).unwrap()).unwrap();
         assert_eq!(tbl.fields[0].name, "order_id");
         assert_eq!(tbl.fields[0].slot_index, 0);
     }
@@ -821,10 +835,6 @@ mod tests {
         let plugin = FlatBuffersPlugin;
         let blob = plugin.parse("enum Status : byte { UNKNOWN = 0 }").unwrap();
 
-        let envelope = decode_envelope(blob.as_bytes()).unwrap();
-        let decl = envelope.declarations.iter().find(|d| d.tree_key == "Status").unwrap();
-        let decl_blob = Blob::from(decl.blob_bytes.clone());
-
         let payload = OpAddEnumValue {
             enum_name: "Status".into(),
             value_name: "ACTIVE".into(),
@@ -832,10 +842,11 @@ mod tests {
             doc_comment: String::new(),
         }.encode_to_vec();
         let mutation = make_mutation("schema.fbs", "Status", op_tag::ADD_ENUM_VALUE, payload);
-        let new_blob = plugin.apply_mutation(&decl_blob, &mutation).unwrap();
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
 
-        let decl_blob_new = decode_decl_blob(new_blob.as_bytes()).unwrap();
-        let e = unwrap_enum(&decl_blob_new).unwrap();
+        let envelope = decode_envelope(new_blob.as_bytes()).unwrap();
+        let decl = decl_from_result(&envelope, "Status");
+        let e = unwrap_enum(&decode_decl_blob(&decl.blob_bytes).unwrap()).unwrap();
         assert_eq!(e.values.len(), 2);
         assert_eq!(e.values[1].name, "ACTIVE");
     }

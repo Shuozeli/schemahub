@@ -17,6 +17,13 @@ use schemahub_api::schemahub_v1::{
 };
 use schemahub_core::mutation::batch::BatchMutateRequest;
 
+use schemahub_plugin_protobuf::operations::{
+    self as proto_ops, ProtoOperationEnvelope,
+};
+use schemahub_plugin_flatbuffers::operations::{
+    self as fbs_ops, FbsOperationEnvelope,
+};
+
 use crate::error::core_to_status;
 
 pub struct SchemaServiceImpl {
@@ -29,11 +36,199 @@ impl SchemaServiceImpl {
     }
 }
 
-/// Encode a prost Message to bytes (for the opaque Mutation.operation field).
-fn encode_proto<M: Message>(msg: &M) -> Bytes {
-    let mut buf = Vec::new();
-    msg.encode(&mut buf).unwrap_or_default();
-    Bytes::from(buf)
+/// Translate a `ProtobufMutation` API proto into `ProtoOperationEnvelope` bytes
+/// suitable for `Mutation.operation`.
+fn proto_to_envelope(m: &ProtobufMutation) -> Result<Bytes, Status> {
+    use schemahub_api::schemahub_v1::protobuf_mutation::Operation as ApiOp;
+
+    let (tag, payload) = match &m.operation {
+        Some(ApiOp::AddField(o)) => {
+            let inner = proto_ops::OpAddField {
+                field_name: o.field_name.clone(),
+                field_type: o.field_type.clone(),
+                field_number: o.field_number,
+                repeated: o.repeated,
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveField(o)) => {
+            let inner = proto_ops::OpRemoveField {
+                field_name: o.field_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameField(o)) => {
+            let inner = proto_ops::OpRenameField {
+                old_field_name: o.old_field_name.clone(),
+                new_field_name: o.new_field_name.clone(),
+            };
+            (proto_ops::op_tag::RENAME_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::ChangeFieldType(o)) => {
+            let inner = proto_ops::OpChangeFieldType {
+                field_name: o.field_name.clone(),
+                new_type: o.new_type.clone(),
+            };
+            (proto_ops::op_tag::CHANGE_FIELD_TYPE, inner.encode_to_vec())
+        }
+        Some(ApiOp::ChangeFieldLabel(o)) => {
+            let inner = proto_ops::OpChangeFieldLabel {
+                field_name: o.field_name.clone(),
+                new_label: o.new_label.clone(),
+            };
+            (proto_ops::op_tag::CHANGE_FIELD_LABEL, inner.encode_to_vec())
+        }
+        Some(ApiOp::ReorderFields(o)) => {
+            let inner = proto_ops::OpReorderFields {
+                field_order: o.field_order.clone(),
+            };
+            (proto_ops::op_tag::REORDER_FIELDS, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddMessage(o)) => {
+            let inner = proto_ops::OpAddMessage {
+                message_name: o.message_name.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_MESSAGE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveMessage(o)) => {
+            let inner = proto_ops::OpRemoveMessage {
+                message_name: o.message_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_MESSAGE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameMessage(o)) => {
+            let inner = proto_ops::OpRenameMessage {
+                old_name: o.old_name.clone(),
+                new_name: o.new_name.clone(),
+            };
+            (proto_ops::op_tag::RENAME_MESSAGE, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddEnum(o)) => {
+            let inner = proto_ops::OpAddEnum {
+                enum_name: o.enum_name.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_ENUM, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddEnumValue(o)) => {
+            let inner = proto_ops::OpAddEnumValue {
+                enum_name: o.enum_name.clone(),
+                value_name: o.value_name.clone(),
+                number: o.number,
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_ENUM_VALUE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveEnum(_))
+        | Some(ApiOp::RemoveEnumValue(_))
+        | Some(ApiOp::RenameEnumValue(_))
+        | Some(ApiOp::AddService(_))
+        | Some(ApiOp::RemoveService(_))
+        | Some(ApiOp::AddRpc(_))
+        | Some(ApiOp::RemoveRpc(_))
+        | Some(ApiOp::RenameRpc(_))
+        | Some(ApiOp::UpdateImport(_)) => {
+            return Err(Status::unimplemented(
+                "this protobuf mutation operation is not yet implemented",
+            ));
+        }
+        None => {
+            return Err(Status::invalid_argument(
+                "ProtobufMutation: operation oneof must be set",
+            ));
+        }
+    };
+
+    Ok(Bytes::from(ProtoOperationEnvelope::encode_op(tag, payload)))
+}
+
+/// Translate a `FlatBuffersMutation` API proto into `FbsOperationEnvelope` bytes.
+fn fbs_to_envelope(m: &FlatBuffersMutation) -> Result<Bytes, Status> {
+    use schemahub_api::schemahub_v1::flat_buffers_mutation::Operation as ApiOp;
+
+    let (tag, payload) = match &m.operation {
+        Some(ApiOp::AddField(o)) => {
+            let inner = fbs_ops::OpAddField {
+                field_name: o.field_name.clone(),
+                field_type: o.field_type.clone(),
+                default_value: o.default_value.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (fbs_ops::op_tag::ADD_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::DeprecateField(o)) => {
+            let inner = fbs_ops::OpDeprecateField {
+                field_name: o.field_name.clone(),
+            };
+            (fbs_ops::op_tag::DEPRECATE_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameField(o)) => {
+            let inner = fbs_ops::OpRenameField {
+                old_field_name: o.old_field_name.clone(),
+                new_field_name: o.new_field_name.clone(),
+            };
+            (fbs_ops::op_tag::RENAME_FIELD, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddTable(o)) => {
+            let inner = fbs_ops::OpAddTable {
+                table_name: o.table_name.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (fbs_ops::op_tag::ADD_TABLE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveTable(o)) => {
+            let inner = fbs_ops::OpRemoveTable {
+                table_name: o.table_name.clone(),
+            };
+            (fbs_ops::op_tag::REMOVE_TABLE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RenameTable(o)) => {
+            let inner = fbs_ops::OpRenameTable {
+                old_name: o.old_name.clone(),
+                new_name: o.new_name.clone(),
+            };
+            (fbs_ops::op_tag::RENAME_TABLE, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddEnum(o)) => {
+            let inner = fbs_ops::OpAddEnum {
+                enum_name: o.enum_name.clone(),
+                base_type: o.base_type.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (fbs_ops::op_tag::ADD_ENUM, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddEnumValue(o)) => {
+            let inner = fbs_ops::OpAddEnumValue {
+                enum_name: o.enum_name.clone(),
+                value_name: o.value_name.clone(),
+                value: o.value,
+                doc_comment: o.doc_comment.clone(),
+            };
+            (fbs_ops::op_tag::ADD_ENUM_VALUE, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddUnion(o)) => {
+            let inner = fbs_ops::OpAddUnion {
+                union_name: o.union_name.clone(),
+                members: o.member_types.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (fbs_ops::op_tag::ADD_UNION, inner.encode_to_vec())
+        }
+        Some(ApiOp::UpdateImport(_)) => {
+            return Err(Status::unimplemented(
+                "FlatBuffers UpdateImport mutation is not yet implemented",
+            ));
+        }
+        None => {
+            return Err(Status::invalid_argument(
+                "FlatBuffersMutation: operation oneof must be set",
+            ));
+        }
+    };
+
+    Ok(Bytes::from(FbsOperationEnvelope::encode_op(tag, payload)))
 }
 
 /// Build a MutateRequest from its constituent parts.
@@ -141,22 +336,22 @@ impl SchemaService for SchemaServiceImpl {
     ) -> Result<Response<ApplyMutationResponse>, Status> {
         let req = request.into_inner();
 
-        // Determine format_id and encode the format-specific operation as bytes.
+        // Determine format_id and translate the API-level operation to internal envelope bytes.
         let (format_id, schema_path_str, operation_bytes) = match req.operation {
             Some(MutationOperation::ProtobufOp(ref proto_mut)) => {
                 let schema_path = proto_mut.schema_path.clone();
-                let bytes = encode_proto(proto_mut);
+                let bytes = proto_to_envelope(proto_mut)?;
                 ("protobuf".to_string(), schema_path, bytes)
             }
             Some(MutationOperation::FbsOp(ref fbs_mut)) => {
                 let schema_path = fbs_mut.schema_path.clone();
-                let bytes = encode_proto(fbs_mut);
+                let bytes = fbs_to_envelope(fbs_mut)?;
                 ("flatbuffers".to_string(), schema_path, bytes)
             }
-            Some(MutationOperation::OpenapiOp(ref oa_mut)) => {
-                let schema_path = oa_mut.schema_path.clone();
-                let bytes = encode_proto(oa_mut);
-                ("openapi".to_string(), schema_path, bytes)
+            Some(MutationOperation::OpenapiOp(_)) => {
+                return Err(Status::unimplemented(
+                    "OpenAPI granular mutations are not yet supported; use UpdateSchema instead",
+                ));
             }
             None => {
                 return Err(Status::invalid_argument(
@@ -208,7 +403,7 @@ impl SchemaService for SchemaServiceImpl {
                 Some(TxOp::ProtobufOp(ref proto_mut)) => {
                     let schema_path_str = proto_mut.schema_path.clone();
                     let decl_name = extract_proto_decl_name(proto_mut);
-                    let bytes = encode_proto(proto_mut);
+                    let bytes = proto_to_envelope(proto_mut)?;
                     Mutation {
                         schema_path: SchemaPath::new(
                             req.project.clone(),
@@ -223,7 +418,7 @@ impl SchemaService for SchemaServiceImpl {
                 Some(TxOp::FbsOp(ref fbs_mut)) => {
                     let schema_path_str = fbs_mut.schema_path.clone();
                     let decl_name = extract_fbs_decl_name(fbs_mut);
-                    let bytes = encode_proto(fbs_mut);
+                    let bytes = fbs_to_envelope(fbs_mut)?;
                     Mutation {
                         schema_path: SchemaPath::new(
                             req.project.clone(),

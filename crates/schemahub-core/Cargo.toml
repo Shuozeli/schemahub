@@ -13,5 +13,9 @@ thiserror         = { workspace = true }
 uuid              = { workspace = true }
 
 [dev-dependencies]
-schemahub-storage = { path = "../schemahub-storage" }
-bytes             = { workspace = true }
+schemahub-storage        = { path = "../schemahub-storage" }
+schemahub-plugin-protobuf   = { path = "../schemahub-plugin-protobuf" }
+schemahub-plugin-flatbuffers = { path = "../schemahub-plugin-flatbuffers" }
+schemahub-plugin-openapi    = { path = "../schemahub-plugin-openapi" }
+bytes                    = { workspace = true }
+uuid                     = { workspace = true }

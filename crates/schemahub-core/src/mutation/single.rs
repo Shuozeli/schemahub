@@ -87,22 +87,23 @@ pub fn apply_mutation(
     let head_commit = read_commit(storage, &current_head)?;
     let (_, root_tree) = root_tree_from_commit(storage, &head_commit)?;
 
-    // ── Step 6: Navigate tree: root_tree -> schema sub-tree -> declaration blob
+    // ── Step 6: Navigate tree: root_tree -> schema sub-tree -> __schema__ blob
     let schema_name = &req.mutation.schema_path.schema_name;
-    let decl_name = &req.mutation.declaration_name;
+    let _decl_name = &req.mutation.declaration_name;
 
     // Get or create the schema sub-tree.
+    // The whole schema is stored as a single "__schema__" blob (ParseEnvelope).
     let (schema_tree_result, old_blob) = match schema_tree_from_root(storage, &root_tree, schema_name) {
         Ok((_, schema_tree)) => {
-            // Try to get the existing blob for this declaration.
-            let old_blob = match blob_hash_from_schema_tree(&schema_tree, decl_name) {
+            // Load the whole-schema ParseEnvelope blob stored under "__schema__".
+            let old_blob = match blob_hash_from_schema_tree(&schema_tree, "__schema__") {
                 Ok(blob_hash) => {
                     let blob_data = storage
                         .read_object(&blob_hash)?
                         .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
                     Blob::new(blob_data)
                 }
-                // Declaration doesn't exist yet — pass empty blob for new creation.
+                // Schema blob doesn't exist yet — pass empty blob.
                 Err(CoreError::NotFound(_)) => Blob::new(vec![]),
                 Err(e) => return Err(e),
             };
@@ -143,22 +144,22 @@ pub fn apply_mutation(
     // 12a: Encode new blob.
     let new_blob_data = new_blob.as_bytes().to_vec();
 
-    // 12b: Rebuild the schema tree with the new blob.
+    // 12b: Rebuild the schema tree with the updated __schema__ blob.
     let schema_tree_for_update = schema_tree_result.unwrap_or_else(|| TreeObject {
         blob_version: 1,
         entries: vec![],
         created_at_unix: now_unix(),
     });
     let new_schema_tree_encoded = {
-        // Build the updated schema tree in-memory to get its hash.
+        // Replace the __schema__ entry with the new blob hash.
         let mut new_entries: Vec<TreeEntryProto> = schema_tree_for_update
             .entries
             .iter()
-            .filter(|e| e.name != decl_name.as_str())
+            .filter(|e| e.name != "__schema__")
             .cloned()
             .collect();
         new_entries.push(TreeEntryProto {
-            name: decl_name.clone(),
+            name: "__schema__".to_string(),
             kind: KIND_BLOB,
             hash: new_blob_hash.to_hex(),
         });

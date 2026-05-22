@@ -115,138 +115,92 @@ pub fn apply_mutations(
             .push(m.clone());
     }
 
-    // ── Step 9: For each schema, load blobs and apply mutations ───────────────
+    // ── Step 9: For each schema, load __schema__ blob and apply mutations ───────
     let mut write_ops: Vec<StorageOp> = Vec::new();
 
     // Build new root entries, start from existing.
     let mut new_root_entries: Vec<TreeEntryProto> = root_tree.entries.clone();
 
-    for (schema_name, mutations) in &by_schema {
-        // Load the schema sub-tree (or empty if new schema).
-        let (schema_tree_opt) = match schema_tree_from_root(storage, &root_tree, schema_name) {
-            Ok((_, schema_tree)) => Some(schema_tree),
-            Err(CoreError::NotFound(_)) => None,
-            Err(e) => return Err(e),
-        };
-
-        let schema_tree_base = schema_tree_opt.unwrap_or_else(|| TreeObject {
-            blob_version: 1,
-            entries: vec![],
-            created_at_unix: unix_now(),
-        });
-
-        // Apply mutations one by one, tracking old and new blobs per declaration.
-        // For compatibility checking we need per-declaration old vs new.
-        let mut new_schema_entries: Vec<TreeEntryProto> = schema_tree_base.entries.clone();
-
-        for mutation in mutations {
-            let decl_name = &mutation.declaration_name;
-
-            // Find existing blob for this declaration.
-            let old_blob = {
-                let existing_entry = schema_tree_base.entries.iter()
-                    .find(|e| e.name == *decl_name && e.kind == KIND_BLOB);
-                match existing_entry {
-                    Some(entry) => {
-                        let blob_hash = schemahub_types::Hash::from_hex(&entry.hash).map_err(|_| {
-                            CoreError::ObjectCorrupted(format!(
-                                "schema tree entry '{}' has invalid hash: {}",
-                                decl_name, entry.hash
-                            ))
-                        })?;
-                        let blob_data = storage
-                            .read_object(&blob_hash)?
-                            .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
-                        Blob::new(blob_data)
+    // Load whole-schema blobs per schema.
+    let plugin_blobs: HashMap<schemahub_types::SchemaPath, Blob> = {
+        let mut map = HashMap::new();
+        for (schema_name, _) in &by_schema {
+            let schema_blob = match schema_tree_from_root(storage, &root_tree, schema_name) {
+                Ok((_, schema_tree)) => {
+                    // Find __schema__ entry
+                    let entry = schema_tree.entries.iter()
+                        .find(|e| e.name == "__schema__" && e.kind == KIND_BLOB);
+                    match entry {
+                        Some(e) => {
+                            let hash = schemahub_types::Hash::from_hex(&e.hash).map_err(|_| {
+                                CoreError::ObjectCorrupted(format!("__schema__ hash invalid in {schema_name}"))
+                            })?;
+                            let data = storage.read_object(&hash)?
+                                .ok_or_else(|| CoreError::NotFound(format!("blob {} missing", hash.to_hex())))?;
+                            Blob::new(data)
+                        }
+                        None => Blob::new(vec![]),
                     }
-                    None => Blob::new(vec![]),
                 }
+                Err(CoreError::NotFound(_)) => Blob::new(vec![]),
+                Err(e) => return Err(e),
             };
+            let schema_path = schemahub_types::SchemaPath::new(
+                req.project.clone(), req.repo.clone(), schema_name.clone()
+            );
+            map.insert(schema_path, schema_blob);
+        }
+        map
+    };
 
-            // Also check the in-progress new_schema_entries for updates from prior mutations.
-            let old_blob = {
-                let updated_entry = new_schema_entries.iter()
-                    .find(|e| e.name == *decl_name && e.kind == KIND_BLOB);
-                match updated_entry {
-                    Some(entry) => {
-                        let blob_hash = schemahub_types::Hash::from_hex(&entry.hash).map_err(|_| {
-                            CoreError::ObjectCorrupted(format!(
-                                "updated schema tree entry '{}' has invalid hash: {}",
-                                decl_name, entry.hash
-                            ))
-                        })?;
-                        // Try to find in write_ops first (it was just written this batch).
-                        let obj_key = keys::object_key(&blob_hash);
-                        let found_in_ops = write_ops.iter().find_map(|op| {
-                            if let StorageOp::Put { key, value } = op {
-                                if key == &obj_key { Some(Blob::new(value.clone())) } else { None }
-                            } else {
-                                None
-                            }
-                        });
-                        found_in_ops.unwrap_or_else(|| {
-                            storage.read_object(&blob_hash)
-                                .ok()
-                                .flatten()
-                                .map(Blob::new)
-                                .unwrap_or_else(|| Blob::new(vec![]))
-                        })
-                    }
-                    None => old_blob,
-                }
-            };
+    // Collect old blobs for compatibility checking (copy before mutation)
+    let old_blobs = plugin_blobs.clone();
 
-            // Apply the mutation.
-            let new_blob = plugin.apply_mutation(&old_blob, mutation)
-                .map_err(CoreError::MutationError)?;
+    // Apply all mutations via the plugin
+    let updated_blobs = plugin.apply_mutations(&plugin_blobs, &req.mutations)
+        .map_err(CoreError::MutationError)?;
 
-            // Compatibility check per mutation.
-            if config.is_protected(&req.branch) && !req.force {
-                let rules = CompatibilityRules {
-                    direction: config.compatibility_direction,
-                };
-                plugin
-                    .check_compatibility(&old_blob, &new_blob, &rules)
+    // Write back each updated schema blob as __schema__ and build new tree entries
+    for (schema_path, new_blob) in &updated_blobs {
+        let schema_name = &schema_path.schema_name;
+
+        // Compatibility check if on protected branch
+        if config.is_protected(&req.branch) && !req.force {
+            if let Some(old_blob) = old_blobs.get(schema_path) {
+                let rules = CompatibilityRules { direction: config.compatibility_direction };
+                plugin.check_compatibility(old_blob, new_blob, &rules)
                     .map_err(CoreError::CompatibilityViolation)?;
             }
-
-            // Queue blob write.
-            let new_blob_data = new_blob.as_bytes().to_vec();
-            let new_blob_hash = schemahub_types::Hash::of(&new_blob_data);
-            write_ops.push(StorageOp::Put {
-                key: keys::object_key(&new_blob_hash),
-                value: new_blob_data,
-            });
-
-            // Update schema tree entries.
-            new_schema_entries.retain(|e| e.name != *decl_name);
-            new_schema_entries.push(TreeEntryProto {
-                name: decl_name.clone(),
-                kind: KIND_BLOB,
-                hash: new_blob_hash.to_hex(),
-            });
         }
 
-        new_schema_entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let new_schema_tree = TreeObject {
-            blob_version: 1,
-            entries: new_schema_entries,
-            created_at_unix: unix_now(),
-        };
-        let new_schema_tree_encoded = encode_tree(&new_schema_tree);
-        let new_schema_tree_hash = hash_of_bytes(&new_schema_tree_encoded);
+        let new_blob_data = new_blob.as_bytes().to_vec();
+        let new_blob_hash = schemahub_types::Hash::of(&new_blob_data);
         write_ops.push(StorageOp::Put {
-            key: keys::object_key(&new_schema_tree_hash),
-            value: new_schema_tree_encoded,
+            key: keys::object_key(&new_blob_hash),
+            value: new_blob_data,
         });
 
-        // Update root entries for this schema.
+        let schema_tree = TreeObject {
+            blob_version: 1,
+            entries: vec![TreeEntryProto {
+                name: "__schema__".to_string(),
+                kind: KIND_BLOB,
+                hash: new_blob_hash.to_hex(),
+            }],
+            created_at_unix: unix_now(),
+        };
+        let schema_tree_encoded = encode_tree(&schema_tree);
+        let schema_tree_hash = hash_of_bytes(&schema_tree_encoded);
+        write_ops.push(StorageOp::Put {
+            key: keys::object_key(&schema_tree_hash),
+            value: schema_tree_encoded,
+        });
+
         new_root_entries.retain(|e| !(e.name == *schema_name && e.kind == KIND_SUBTREE));
         new_root_entries.push(TreeEntryProto {
             name: schema_name.clone(),
             kind: KIND_SUBTREE,
-            hash: new_schema_tree_hash.to_hex(),
+            hash: schema_tree_hash.to_hex(),
         });
     }
 
