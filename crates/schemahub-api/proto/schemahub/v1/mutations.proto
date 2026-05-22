@@ -312,21 +312,73 @@ message FbsUpdateImport {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OpenAPI mutations (v1: whole-document only)
+// OpenAPI mutations
 // ═════════════════════════════════════════════════════════════════════════════
 
-// In v1, the only OpenAPI mutation is a whole-document push.
-// This is called internally by UpdateSchema; clients use UpdateSchema directly.
-// Granular operations (AddOperation, RemoveParameter, etc.) are deferred to v2.
 message OpenApiMutation {
   string schema_path  = 1;
   // Exactly one variant must be set.
   oneof operation {
+    // Whole-document replacement (used internally by UpdateSchema).
     OpenApiPushDocument push_document = 2;
+
+    // Path mutations
+    OpenApiAddPath    add_path    = 10;
+    OpenApiRemovePath remove_path = 11;
+
+    // Operation mutations (HTTP methods on a path)
+    OpenApiAddOperation    add_operation    = 20;
+    OpenApiRemoveOperation remove_operation = 21;
+
+    // Component schema mutations
+    OpenApiAddComponentSchema    add_component_schema    = 30;
+    OpenApiRemoveComponentSchema remove_component_schema = 31;
   }
 }
 
 message OpenApiPushDocument {
   // Full YAML or JSON source text of the new document version.
   string source = 1;
+}
+
+// ── OpenAPI path mutations ────────────────────────────────────────────────────
+
+message OpenApiAddPath {
+  // The path pattern to add, e.g. "/users/{id}"
+  string path_pattern = 1;
+  string summary      = 2;
+  string description  = 3;
+}
+
+message OpenApiRemovePath {
+  string path_pattern = 1;
+}
+
+// ── OpenAPI operation mutations ───────────────────────────────────────────────
+
+message OpenApiAddOperation {
+  string path_pattern  = 1;
+  // HTTP method: "get", "post", "put", "delete", "patch", "head", "options", "trace"
+  string method        = 2;
+  string operation_id  = 3;
+  string summary       = 4;
+  string description   = 5;
+}
+
+message OpenApiRemoveOperation {
+  string path_pattern = 1;
+  string method       = 2;
+}
+
+// ── OpenAPI component schema mutations ────────────────────────────────────────
+
+message OpenApiAddComponentSchema {
+  string schema_name  = 1;
+  // JSON Schema type: "object", "string", "integer", "number", "boolean", "array"
+  string schema_type  = 2;
+  string description  = 3;
+}
+
+message OpenApiRemoveComponentSchema {
+  string schema_name = 1;
 }

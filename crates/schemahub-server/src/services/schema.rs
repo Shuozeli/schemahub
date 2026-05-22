@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 use schemahub_api::schemahub_v1::{
     ApplyMutationRequest, ApplyMutationResponse, ApplyTransactionRequest,
     ApplyTransactionResponse, CreateSchemaRequest, CreateSchemaResponse, DeleteSchemaRequest,
-    DeleteSchemaResponse, FlatBuffersMutation, ProtobufMutation,
+    DeleteSchemaResponse, FlatBuffersMutation, OpenApiMutation, ProtobufMutation,
     UpdateSchemaRequest, UpdateSchemaResponse,
     apply_mutation_request::Operation as MutationOperation,
     schema_service_server::SchemaService,
@@ -22,6 +22,9 @@ use schemahub_plugin_protobuf::operations::{
 };
 use schemahub_plugin_flatbuffers::operations::{
     self as fbs_ops, FbsOperationEnvelope,
+};
+use schemahub_plugin_openapi::operations::{
+    self as openapi_ops, OpenApiOperationEnvelope,
 };
 
 use crate::error::core_to_status;
@@ -316,6 +319,72 @@ fn fbs_to_envelope(m: &FlatBuffersMutation) -> Result<Bytes, Status> {
     Ok(Bytes::from(FbsOperationEnvelope::encode_op(tag, payload)))
 }
 
+/// Translate an `OpenApiMutation` API proto into `OpenApiOperationEnvelope` bytes.
+fn openapi_to_envelope(m: &OpenApiMutation) -> Result<Bytes, Status> {
+    use schemahub_api::schemahub_v1::open_api_mutation::Operation as ApiOp;
+
+    let (tag, payload) = match &m.operation {
+        Some(ApiOp::PushDocument(o)) => {
+            let inner = openapi_ops::OpPushDocument {
+                source: o.source.as_bytes().to_vec(),
+            };
+            (openapi_ops::op_tag::PUSH_DOCUMENT, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::AddPath(o)) => {
+            let inner = openapi_ops::OpAddPath {
+                path_pattern: o.path_pattern.clone(),
+                summary: o.summary.clone(),
+                description: o.description.clone(),
+            };
+            (openapi_ops::op_tag::ADD_PATH, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::RemovePath(o)) => {
+            let inner = openapi_ops::OpRemovePath {
+                path_pattern: o.path_pattern.clone(),
+            };
+            (openapi_ops::op_tag::REMOVE_PATH, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::AddOperation(o)) => {
+            let inner = openapi_ops::OpAddOperation {
+                path_pattern: o.path_pattern.clone(),
+                method: o.method.clone(),
+                operation_id: o.operation_id.clone(),
+                summary: o.summary.clone(),
+                description: o.description.clone(),
+            };
+            (openapi_ops::op_tag::ADD_OPERATION, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::RemoveOperation(o)) => {
+            let inner = openapi_ops::OpRemoveOperation {
+                path_pattern: o.path_pattern.clone(),
+                method: o.method.clone(),
+            };
+            (openapi_ops::op_tag::REMOVE_OPERATION, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::AddComponentSchema(o)) => {
+            let inner = openapi_ops::OpAddComponentSchema {
+                schema_name: o.schema_name.clone(),
+                schema_type: o.schema_type.clone(),
+                description: o.description.clone(),
+            };
+            (openapi_ops::op_tag::ADD_COMPONENT_SCHEMA, prost::Message::encode_to_vec(&inner))
+        }
+        Some(ApiOp::RemoveComponentSchema(o)) => {
+            let inner = openapi_ops::OpRemoveComponentSchema {
+                schema_name: o.schema_name.clone(),
+            };
+            (openapi_ops::op_tag::REMOVE_COMPONENT_SCHEMA, prost::Message::encode_to_vec(&inner))
+        }
+        None => {
+            return Err(Status::invalid_argument(
+                "OpenApiMutation: operation oneof must be set",
+            ));
+        }
+    };
+
+    Ok(Bytes::from(OpenApiOperationEnvelope::encode_op(tag, payload)))
+}
+
 /// Build a MutateRequest from its constituent parts.
 fn make_mutate_request(
     project: String,
@@ -433,10 +502,10 @@ impl SchemaService for SchemaServiceImpl {
                 let bytes = fbs_to_envelope(fbs_mut)?;
                 ("flatbuffers".to_string(), schema_path, bytes)
             }
-            Some(MutationOperation::OpenapiOp(_)) => {
-                return Err(Status::unimplemented(
-                    "OpenAPI granular mutations are not yet supported; use UpdateSchema instead",
-                ));
+            Some(MutationOperation::OpenapiOp(ref openapi_mut)) => {
+                let schema_path = openapi_mut.schema_path.clone();
+                let bytes = openapi_to_envelope(openapi_mut)?;
+                ("openapi".to_string(), schema_path, bytes)
             }
             None => {
                 return Err(Status::invalid_argument(
@@ -568,7 +637,9 @@ fn extract_declaration_name(
         Some(MutationOperation::FbsOp(fbs_mut)) => {
             extract_fbs_decl_name(fbs_mut)
         }
-        Some(MutationOperation::OpenapiOp(_)) => "__document__".to_string(),
+        Some(MutationOperation::OpenapiOp(openapi_mut)) => {
+            extract_openapi_decl_name(openapi_mut)
+        }
         None => "__root__".to_string(),
     }
 }
@@ -616,5 +687,19 @@ fn extract_fbs_decl_name(m: &FlatBuffersMutation) -> String {
         Some(FbsOp::RemoveUnionMember(o)) => o.union_name.clone(),
         Some(FbsOp::UpdateImport(_)) => "__metadata__".to_string(),
         None => "__root__".to_string(),
+    }
+}
+
+fn extract_openapi_decl_name(m: &OpenApiMutation) -> String {
+    use schemahub_api::schemahub_v1::open_api_mutation::Operation as ApiOp;
+    match &m.operation {
+        Some(ApiOp::PushDocument(_)) => "__document__".to_string(),
+        Some(ApiOp::AddPath(o)) => format!("path:{}", o.path_pattern),
+        Some(ApiOp::RemovePath(o)) => format!("path:{}", o.path_pattern),
+        Some(ApiOp::AddOperation(o)) => format!("path:{}", o.path_pattern),
+        Some(ApiOp::RemoveOperation(o)) => format!("path:{}", o.path_pattern),
+        Some(ApiOp::AddComponentSchema(o)) => format!("schema:{}", o.schema_name),
+        Some(ApiOp::RemoveComponentSchema(o)) => format!("schema:{}", o.schema_name),
+        None => "__document__".to_string(),
     }
 }

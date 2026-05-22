@@ -16,14 +16,15 @@ use schemahub_types::{
 };
 
 use crate::ast::{
-    ParsedDeclaration,
+    ComponentSchemaBlob, HttpMethod, JsonSchemaDef, JsonSchemaType, OperationDef,
+    ParsedDeclaration, PathItemBlob,
     decode_component_parameter, decode_component_request_body, decode_component_response,
     decode_component_schema, decode_metadata, decode_parse_result, decode_path_item,
-    encode_parse_result, schema_or_ref,
+    encode_component_schema, encode_parse_result, encode_path_item, schema_or_ref,
 };
 use crate::compat::check_compatibility as check_compat;
 use crate::diff::diff_envelopes;
-use crate::operations::decode_operation;
+use crate::operations::{OpenApiOp, decode_operation};
 use crate::parser::parse_openapi;
 use crate::printer::{print_declaration, print_envelope};
 
@@ -67,14 +68,201 @@ impl FormatPlugin for OpenApiPlugin {
     fn apply_mutation(&self, blob: &Blob, mutation: &Mutation) -> Result<Blob, MutationError> {
         let op = decode_operation(&mutation.operation)?;
 
-        // PushDocument: parse the new source and return as the new blob
-        let source_str = std::str::from_utf8(&op.source)
-            .map_err(|e| MutationError::InvalidOperation(format!("source is not valid UTF-8: {e}")))?;
+        match op {
+            OpenApiOp::PushDocument(o) => {
+                let source_str = std::str::from_utf8(&o.source)
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("source is not valid UTF-8: {e}"),
+                    ))?;
+                let result = parse_openapi(source_str)
+                    .map_err(|e| MutationError::InvalidOperation(format!("parse error: {e}")))?;
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
 
-        let result = parse_openapi(source_str)
-            .map_err(|e| MutationError::InvalidOperation(format!("parse error: {e}")))?;
+            OpenApiOp::AddPath(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("path:{}", o.path_pattern);
+                if result.declarations.iter().any(|d| d.tree_key == key) {
+                    return Err(MutationError::InvalidOperation(
+                        format!("path '{}' already exists", o.path_pattern),
+                    ));
+                }
+                let new_blob = PathItemBlob {
+                    blob_version: 1,
+                    path_pattern: o.path_pattern.clone(),
+                    summary: if o.summary.is_empty() { None } else { Some(o.summary) },
+                    description: if o.description.is_empty() { None } else { Some(o.description) },
+                    parameters: vec![],
+                    operations: vec![],
+                    extensions: None,
+                };
+                result.declarations.push(ParsedDeclaration {
+                    tree_key: key,
+                    blob_bytes: encode_path_item(&new_blob),
+                });
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
 
-        Ok(Blob::from(encode_parse_result(&result)))
+            OpenApiOp::RemovePath(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("path:{}", o.path_pattern);
+                let before = result.declarations.len();
+                result.declarations.retain(|d| d.tree_key != key);
+                if result.declarations.len() == before {
+                    return Err(MutationError::InvalidOperation(
+                        format!("path '{}' not found", o.path_pattern),
+                    ));
+                }
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
+
+            OpenApiOp::AddOperation(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("path:{}", o.path_pattern);
+                let decl = result.declarations.iter_mut()
+                    .find(|d| d.tree_key == key)
+                    .ok_or_else(|| MutationError::InvalidOperation(
+                        format!("path '{}' not found", o.path_pattern),
+                    ))?;
+
+                let method_enum = HttpMethod::from_str(&o.method)
+                    .ok_or_else(|| MutationError::InvalidOperation(
+                        format!("unknown HTTP method: '{}'", o.method),
+                    ))?;
+                let method_i32 = method_enum as i32;
+
+                let mut path_blob = decode_path_item(&decl.blob_bytes)
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed path item blob: {e}"),
+                    ))?;
+
+                if path_blob.operations.iter().any(|op| op.method == method_i32) {
+                    return Err(MutationError::InvalidOperation(
+                        format!("operation '{}' already exists on path '{}'",
+                            o.method, o.path_pattern),
+                    ));
+                }
+
+                let new_op = OperationDef {
+                    method: method_i32,
+                    operation_id: if o.operation_id.is_empty() { None } else { Some(o.operation_id) },
+                    summary: if o.summary.is_empty() { None } else { Some(o.summary) },
+                    description: if o.description.is_empty() { None } else { Some(o.description) },
+                    tags: vec![],
+                    parameters: vec![],
+                    request_body: None,
+                    responses: vec![],
+                    deprecated: None,
+                    extensions: None,
+                };
+                path_blob.operations.push(new_op);
+                decl.blob_bytes = encode_path_item(&path_blob);
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
+
+            OpenApiOp::RemoveOperation(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("path:{}", o.path_pattern);
+                let decl = result.declarations.iter_mut()
+                    .find(|d| d.tree_key == key)
+                    .ok_or_else(|| MutationError::InvalidOperation(
+                        format!("path '{}' not found", o.path_pattern),
+                    ))?;
+
+                let method_enum = HttpMethod::from_str(&o.method)
+                    .ok_or_else(|| MutationError::InvalidOperation(
+                        format!("unknown HTTP method: '{}'", o.method),
+                    ))?;
+                let method_i32 = method_enum as i32;
+
+                let mut path_blob = decode_path_item(&decl.blob_bytes)
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed path item blob: {e}"),
+                    ))?;
+
+                let before = path_blob.operations.len();
+                path_blob.operations.retain(|op| op.method != method_i32);
+                if path_blob.operations.len() == before {
+                    return Err(MutationError::InvalidOperation(
+                        format!("operation '{}' not found on path '{}'",
+                            o.method, o.path_pattern),
+                    ));
+                }
+                decl.blob_bytes = encode_path_item(&path_blob);
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
+
+            OpenApiOp::AddComponentSchema(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("schema:{}", o.schema_name);
+                if result.declarations.iter().any(|d| d.tree_key == key) {
+                    return Err(MutationError::InvalidOperation(
+                        format!("component schema '{}' already exists", o.schema_name),
+                    ));
+                }
+                let type_values = if o.schema_type.is_empty() {
+                    vec![]
+                } else {
+                    match JsonSchemaType::from_str(&o.schema_type) {
+                        Some(t) => vec![t as i32],
+                        None => return Err(MutationError::InvalidOperation(
+                            format!("unknown JSON schema type: '{}'", o.schema_type),
+                        )),
+                    }
+                };
+                let schema_def = JsonSchemaDef {
+                    types: type_values,
+                    description: if o.description.is_empty() {
+                        None
+                    } else {
+                        Some(o.description)
+                    },
+                    ..Default::default()
+                };
+                let new_schema = ComponentSchemaBlob {
+                    blob_version: 1,
+                    name: o.schema_name.clone(),
+                    schema: Some(schema_def),
+                    extensions: None,
+                };
+                result.declarations.push(ParsedDeclaration {
+                    tree_key: key,
+                    blob_bytes: encode_component_schema(&new_schema),
+                });
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
+
+            OpenApiOp::RemoveComponentSchema(o) => {
+                let mut result = decode_parse_result(blob.as_bytes())
+                    .map_err(|e| MutationError::InvalidOperation(
+                        format!("malformed blob: {e}"),
+                    ))?;
+                let key = format!("schema:{}", o.schema_name);
+                let before = result.declarations.len();
+                result.declarations.retain(|d| d.tree_key != key);
+                if result.declarations.len() == before {
+                    return Err(MutationError::InvalidOperation(
+                        format!("component schema '{}' not found", o.schema_name),
+                    ));
+                }
+                Ok(Blob::from(encode_parse_result(&result)))
+            }
+        }
     }
 
     // ── apply_mutations ───────────────────────────────────────────────────────
@@ -870,5 +1058,239 @@ paths: {}
         let blob = plugin.parse(MINIMAL_DOC).unwrap();
         let changes = plugin.diff(&blob, &blob).unwrap();
         assert!(changes.is_empty(), "identical blobs should produce no changes: {changes:?}");
+    }
+
+    fn make_mutation(schema_path: &str, op_bytes: Vec<u8>) -> Mutation {
+        Mutation {
+            schema_path: SchemaPath::new("proj", "repo", schema_path),
+            format_id: "openapi".into(),
+            declaration_name: "__document__".into(),
+            operation: bytes::Bytes::from(op_bytes),
+        }
+    }
+
+    // Test 21: AddPath adds a new path to the document
+    #[test]
+    fn test_apply_mutation_add_path() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddPath, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddPath {
+            path_pattern: "/orders".into(),
+            summary: "Orders endpoint".into(),
+            description: String::new(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(
+            op_tag::ADD_PATH,
+            inner.encode_to_vec(),
+        );
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let keys: Vec<&str> = result.declarations.iter().map(|d| d.tree_key.as_str()).collect();
+        assert!(keys.contains(&"path:/orders"), "expected path:/orders: {keys:?}");
+        assert!(keys.contains(&"path:/users"), "expected path:/users still present: {keys:?}");
+    }
+
+    // Test 22: AddPath rejects duplicate path
+    #[test]
+    fn test_apply_mutation_add_path_duplicate() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddPath, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddPath {
+            path_pattern: "/users".into(),
+            summary: String::new(),
+            description: String::new(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::ADD_PATH, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "should reject duplicate path");
+    }
+
+    // Test 23: RemovePath removes an existing path
+    #[test]
+    fn test_apply_mutation_remove_path() {
+        use crate::operations::{OpenApiOperationEnvelope, OpRemovePath, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpRemovePath { path_pattern: "/users".into() };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::REMOVE_PATH, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let keys: Vec<&str> = result.declarations.iter().map(|d| d.tree_key.as_str()).collect();
+        assert!(!keys.contains(&"path:/users"), "expected path:/users removed: {keys:?}");
+    }
+
+    // Test 24: RemovePath rejects non-existent path
+    #[test]
+    fn test_apply_mutation_remove_path_not_found() {
+        use crate::operations::{OpenApiOperationEnvelope, OpRemovePath, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpRemovePath { path_pattern: "/nonexistent".into() };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::REMOVE_PATH, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "should reject remove of missing path");
+    }
+
+    // Test 25: AddOperation adds a POST to an existing path
+    #[test]
+    fn test_apply_mutation_add_operation() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddOperation, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddOperation {
+            path_pattern: "/users".into(),
+            method: "post".into(),
+            operation_id: "createUser".into(),
+            summary: "Create a user".into(),
+            description: String::new(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::ADD_OPERATION, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let path_decl = result.declarations.iter().find(|d| d.tree_key == "path:/users").unwrap();
+        let path_blob = decode_path_item(&path_decl.blob_bytes).unwrap();
+        // Should now have GET (0) and POST (1)
+        let methods: Vec<i32> = path_blob.operations.iter().map(|o| o.method).collect();
+        assert!(methods.contains(&1), "expected POST (1) in methods: {methods:?}");
+    }
+
+    // Test 26: AddOperation rejects duplicate method
+    #[test]
+    fn test_apply_mutation_add_operation_duplicate() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddOperation, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddOperation {
+            path_pattern: "/users".into(),
+            method: "get".into(), // already exists
+            operation_id: String::new(),
+            summary: String::new(),
+            description: String::new(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::ADD_OPERATION, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "should reject duplicate method on path");
+    }
+
+    // Test 27: RemoveOperation removes GET from /users
+    #[test]
+    fn test_apply_mutation_remove_operation() {
+        use crate::operations::{OpenApiOperationEnvelope, OpRemoveOperation, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpRemoveOperation {
+            path_pattern: "/users".into(),
+            method: "get".into(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::REMOVE_OPERATION, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let path_decl = result.declarations.iter().find(|d| d.tree_key == "path:/users").unwrap();
+        let path_blob = decode_path_item(&path_decl.blob_bytes).unwrap();
+        let methods: Vec<i32> = path_blob.operations.iter().map(|o| o.method).collect();
+        assert!(!methods.contains(&0), "GET should be removed: {methods:?}");
+    }
+
+    // Test 28: AddComponentSchema adds a new schema
+    #[test]
+    fn test_apply_mutation_add_component_schema() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddComponentSchema, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddComponentSchema {
+            schema_name: "Order".into(),
+            schema_type: "object".into(),
+            description: "An order".into(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::ADD_COMPONENT_SCHEMA, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let keys: Vec<&str> = result.declarations.iter().map(|d| d.tree_key.as_str()).collect();
+        assert!(keys.contains(&"schema:Order"), "expected schema:Order: {keys:?}");
+    }
+
+    // Test 29: RemoveComponentSchema removes a schema
+    #[test]
+    fn test_apply_mutation_remove_component_schema() {
+        use crate::operations::{OpenApiOperationEnvelope, OpRemoveComponentSchema, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(FULL_DOC).unwrap();
+
+        let inner = OpRemoveComponentSchema { schema_name: "User".into() };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::REMOVE_COMPONENT_SCHEMA, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+        let result = decode_parse_result(new_blob.as_bytes()).unwrap();
+        let keys: Vec<&str> = result.declarations.iter().map(|d| d.tree_key.as_str()).collect();
+        assert!(!keys.contains(&"schema:User"), "User schema should be removed: {keys:?}");
+        assert!(keys.contains(&"schema:Error"), "Error schema should remain: {keys:?}");
+    }
+
+    // Test 30: AddOperation rejects unknown HTTP method
+    #[test]
+    fn test_apply_mutation_add_operation_invalid_method() {
+        use crate::operations::{OpenApiOperationEnvelope, OpAddOperation, op_tag};
+        use prost::Message;
+
+        let plugin = OpenApiPlugin;
+        let blob = plugin.parse(MINIMAL_DOC).unwrap();
+
+        let inner = OpAddOperation {
+            path_pattern: "/users".into(),
+            method: "FETCH".into(), // not a valid HTTP method
+            operation_id: String::new(),
+            summary: String::new(),
+            description: String::new(),
+        };
+        let op_bytes = OpenApiOperationEnvelope::encode_op(op_tag::ADD_OPERATION, inner.encode_to_vec());
+        let mutation = make_mutation("api.yaml", op_bytes);
+
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "should reject unknown HTTP method");
     }
 }
