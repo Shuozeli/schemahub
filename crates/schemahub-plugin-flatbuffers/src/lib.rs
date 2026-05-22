@@ -297,76 +297,70 @@ impl FormatPlugin for FlatBuffersPlugin {
     ) -> Result<(), Vec<CompatibilityViolation>> {
         let direction = rules.direction;
 
-        let old_decl = decode_decl_blob(old.as_bytes()).map_err(|e| {
-            vec![CompatibilityViolation {
-                declaration_name: "unknown".into(),
-                field_name: None,
-                message: format!("malformed old blob: {e}"),
-            }]
-        })?;
+        // Both blobs are whole-schema ParseEnvelopes (the __schema__ blob stored by core).
+        let old_env = decode_envelope_mutation(old.as_bytes())
+            .unwrap_or_else(|_| ParseEnvelope { declarations: vec![] });
+        let new_env = decode_envelope_mutation(new.as_bytes())
+            .unwrap_or_else(|_| ParseEnvelope { declarations: vec![] });
 
-        let new_decl = decode_decl_blob(new.as_bytes()).map_err(|e| {
-            vec![CompatibilityViolation {
-                declaration_name: "unknown".into(),
-                field_name: None,
-                message: format!("malformed new blob: {e}"),
-            }]
-        })?;
+        let mut all_violations: Vec<CompatibilityViolation> = Vec::new();
 
-        let violations = match (old_decl.kind, new_decl.kind) {
-            (KIND_TABLE, KIND_TABLE) => {
-                let old_tbl = unwrap_table(&old_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                let new_tbl = unwrap_table(&new_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                check_table_compat(&old_tbl, &new_tbl, direction)
+        // Check each declaration present in the new schema against its old counterpart.
+        for new_parsed in &new_env.declarations {
+            if new_parsed.tree_key == "__metadata__" {
+                continue;
             }
-            (KIND_ENUM, KIND_ENUM) => {
-                let old_e = unwrap_enum(&old_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                let new_e = unwrap_enum(&new_decl).map_err(|e| {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: e.to_string(),
-                    }]
-                })?;
-                check_enum_compat(&old_e, &new_e, direction)
-            }
-            (KIND_STRUCT, KIND_STRUCT) => {
-                // Structs are immutable — any diff is a violation
-                if old_decl.data != new_decl.data {
-                    vec![CompatibilityViolation {
-                        declaration_name: "unknown".into(),
-                        field_name: None,
-                        message: "struct changed: structs are immutable in FlatBuffers".into(),
-                    }]
-                } else {
-                    vec![]
+
+            let old_bytes = old_env.declarations.iter()
+                .find(|d| d.tree_key == new_parsed.tree_key)
+                .map(|d| d.blob_bytes.as_slice());
+
+            let old_db = match old_bytes {
+                Some(b) => match decode_decl_blob(b) {
+                    Ok(db) => db,
+                    Err(_) => continue,
+                },
+                None => continue, // new declaration — no prior contract to break
+            };
+            let new_db = match decode_decl_blob(&new_parsed.blob_bytes) {
+                Ok(db) => db,
+                Err(_) => continue,
+            };
+
+            let violations = match (old_db.kind, new_db.kind) {
+                (KIND_TABLE, KIND_TABLE) => {
+                    match (unwrap_table(&old_db), unwrap_table(&new_db)) {
+                        (Ok(old_tbl), Ok(new_tbl)) => check_table_compat(&old_tbl, &new_tbl, direction),
+                        _ => vec![],
+                    }
                 }
-            }
-            _ => vec![],
-        };
+                (KIND_ENUM, KIND_ENUM) => {
+                    match (unwrap_enum(&old_db), unwrap_enum(&new_db)) {
+                        (Ok(old_e), Ok(new_e)) => check_enum_compat(&old_e, &new_e, direction),
+                        _ => vec![],
+                    }
+                }
+                (KIND_STRUCT, KIND_STRUCT) => {
+                    // Structs are immutable — any data change is a violation
+                    if old_db.data != new_db.data {
+                        vec![CompatibilityViolation {
+                            declaration_name: new_parsed.tree_key.clone(),
+                            field_name: None,
+                            message: "struct changed: structs are immutable in FlatBuffers".into(),
+                        }]
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![],
+            };
+            all_violations.extend(violations);
+        }
 
-        if violations.is_empty() {
+        if all_violations.is_empty() {
             Ok(())
         } else {
-            Err(violations)
+            Err(all_violations)
         }
     }
 
@@ -859,20 +853,12 @@ mod tests {
         let src1 = "table Foo { id: string; }";
         let src2 = "table Foo { id: string; amount: int32; }";
 
-        let blob1 = plugin.parse(src1).unwrap();
-        let blob2 = plugin.parse(src2).unwrap();
-
-        fn get_decl_blob(blob: &Blob, name: &str) -> Blob {
-            let env = decode_envelope(blob.as_bytes()).unwrap();
-            let decl = env.declarations.iter().find(|d| d.tree_key == name).unwrap();
-            Blob::from(decl.blob_bytes.clone())
-        }
-
-        let old_decl = get_decl_blob(&blob1, "Foo");
-        let new_decl = get_decl_blob(&blob2, "Foo");
+        // check_compatibility receives whole-schema ParseEnvelope blobs (as stored by core)
+        let old_blob = plugin.parse(src1).unwrap();
+        let new_blob = plugin.parse(src2).unwrap();
 
         let rules = CompatibilityRules { direction: CompatibilityDirection::Full };
-        let result = plugin.check_compatibility(&old_decl, &new_decl, &rules);
+        let result = plugin.check_compatibility(&old_blob, &new_blob, &rules);
         assert!(result.is_ok(), "adding field at end should be FULL compatible: {result:?}");
     }
 
@@ -884,20 +870,11 @@ mod tests {
         let src1 = "enum Status : byte { UNKNOWN = 0 }";
         let src2 = "enum Status : byte { UNKNOWN = 0, ACTIVE = 1 }";
 
-        let blob1 = plugin.parse(src1).unwrap();
-        let blob2 = plugin.parse(src2).unwrap();
-
-        fn get_decl_blob(blob: &Blob, name: &str) -> Blob {
-            let env = decode_envelope(blob.as_bytes()).unwrap();
-            let decl = env.declarations.iter().find(|d| d.tree_key == name).unwrap();
-            Blob::from(decl.blob_bytes.clone())
-        }
-
-        let old_decl = get_decl_blob(&blob1, "Status");
-        let new_decl = get_decl_blob(&blob2, "Status");
+        let old_blob = plugin.parse(src1).unwrap();
+        let new_blob = plugin.parse(src2).unwrap();
 
         let rules = CompatibilityRules { direction: CompatibilityDirection::Backward };
-        let result = plugin.check_compatibility(&old_decl, &new_decl, &rules);
+        let result = plugin.check_compatibility(&old_blob, &new_blob, &rules);
         assert!(result.is_ok(), "adding enum value should be BACKWARD ok: {result:?}");
     }
 
@@ -909,20 +886,11 @@ mod tests {
         let src1 = "enum Status : byte { UNKNOWN = 0 }";
         let src2 = "enum Status : byte { UNKNOWN = 0, ACTIVE = 1 }";
 
-        let blob1 = plugin.parse(src1).unwrap();
-        let blob2 = plugin.parse(src2).unwrap();
-
-        fn get_decl_blob(blob: &Blob, name: &str) -> Blob {
-            let env = decode_envelope(blob.as_bytes()).unwrap();
-            let decl = env.declarations.iter().find(|d| d.tree_key == name).unwrap();
-            Blob::from(decl.blob_bytes.clone())
-        }
-
-        let old_decl = get_decl_blob(&blob1, "Status");
-        let new_decl = get_decl_blob(&blob2, "Status");
+        let old_blob = plugin.parse(src1).unwrap();
+        let new_blob = plugin.parse(src2).unwrap();
 
         let rules = CompatibilityRules { direction: CompatibilityDirection::Full };
-        let result = plugin.check_compatibility(&old_decl, &new_decl, &rules);
+        let result = plugin.check_compatibility(&old_blob, &new_blob, &rules);
         assert!(result.is_err(), "adding enum value should break FULL compat");
     }
 

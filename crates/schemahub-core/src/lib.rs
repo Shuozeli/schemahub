@@ -398,10 +398,19 @@ impl Core {
         let head_commit = version_control::commit::read_commit(self.storage.as_ref(), &current_head)?;
         let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &head_commit)?;
 
-        // Check schema exists before updating.
-        if version_control::tree::schema_tree_from_root(self.storage.as_ref(), &root_tree, schema_name).is_err() {
-            return Err(CoreError::NotFound(format!("schema '{schema_name}' not found")));
-        }
+        // Load the schema tree to get the current __schema__ blob (for compat check).
+        let (_, schema_tree) = version_control::tree::schema_tree_from_root(
+            self.storage.as_ref(), &root_tree, schema_name,
+        ).map_err(|_| CoreError::NotFound(format!("schema '{schema_name}' not found")))?;
+
+        let old_blob = match version_control::tree::blob_hash_from_schema_tree(&schema_tree, "__schema__") {
+            Ok(blob_hash) => {
+                let data = self.storage.read_object(&blob_hash)?
+                    .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
+                schemahub_types::Blob::new(data)
+            }
+            Err(_) => schemahub_types::Blob::new(vec![]),
+        };
 
         // Detect format from schema name.
         let format_id = detect_format_from_name(schema_name)
@@ -414,6 +423,16 @@ impl Core {
             .map_err(|_| CoreError::InvalidArgument("source is not valid UTF-8".to_string()))?;
         let envelope_blob = plugin.parse(source_str)
             .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
+
+        // Enforce compatibility on protected branches (unless force=true).
+        let repo_config = self.get_repo_config(project, repo)?;
+        if repo_config.is_protected(branch) && !force {
+            let rules = schemahub_types::CompatibilityRules {
+                direction: repo_config.compatibility_direction,
+            };
+            plugin.check_compatibility(&old_blob, &envelope_blob, &rules)
+                .map_err(CoreError::CompatibilityViolation)?;
+        }
 
         // Build schema tree and root.
         let new_root_tree_hash = self.build_schema_tree_and_root(
