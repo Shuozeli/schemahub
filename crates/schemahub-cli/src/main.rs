@@ -49,19 +49,6 @@ enum Commands {
         #[arg(long, default_value = "")]
         schema_path: String,
     },
-    /// Fast-forward merge a branch
-    Merge {
-        /// source branch name
-        source: String,
-        /// target branch name
-        #[arg(long)]
-        into: String,
-        /// project/repo
-        #[arg(long)]
-        repo: String,
-        #[arg(long, default_value = "")]
-        base_revision: String,
-    },
 }
 
 #[tokio::main]
@@ -141,40 +128,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("  {} {}", change.change_type, change.decl_name);
                 }
             }
-            Ok(())
-        }
-        Commands::Merge { source, into, repo, base_revision } => {
-            let parts: Vec<&str> = repo.splitn(2, '/').collect();
-            if parts.len() != 2 {
-                bail!("repo must be 'project/repo'");
-            }
-            let (project, repo_name) = (parts[0].to_string(), parts[1].to_string());
-
-            use schemahub_api::schemahub_v1::{
-                ref_service_client::RefServiceClient, MergeRequest,
-            };
-            use uuid::Uuid;
-            let ch = client::build_channel(&cfg.server).await?;
-            let mut client = RefServiceClient::new(ch);
-            let resp = client
-                .merge(MergeRequest {
-                    project,
-                    repo: repo_name,
-                    source_branch: source.clone(),
-                    target_branch: into.clone(),
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    message: String::new(),
-                })
-                .await
-                .context("Merge RPC")?;
-
-            println!(
-                "Merged '{}' into '{}': {}",
-                source,
-                into,
-                resp.into_inner().new_commit
-            );
             Ok(())
         }
     }

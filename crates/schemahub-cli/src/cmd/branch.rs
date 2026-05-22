@@ -2,9 +2,10 @@ use anyhow::{bail, Context};
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
     ref_service_client::RefServiceClient, CreateBranchRequest, DeleteBranchRequest,
-    ListBranchesRequest, VersionRef,
+    ListBranchesRequest, MergeRequest, VersionRef,
 };
 use tonic::transport::Channel;
+use uuid::Uuid;
 
 #[derive(Args)]
 pub struct BranchArgs {
@@ -32,6 +33,23 @@ pub enum BranchAction {
         repo: String,
         #[arg(long, default_value = "")]
         prefix: String,
+    },
+    /// Fast-forward merge a branch into a target branch
+    Merge {
+        /// project/repo
+        repo: String,
+        /// Source branch to merge from
+        source: String,
+        /// Target branch to merge into
+        #[arg(long, default_value = "main")]
+        into: String,
+        /// Expected current HEAD of the target branch (for optimistic concurrency).
+        /// If omitted the server uses whatever HEAD is current.
+        #[arg(long, default_value = "")]
+        base_revision: String,
+        /// Optional commit message recorded on the merge commit
+        #[arg(long, default_value = "")]
+        message: String,
     },
 }
 
@@ -84,6 +102,29 @@ pub async fn run(args: BranchArgs, channel: Channel) -> anyhow::Result<()> {
                 let protected = if branch.protected { " [protected]" } else { "" };
                 println!("  {}{} → {}", branch.name, protected, branch.head_commit);
             }
+        }
+        BranchAction::Merge { repo, source, into, base_revision, message } => {
+            let (project, repo_name) = parse_repo(&repo)?;
+            let mut client = RefServiceClient::new(channel);
+            let resp = client
+                .merge(MergeRequest {
+                    project,
+                    repo: repo_name,
+                    source_branch: source.clone(),
+                    target_branch: into.clone(),
+                    base_revision,
+                    idempotency_key: Uuid::new_v4().to_string(),
+                    message,
+                })
+                .await
+                .context("Merge RPC")?;
+
+            println!(
+                "Merged '{}' into '{}': {}",
+                source,
+                into,
+                resp.into_inner().new_commit,
+            );
         }
     }
     Ok(())
