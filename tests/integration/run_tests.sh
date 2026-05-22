@@ -634,6 +634,228 @@ else
   fail "T52: duplicate project creation returns error" "expected failure"
 fi
 
+# ─── Group 13: FlatBuffers Union Mutations ───────────────────────────────────
+
+echo ""
+echo "=== Group 13: FlatBuffers Union Mutations ==="
+
+# Setup: create a FlatBuffers schema with a union
+cat > "$TMPDIR_LOCAL/event.fbs" << 'FBS_EOF'
+namespace event;
+
+table Click {
+  id: string;
+}
+
+table Scroll {
+  offset: int32;
+}
+
+table Hover {
+  duration_ms: int32;
+}
+
+union PageEvent { Click, Scroll }
+
+root_type Click;
+FBS_EOF
+
+# T53 — create event.fbs with union PageEvent {Click, Scroll}
+OUT=$($CLI schema create --project acme --repo platform "$TMPDIR_LOCAL/event.fbs" --name event.fbs 2>&1)
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T53: schema create event.fbs with union PageEvent"
+else
+  fail "T53: schema create event.fbs with union PageEvent" "exit=$EXIT | $(echo "$OUT" | head -1)"
+fi
+
+# T54 — pull shows union
+OUT=$($CLI schema pull acme/platform/event.fbs 2>&1)
+if echo "$OUT" | grep -qF "PageEvent"; then
+  pass "T54: schema pull event.fbs shows union PageEvent"
+else
+  fail "T54: schema pull event.fbs shows union PageEvent" "$(echo "$OUT" | head -5)"
+fi
+
+# T55 — AddUnionMember: add Hover to PageEvent
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","fbs_op":{"schema_path":"event.fbs","add_union_member":{"union_name":"PageEvent","member_type":"Hover"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T55: AddUnionMember adds Hover to PageEvent"
+else
+  fail "T55: AddUnionMember adds Hover to PageEvent" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T56 — pull shows added member
+OUT=$($CLI schema pull acme/platform/event.fbs 2>&1)
+if echo "$OUT" | grep -qF "Hover"; then
+  pass "T56: schema pull event.fbs shows added union member Hover"
+else
+  fail "T56: schema pull event.fbs shows added union member Hover" "$(echo "$OUT" | head -5)"
+fi
+
+# T57 — RemoveUnionMember: remove Scroll from PageEvent
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","fbs_op":{"schema_path":"event.fbs","remove_union_member":{"union_name":"PageEvent","member_type":"Scroll"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T57: RemoveUnionMember removes Scroll from PageEvent"
+else
+  fail "T57: RemoveUnionMember removes Scroll from PageEvent" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T58 — union block no longer lists Scroll (the table definition remains, but not as a member)
+OUT=$($CLI schema pull acme/platform/event.fbs 2>&1)
+if ! echo "$OUT" | grep -A10 "union PageEvent" | grep -qF "Scroll"; then
+  pass "T58: union PageEvent no longer lists Scroll after removal"
+else
+  fail "T58: union PageEvent no longer lists Scroll after removal" "$(echo "$OUT" | grep -A5 "union PageEvent")"
+fi
+
+# T59 — AddUnionMember duplicate fails
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","fbs_op":{"schema_path":"event.fbs","add_union_member":{"union_name":"PageEvent","member_type":"Hover"}}}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]]; then
+  pass "T59: AddUnionMember duplicate member returns error"
+else
+  fail "T59: AddUnionMember duplicate member returns error" "expected failure"
+fi
+
+# T60 — RemoveUnionMember non-existent member fails
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","fbs_op":{"schema_path":"event.fbs","remove_union_member":{"union_name":"PageEvent","member_type":"Ghost"}}}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]]; then
+  pass "T60: RemoveUnionMember non-existent member returns error"
+else
+  fail "T60: RemoveUnionMember non-existent member returns error" "expected failure"
+fi
+
+# ─── Group 14: Protobuf UpdateImport ─────────────────────────────────────────
+
+echo ""
+echo "=== Group 14: Protobuf UpdateImport ==="
+
+# T61 — UpdateImport registers import acme/platform/user.proto on order.proto
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","protobuf_op":{"schema_path":"order.proto","update_import":{"import_path":"acme/platform/user.proto"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T61: UpdateImport registers import acme/platform/user.proto on order.proto"
+else
+  fail "T61: UpdateImport registers import acme/platform/user.proto on order.proto" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T62 — UpdateImport re-pinning to a tag is accepted
+OUT=$(grpc_call schema_service.proto schemahub.v1.SchemaService/ApplyMutation \
+  '{"project":"acme","repo":"platform","branch":"main","protobuf_op":{"schema_path":"order.proto","update_import":{"import_path":"acme/platform/user.proto","to_tag":"v1.0.0"}}}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T62: UpdateImport re-pin to tag v1.0.0 is accepted"
+else
+  fail "T62: UpdateImport re-pin to tag v1.0.0 is accepted" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# ─── Group 15: ListDependencies ──────────────────────────────────────────────
+
+echo ""
+echo "=== Group 15: ListDependencies ==="
+
+# T63 — ListDependencies on order.proto returns the registered import
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/ListDependencies \
+  '{"project":"acme","repo":"platform","schema_path":"order.proto"}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "user.proto"; then
+  pass "T63: ListDependencies on order.proto returns acme/platform/user.proto"
+else
+  fail "T63: ListDependencies on order.proto returns acme/platform/user.proto" "exit=$EXIT | $(echo "$OUT" | head -3)"
+fi
+
+# T64 — ListDependencies with transitive=true succeeds
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/ListDependencies \
+  '{"project":"acme","repo":"platform","schema_path":"order.proto","transitive":true}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T64: ListDependencies transitive=true succeeds"
+else
+  fail "T64: ListDependencies transitive=true succeeds" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T65 — ListDependencies on schema with no imports returns empty (not an error)
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/ListDependencies \
+  '{"project":"acme","repo":"platform","schema_path":"user.proto"}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T65: ListDependencies on schema with no imports returns empty successfully"
+else
+  fail "T65: ListDependencies on schema with no imports returns empty successfully" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# ─── Group 16: FollowType ────────────────────────────────────────────────────
+
+echo ""
+echo "=== Group 16: FollowType ==="
+
+# FollowType resolves a type name (field_name param) to its declaration.
+# The 'declaration_name' must exist to anchor the search; 'field_name' is the
+# type name to resolve across the schema and its imports.
+
+# T66 — FollowType resolves UserStatus enum within user.proto
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/FollowType \
+  '{"project":"acme","repo":"platform","schema_path":"user.proto","declaration_name":"User","field_name":"UserStatus"}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]] && echo "$OUT" | grep -qF "UserStatus"; then
+  pass "T66: FollowType resolves UserStatus enum in user.proto"
+else
+  fail "T66: FollowType resolves UserStatus enum in user.proto" "exit=$EXIT | $(echo "$OUT" | head -3)"
+fi
+
+# T67 — FollowType with non-existent type returns not-found error
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/FollowType \
+  '{"project":"acme","repo":"platform","schema_path":"user.proto","declaration_name":"User","field_name":"NonExistentType"}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]]; then
+  pass "T67: FollowType on non-existent type returns error"
+else
+  fail "T67: FollowType on non-existent type returns error" "expected failure"
+fi
+
+# T68 — FollowType with non-existent declaration returns not-found error
+OUT=$(grpc_call exploration_service.proto schemahub.v1.ExplorationService/FollowType \
+  '{"project":"acme","repo":"platform","schema_path":"user.proto","declaration_name":"GhostMessage","field_name":"UserStatus"}')
+EXIT=$?
+if [[ $EXIT -ne 0 ]]; then
+  pass "T68: FollowType with non-existent declaration returns error"
+else
+  fail "T68: FollowType with non-existent declaration returns error" "expected failure"
+fi
+
+# ─── Group 17: Admin GC ──────────────────────────────────────────────────────
+
+echo ""
+echo "=== Group 17: Admin GC ==="
+
+# T69 — RunGC dry_run=true returns stats without deleting anything
+OUT=$(grpc_call admin_service.proto schemahub.v1.AdminService/RunGC \
+  '{"dry_run":true}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T69: RunGC dry_run=true returns stats"
+else
+  fail "T69: RunGC dry_run=true returns stats" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
+# T70 — RunGC live run also succeeds and reports idempotency_entries_cleaned
+OUT=$(grpc_call admin_service.proto schemahub.v1.AdminService/RunGC '{}')
+EXIT=$?
+if [[ $EXIT -eq 0 ]]; then
+  pass "T70: RunGC live run succeeds"
+else
+  fail "T70: RunGC live run succeeds" "exit=$EXIT | $(echo "$OUT" | head -2)"
+fi
+
 # ─── Report ───────────────────────────────────────────────────────────────────
 
 echo ""
