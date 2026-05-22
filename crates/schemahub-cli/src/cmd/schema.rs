@@ -157,7 +157,7 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
                     repo: parts.1,
                     schema_path: parts.2,
                     at: Some(VersionRef {
-                        r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(branch)),
+                        r#ref: Some(super::parse_ref(&branch)),
                     }),
                 })
                 .await

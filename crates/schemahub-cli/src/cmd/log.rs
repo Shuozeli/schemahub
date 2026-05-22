@@ -27,9 +27,7 @@ pub async fn run(args: LogArgs, channel: Channel) -> anyhow::Result<()> {
             project,
             repo,
             from: Some(schemahub_api::schemahub_v1::VersionRef {
-                r#ref: Some(
-                    schemahub_api::schemahub_v1::version_ref::Ref::Branch(args.branch),
-                ),
+                r#ref: Some(super::parse_ref(&args.branch)),
             }),
             stop_at_commit: String::new(),
             schema_path: String::new(),

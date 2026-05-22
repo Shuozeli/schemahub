@@ -282,7 +282,7 @@ fn print_request_body_or_ref(rb: &RequestBodyOrRef, indent: usize) -> String {
     match &rb.value {
         Some(request_body_or_ref::Value::Ref(r)) => {
             format!(
-                "{}'$ref': '#/components/requestBodies/{}'\n",
+                "{}$ref: '#/components/requestBodies/{}'\n",
                 sp(indent),
                 r
             )
@@ -314,7 +314,7 @@ fn print_response_or_ref(r: &ResponseOrRef, indent: usize) -> String {
     match &r.value {
         Some(response_or_ref::Value::Ref(r)) => {
             format!(
-                "{}'$ref': '#/components/responses/{}'\n",
+                "{}$ref: '#/components/responses/{}'\n",
                 sp(indent),
                 r
             )
@@ -535,4 +535,314 @@ pub fn print_declaration(decl: &ParsedDeclaration) -> Result<String, PrintError>
         return Ok(out);
     }
     Ok(format!("# unknown declaration: {key}\n"))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_openapi;
+
+    fn parse_and_print(source: &str) -> String {
+        let result = parse_openapi(source).expect("parse failed");
+        print_envelope(&result).expect("print failed")
+    }
+
+    // ── Test documents ────────────────────────────────────────────────────────
+
+    const MINIMAL: &str = r#"
+openapi: "3.1.0"
+info:
+  title: "Test API"
+  version: "1.0.0"
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List all users
+      responses:
+        '200':
+          description: Success
+"#;
+
+    const FULL: &str = r#"
+openapi: "3.1.0"
+info:
+  title: "Full API"
+  version: "2.0.0"
+  description: "A full API example"
+servers:
+  - url: "https://api.example.com"
+    description: Production
+paths:
+  /items:
+    get:
+      operationId: listItems
+      tags:
+        - items
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Item'
+      responses:
+        '201':
+          description: Created
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Item found
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  schemas:
+    Item:
+      type: object
+      description: An item
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+      required:
+        - id
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Item'
+  requestBodies:
+    CreateItem:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Item'
+"#;
+
+    // ── Structural presence tests ─────────────────────────────────────────────
+
+    #[test]
+    fn minimal_doc_structure() {
+        let out = parse_and_print(MINIMAL);
+        assert!(out.contains("openapi:"), "missing openapi key\n{out}");
+        assert!(out.contains("info:"), "missing info section\n{out}");
+        assert!(out.contains("paths:"), "missing paths section\n{out}");
+        assert!(out.contains("/users:"), "missing /users path\n{out}");
+        assert!(out.contains("get:"), "missing get operation\n{out}");
+        assert!(out.contains("operationId: listUsers"), "missing operationId\n{out}");
+        assert!(out.contains("summary: List all users"), "missing summary\n{out}");
+    }
+
+    #[test]
+    fn info_fields_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("info:"), "missing info\n{out}");
+        assert!(out.contains("title: "), "missing title\n{out}");
+        assert!(out.contains("version: "), "missing version\n{out}");
+        assert!(out.contains("description: "), "missing description\n{out}");
+    }
+
+    #[test]
+    fn servers_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("servers:"), "missing servers\n{out}");
+        assert!(out.contains("- url:"), "missing server url list item\n{out}");
+        assert!(out.contains("https://api.example.com"), "missing server url value\n{out}");
+    }
+
+    #[test]
+    fn operation_tags_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("tags:"), "missing tags\n{out}");
+        assert!(out.contains("items"), "missing 'items' tag value\n{out}");
+    }
+
+    #[test]
+    fn response_status_code_is_double_quoted() {
+        let out = parse_and_print(MINIMAL);
+        assert!(out.contains("\"200\":"), "status code must be double-quoted\n{out}");
+        assert!(out.contains("description: Success"), "missing response description\n{out}");
+    }
+
+    // ── Inline parameter rendering ────────────────────────────────────────────
+
+    #[test]
+    fn inline_param_in_operation_uses_dash_name_form() {
+        let out = parse_and_print(FULL);
+        // Inline parameters in an operation must start with "- name:"
+        assert!(out.contains("- name: limit"), "inline param must use '- name:' form\n{out}");
+        assert!(out.contains("in: query"), "missing 'in: query'\n{out}");
+    }
+
+    #[test]
+    fn inline_param_in_path_uses_dash_name_form() {
+        let out = parse_and_print(FULL);
+        // Path-level inline params also use the "- name:" form
+        assert!(out.contains("- name: id"), "path-level param must use '- name:' form\n{out}");
+        assert!(out.contains("in: path"), "missing 'in: path'\n{out}");
+    }
+
+    // ── $ref rendering ────────────────────────────────────────────────────────
+
+    #[test]
+    fn schema_ref_uses_canonical_form() {
+        let out = parse_and_print(FULL);
+        assert!(
+            out.contains("$ref: '#/components/schemas/Item'"),
+            "schema $ref must use canonical form\n{out}"
+        );
+    }
+
+    #[test]
+    fn response_ref_uses_canonical_form() {
+        let out = parse_and_print(FULL);
+        assert!(
+            out.contains("$ref: '#/components/responses/NotFound'"),
+            "response $ref must use canonical form\n{out}"
+        );
+    }
+
+    // ── Components section ────────────────────────────────────────────────────
+
+    #[test]
+    fn components_schemas_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("components:"), "missing components\n{out}");
+        assert!(out.contains("  schemas:"), "missing schemas subsection\n{out}");
+        assert!(out.contains("    Item:"), "missing Item schema entry\n{out}");
+        assert!(out.contains("type: object"), "missing type: object\n{out}");
+        assert!(out.contains("properties:"), "missing properties\n{out}");
+        assert!(out.contains("format: uuid"), "missing format: uuid\n{out}");
+        assert!(out.contains("required:"), "missing required list\n{out}");
+    }
+
+    #[test]
+    fn components_parameters_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("  parameters:"), "missing parameters subsection\n{out}");
+        assert!(out.contains("    LimitParam:"), "missing LimitParam entry\n{out}");
+    }
+
+    #[test]
+    fn components_responses_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("  responses:"), "missing responses subsection\n{out}");
+        assert!(out.contains("    NotFound:"), "missing NotFound entry\n{out}");
+        assert!(out.contains("description: Resource not found"), "missing response description\n{out}");
+    }
+
+    #[test]
+    fn components_request_bodies_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("  requestBodies:"), "missing requestBodies subsection\n{out}");
+        assert!(out.contains("    CreateItem:"), "missing CreateItem entry\n{out}");
+        assert!(out.contains("required: true"), "missing required: true\n{out}");
+    }
+
+    // ── Absence tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn components_absent_when_none_defined() {
+        let out = parse_and_print(MINIMAL);
+        assert!(!out.contains("components:"), "components must be absent for minimal doc\n{out}");
+    }
+
+    #[test]
+    fn paths_absent_when_none_defined() {
+        let no_paths = r#"
+openapi: "3.1.0"
+info:
+  title: "Schema-only API"
+  version: "1.0.0"
+components:
+  schemas:
+    Foo:
+      type: object
+"#;
+        let out = parse_and_print(no_paths);
+        assert!(!out.contains("paths:"), "paths must be absent when no paths are defined\n{out}");
+        assert!(out.contains("components:"), "components must be present\n{out}");
+        assert!(out.contains("Foo:"), "Foo schema must appear\n{out}");
+    }
+
+    // ── YAML scalar quoting ───────────────────────────────────────────────────
+
+    #[test]
+    fn ys_quotes_empty_string() {
+        assert_eq!(ys(""), "\"\"");
+    }
+
+    #[test]
+    fn ys_quotes_value_with_colon_space() {
+        let s = "My API: v2";
+        let quoted = ys(s);
+        assert!(quoted.starts_with('"'), "value with ': ' must be quoted: {quoted}");
+    }
+
+    #[test]
+    fn ys_quotes_boolean_literals() {
+        assert!(ys("true").starts_with('"'), "true must be quoted");
+        assert!(ys("false").starts_with('"'), "false must be quoted");
+        assert!(ys("null").starts_with('"'), "null must be quoted");
+    }
+
+    #[test]
+    fn ys_quotes_leading_digit() {
+        assert!(ys("3.1.0").starts_with('"'), "version strings starting with digit must be quoted");
+    }
+
+    #[test]
+    fn ys_does_not_quote_plain_identifier() {
+        let s = "application/json";
+        let out = ys(s);
+        assert!(!out.starts_with('"'), "plain media type should not be quoted: {out}");
+        assert_eq!(out, s);
+    }
+
+    // ── Request body in operation ─────────────────────────────────────────────
+
+    #[test]
+    fn request_body_in_operation_rendered() {
+        let out = parse_and_print(FULL);
+        assert!(out.contains("requestBody:"), "missing requestBody in operation\n{out}");
+        assert!(out.contains("required: true"), "missing required in requestBody\n{out}");
+        assert!(out.contains("content:"), "missing content in requestBody\n{out}");
+        assert!(out.contains("application/json:"), "missing application/json media type\n{out}");
+    }
 }

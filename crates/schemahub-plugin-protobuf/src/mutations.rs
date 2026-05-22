@@ -167,6 +167,7 @@ fn apply_add_field(msg: &MessageBlob, op: &OpAddField) -> Result<MessageBlob, Mu
         number: op.field_number,
         repeated: op.repeated,
         doc_comment: op.doc_comment.clone(),
+        ..Default::default()
     });
     Ok(new_msg)
 }
@@ -358,6 +359,7 @@ mod tests {
             number,
             repeated: false,
             doc_comment: String::new(),
+            ..Default::default()
         }
     }
 

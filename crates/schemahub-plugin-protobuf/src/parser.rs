@@ -313,6 +313,10 @@ impl Parser {
             services: Vec::new(),
         };
 
+        // Collect nested declarations hoisted from inside message bodies.
+        let mut hoisted_messages: Vec<MessageBlob> = Vec::new();
+        let mut hoisted_enums: Vec<EnumBlob> = Vec::new();
+
         while self.peek().is_some() {
             let doc = self.collect_pending_comments();
             match self.peek() {
@@ -320,7 +324,6 @@ impl Parser {
                 Some(Token::Word(w)) => match w.as_str() {
                     "syntax" => {
                         self.advance();
-                        // expect = "proto3";
                         if let Some(Token::Eq) = self.advance() {}
                         match self.advance() {
                             Some(Token::StringLit(s)) => file.syntax = s.clone(),
@@ -335,7 +338,6 @@ impl Parser {
                     }
                     "import" => {
                         self.advance();
-                        // optional "public" / "weak" keyword
                         if matches!(self.peek(), Some(Token::Word(w)) if w == "public" || w == "weak") {
                             self.advance();
                         }
@@ -347,7 +349,7 @@ impl Parser {
                     }
                     "message" => {
                         self.advance();
-                        let msg = self.parse_message(doc)?;
+                        let msg = self.parse_message(doc, &mut hoisted_messages, &mut hoisted_enums)?;
                         file.messages.push(msg);
                     }
                     "enum" => {
@@ -361,11 +363,9 @@ impl Parser {
                         file.services.push(svc);
                     }
                     "option" => {
-                        // skip top-level option
                         self.skip_to_semicolon();
                     }
                     _ => {
-                        // skip unknown top-level construct
                         self.skip_to_semicolon();
                     }
                 },
@@ -374,14 +374,22 @@ impl Parser {
             }
         }
 
+        // Append hoisted nested declarations after all top-level ones.
+        file.messages.extend(hoisted_messages);
+        file.enums.extend(hoisted_enums);
+
         Ok(file)
     }
 
     // ── Message ───────────────────────────────────────────────────────────────
 
-    fn parse_message(&mut self, doc_comment: String) -> Result<MessageBlob, ParseError> {
+    fn parse_message(
+        &mut self,
+        doc_comment: String,
+        hoisted_messages: &mut Vec<MessageBlob>,
+        hoisted_enums: &mut Vec<EnumBlob>,
+    ) -> Result<MessageBlob, ParseError> {
         let name = self.expect_word()?;
-        // expect {
         match self.advance() {
             Some(Token::LBrace) => {}
             _ => {
@@ -411,42 +419,88 @@ impl Parser {
                         self.skip_to_semicolon();
                     }
                     "message" => {
-                        // nested message — skip
+                        // Nested message: parse recursively and hoist with qualified name.
                         self.advance();
-                        // consume name
-                        let _ = self.expect_word();
-                        if let Some(Token::LBrace) = self.peek() {
-                            self.advance();
-                            self.skip_block();
-                        }
-                        // TODO: nested type extraction not supported in v1
+                        let mut nested = self.parse_message(field_doc, hoisted_messages, hoisted_enums)?;
+                        nested.name = format!("{}.{}", name, nested.name);
+                        hoisted_messages.push(nested);
                     }
                     "enum" => {
-                        // nested enum — skip
+                        // Nested enum: parse and hoist with qualified name.
                         self.advance();
-                        let _ = self.expect_word();
-                        if let Some(Token::LBrace) = self.peek() {
-                            self.advance();
-                            self.skip_block();
-                        }
-                        // TODO: nested enum extraction not supported in v1
+                        let mut nested = self.parse_enum(field_doc)?;
+                        nested.name = format!("{}.{}", name, nested.name);
+                        hoisted_enums.push(nested);
                     }
                     "oneof" => {
-                        // skip oneof block entirely — TODO: parse oneof in v2
+                        // Parse the oneof block; each field carries `oneof_name` for round-trip fidelity.
                         self.advance();
-                        let _ = self.expect_word();
-                        if let Some(Token::LBrace) = self.peek() {
-                            self.advance();
-                            self.skip_block();
+                        let oneof_name = match self.expect_word() {
+                            Ok(n) => n,
+                            Err(_) => { self.skip_to_semicolon(); continue; }
+                        };
+                        if !matches!(self.peek(), Some(Token::LBrace)) {
+                            self.skip_to_semicolon();
+                            continue;
+                        }
+                        self.advance(); // consume '{'
+                        loop {
+                            let fdoc = self.collect_pending_comments();
+                            match self.peek() {
+                                None => break,
+                                Some(Token::RBrace) => { self.advance(); break; }
+                                Some(Token::Semicolon) => { self.advance(); continue; }
+                                Some(Token::Word(w)) if w == "option" => {
+                                    self.skip_to_semicolon();
+                                }
+                                Some(Token::Word(_)) => {
+                                    if let Some(mut f) = self.parse_field(fdoc)? {
+                                        f.oneof_name = oneof_name.clone();
+                                        fields.push(f);
+                                    }
+                                }
+                                _ => { self.advance(); }
+                            }
                         }
                     }
                     "map" => {
                         // map<KeyType, ValueType> field_name = N;
-                        // Skip for now — TODO: map field support in v2
+                        // The lexer drops '<' and '>' as unknown chars, so the token stream is:
+                        //   Word("map") Word(key) Comma Word(value) Word(field_name) Eq Word(N) ...
+                        self.advance(); // consume "map"
+                        let key_type = match self.peek() {
+                            Some(Token::Word(_)) => self.expect_word()?,
+                            _ => { self.skip_to_semicolon(); continue; }
+                        };
+                        if matches!(self.peek(), Some(Token::Comma)) { self.advance(); }
+                        let value_type = match self.peek() {
+                            Some(Token::Word(_)) => self.expect_word()?,
+                            _ => { self.skip_to_semicolon(); continue; }
+                        };
+                        let field_name = match self.peek() {
+                            Some(Token::Word(_)) => self.expect_word()?,
+                            _ => { self.skip_to_semicolon(); continue; }
+                        };
+                        if !matches!(self.advance(), Some(Token::Eq)) {
+                            self.skip_to_semicolon();
+                            continue;
+                        }
+                        let number = match self.parse_number() {
+                            Ok(n) => n as u32,
+                            Err(_) => { self.skip_to_semicolon(); continue; }
+                        };
                         self.skip_to_semicolon();
+                        fields.push(FieldDef {
+                            name: field_name,
+                            field_type: value_type,
+                            map_key_type: key_type,
+                            number,
+                            doc_comment: field_doc,
+                            ..Default::default()
+                        });
                     }
                     _ => {
-                        // regular or repeated field
+                        // Regular or repeated field
                         if let Some(field) = self.parse_field(field_doc)? {
                             fields.push(field);
                         }
@@ -519,6 +573,7 @@ impl Parser {
             number,
             repeated,
             doc_comment,
+            ..Default::default()
         }))
     }
 
@@ -838,5 +893,106 @@ mod tests {
         let result = parse_proto(source).unwrap();
         assert!(result.messages[0].doc_comment.contains("payment request"));
         assert!(result.messages[0].fields[0].doc_comment.contains("user identifier"));
+    }
+
+    #[test]
+    fn parse_oneof_fields_extracted() {
+        let source = r#"
+            syntax = "proto3";
+            message Event {
+              string id = 1;
+              oneof payload {
+                string text_body = 2;
+                bytes binary_body = 3;
+              }
+              bool archived = 4;
+            }
+        "#;
+        let result = parse_proto(source).unwrap();
+        assert_eq!(result.messages.len(), 1);
+        let msg = &result.messages[0];
+        assert_eq!(msg.fields.len(), 4);
+
+        // Regular fields have empty oneof_name
+        assert_eq!(msg.fields[0].name, "id");
+        assert!(msg.fields[0].oneof_name.is_empty());
+        assert_eq!(msg.fields[3].name, "archived");
+        assert!(msg.fields[3].oneof_name.is_empty());
+
+        // Oneof fields carry the group name
+        assert_eq!(msg.fields[1].name, "text_body");
+        assert_eq!(msg.fields[1].oneof_name, "payload");
+        assert_eq!(msg.fields[2].name, "binary_body");
+        assert_eq!(msg.fields[2].oneof_name, "payload");
+    }
+
+    #[test]
+    fn parse_map_field() {
+        let source = r#"
+            syntax = "proto3";
+            message Config {
+              map<string, string> labels = 1;
+              map<string, int32> counts = 2;
+            }
+        "#;
+        let result = parse_proto(source).unwrap();
+        let msg = &result.messages[0];
+        assert_eq!(msg.fields.len(), 2);
+
+        assert_eq!(msg.fields[0].name, "labels");
+        assert_eq!(msg.fields[0].map_key_type, "string");
+        assert_eq!(msg.fields[0].field_type, "string");
+        assert_eq!(msg.fields[0].number, 1);
+
+        assert_eq!(msg.fields[1].name, "counts");
+        assert_eq!(msg.fields[1].map_key_type, "string");
+        assert_eq!(msg.fields[1].field_type, "int32");
+        assert_eq!(msg.fields[1].number, 2);
+    }
+
+    #[test]
+    fn parse_nested_message_hoisted() {
+        let source = r#"
+            syntax = "proto3";
+            message Outer {
+              string name = 1;
+              message Inner {
+                string id = 1;
+              }
+              Inner inner = 2;
+            }
+        "#;
+        let result = parse_proto(source).unwrap();
+        // Outer is the top-level message
+        assert_eq!(result.messages.len(), 2);
+        let outer = result.messages.iter().find(|m| m.name == "Outer").unwrap();
+        assert_eq!(outer.fields.len(), 2);
+        assert_eq!(outer.fields[0].name, "name");
+        assert_eq!(outer.fields[1].name, "inner");
+
+        // Nested Inner is hoisted as "Outer.Inner"
+        let inner = result.messages.iter().find(|m| m.name == "Outer.Inner").unwrap();
+        assert_eq!(inner.fields.len(), 1);
+        assert_eq!(inner.fields[0].name, "id");
+    }
+
+    #[test]
+    fn parse_nested_enum_hoisted() {
+        let source = r#"
+            syntax = "proto3";
+            message Order {
+              enum Status {
+                UNKNOWN = 0;
+                PLACED = 1;
+              }
+              Status status = 1;
+            }
+        "#;
+        let result = parse_proto(source).unwrap();
+        assert_eq!(result.messages.len(), 1);
+        // Nested enum hoisted as "Order.Status"
+        assert_eq!(result.enums.len(), 1);
+        assert_eq!(result.enums[0].name, "Order.Status");
+        assert_eq!(result.enums[0].values.len(), 2);
     }
 }

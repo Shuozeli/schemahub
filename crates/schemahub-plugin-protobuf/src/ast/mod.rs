@@ -24,7 +24,7 @@ pub struct MessageBlob {
 pub struct FieldDef {
     #[prost(string, tag = "1")]
     pub name: String,
-    /// e.g. "string", "int32", "payments.User"
+    /// e.g. "string", "int32", "payments.User"; for map fields this is the value type
     #[prost(string, tag = "2")]
     pub field_type: String,
     #[prost(uint32, tag = "3")]
@@ -33,6 +33,13 @@ pub struct FieldDef {
     pub repeated: bool,
     #[prost(string, tag = "5")]
     pub doc_comment: String,
+    /// Non-empty if this field is inside a `oneof` block; contains the oneof name.
+    #[prost(string, tag = "6")]
+    pub oneof_name: String,
+    /// Non-empty if this is a `map<K, V>` field; contains the key type.
+    /// When set, `field_type` holds the value type.
+    #[prost(string, tag = "7")]
+    pub map_key_type: String,
 }
 
 /// Inclusive range for reserved field numbers. For single "reserved 1;" start == end.

@@ -99,20 +99,20 @@ async fn main() -> anyhow::Result<()> {
             if range_parts.len() != 2 {
                 bail!("range must be 'base..head'");
             }
-            let (base_ref, head_ref) = (range_parts[0].to_string(), range_parts[1].to_string());
+            let (base_str, head_str) = (range_parts[0], range_parts[1]);
 
             use schemahub_api::schemahub_v1::{
                 ref_service_client::RefServiceClient, DiffRequest, VersionRef,
-                version_ref::Ref as VersionRefKind,
             };
+
             let ch = client::build_channel(&cfg.server).await?;
             let mut client = RefServiceClient::new(ch);
             let resp = client
                 .diff(DiffRequest {
                     project,
                     repo: repo_name,
-                    base: Some(VersionRef { r#ref: Some(VersionRefKind::Branch(base_ref)) }),
-                    head: Some(VersionRef { r#ref: Some(VersionRefKind::Branch(head_ref)) }),
+                    base: Some(VersionRef { r#ref: Some(cmd::parse_ref(base_str)) }),
+                    head: Some(VersionRef { r#ref: Some(cmd::parse_ref(head_str)) }),
                     schema_path,
                 })
                 .await

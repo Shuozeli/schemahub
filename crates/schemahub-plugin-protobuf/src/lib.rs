@@ -218,6 +218,7 @@ impl FormatPlugin for ProtobufPlugin {
                             number: o.field_number,
                             repeated: o.repeated,
                             doc_comment: o.doc_comment.clone(),
+                            ..Default::default()
                         });
                     }
                     ProtoOp::RemoveField(o) => {

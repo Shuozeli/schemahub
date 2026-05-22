@@ -331,6 +331,7 @@ mod tests {
             number,
             repeated: false,
             doc_comment: String::new(),
+            ..Default::default()
         }
     }
 
