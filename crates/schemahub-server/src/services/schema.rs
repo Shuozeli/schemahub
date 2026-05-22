@@ -121,13 +121,46 @@ fn proto_to_envelope(m: &ProtobufMutation) -> Result<Bytes, Status> {
             };
             (proto_ops::op_tag::ADD_ENUM_VALUE, inner.encode_to_vec())
         }
-        Some(ApiOp::RemoveEnum(_))
-        | Some(ApiOp::RemoveEnumValue(_))
+        Some(ApiOp::RemoveEnum(o)) => {
+            let inner = proto_ops::OpRemoveEnum {
+                enum_name: o.enum_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_ENUM, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddService(o)) => {
+            let inner = proto_ops::OpAddService {
+                service_name: o.service_name.clone(),
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_SERVICE, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveService(o)) => {
+            let inner = proto_ops::OpRemoveService {
+                service_name: o.service_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_SERVICE, inner.encode_to_vec())
+        }
+        Some(ApiOp::AddRpc(o)) => {
+            // service_name flows into mutation.declaration_name via extract_proto_decl_name
+            let inner = proto_ops::OpAddRpc {
+                rpc_name: o.rpc_name.clone(),
+                request_type: o.request_type.clone(),
+                response_type: o.response_type.clone(),
+                client_streaming: o.client_streaming,
+                server_streaming: o.server_streaming,
+                doc_comment: o.doc_comment.clone(),
+            };
+            (proto_ops::op_tag::ADD_RPC, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveRpc(o)) => {
+            // service_name flows into mutation.declaration_name via extract_proto_decl_name
+            let inner = proto_ops::OpRemoveRpc {
+                rpc_name: o.rpc_name.clone(),
+            };
+            (proto_ops::op_tag::REMOVE_RPC, inner.encode_to_vec())
+        }
+        Some(ApiOp::RemoveEnumValue(_))
         | Some(ApiOp::RenameEnumValue(_))
-        | Some(ApiOp::AddService(_))
-        | Some(ApiOp::RemoveService(_))
-        | Some(ApiOp::AddRpc(_))
-        | Some(ApiOp::RemoveRpc(_))
         | Some(ApiOp::RenameRpc(_))
         | Some(ApiOp::UpdateImport(_)) => {
             return Err(Status::unimplemented(
@@ -216,10 +249,14 @@ fn fbs_to_envelope(m: &FlatBuffersMutation) -> Result<Bytes, Status> {
             };
             (fbs_ops::op_tag::ADD_UNION, inner.encode_to_vec())
         }
-        Some(ApiOp::UpdateImport(_)) => {
-            return Err(Status::unimplemented(
-                "FlatBuffers UpdateImport mutation is not yet implemented",
-            ));
+        Some(ApiOp::UpdateImport(o)) => {
+            // to_commit / to_tag are pinning hints not yet modelled in the plugin;
+            // forward the import path with remove=false (add/update semantics).
+            let inner = fbs_ops::OpUpdateImport {
+                import_path: o.import_path.clone(),
+                remove: false,
+            };
+            (fbs_ops::op_tag::UPDATE_IMPORT, inner.encode_to_vec())
         }
         None => {
             return Err(Status::invalid_argument(
