@@ -144,9 +144,15 @@ pub fn apply_to_message(
                 "declaration-level operation applied to a single message blob".into(),
             ))
         }
-        ProtoOp::AddEnum(_) | ProtoOp::AddEnumValue(_) => {
+        ProtoOp::AddEnum(_) | ProtoOp::AddEnumValue(_) | ProtoOp::RemoveEnum(_) => {
             Err(MutationError::InvalidOperation(
                 "enum operation applied to a message blob".into(),
+            ))
+        }
+        ProtoOp::AddService(_) | ProtoOp::RemoveService(_)
+        | ProtoOp::AddRpc(_) | ProtoOp::RemoveRpc(_) => {
+            Err(MutationError::InvalidOperation(
+                "service operation applied to a message blob".into(),
             ))
         }
     }

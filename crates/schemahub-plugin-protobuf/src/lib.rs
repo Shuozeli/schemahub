@@ -138,7 +138,7 @@ impl FormatPlugin for ProtobufPlugin {
     // ── apply_mutation ────────────────────────────────────────────────────────
 
     fn apply_mutation(&self, blob: &Blob, mutation: &Mutation) -> Result<Blob, MutationError> {
-        use crate::ast::{FieldDef, MessageBlob, EnumValueDef};
+        use crate::ast::{FieldDef, MessageBlob, EnumValueDef, RpcDef, ServiceBlob};
         let op = decode_operation(&mutation.operation)?;
         let decl_name = &mutation.declaration_name;
 
@@ -193,6 +193,27 @@ impl FormatPlugin for ProtobufPlugin {
                     tree_key: o.enum_name.clone(),
                     blob_bytes: encode_decl_blob(&wrap_enum(&e)),
                 });
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
+            ProtoOp::RemoveEnum(o) => {
+                envelope.declarations.retain(|d| d.tree_key != o.enum_name);
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
+            ProtoOp::AddService(o) => {
+                let svc = ServiceBlob {
+                    blob_version: 1,
+                    name: o.service_name.clone(),
+                    doc_comment: o.doc_comment.clone(),
+                    ..Default::default()
+                };
+                envelope.declarations.push(ParsedDecl {
+                    tree_key: o.service_name.clone(),
+                    blob_bytes: encode_decl_blob(&wrap_service(&svc)),
+                });
+                return Ok(Blob::from(encode_envelope(&envelope)));
+            }
+            ProtoOp::RemoveService(o) => {
+                envelope.declarations.retain(|d| d.tree_key != o.service_name);
                 return Ok(Blob::from(encode_envelope(&envelope)));
             }
             _ => {}
@@ -264,7 +285,37 @@ impl FormatPlugin for ProtobufPlugin {
                 wrap_enum(&e)
             }
             KIND_SERVICE => {
-                return Err(MutationError::UnsupportedInV1);
+                let mut svc = unwrap_service(&decl_blob)?;
+                match &op {
+                    ProtoOp::AddRpc(o) => {
+                        if svc.rpcs.iter().any(|r| r.name == o.rpc_name) {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "rpc '{}' already exists in service '{}'",
+                                o.rpc_name, svc.name
+                            )));
+                        }
+                        svc.rpcs.push(RpcDef {
+                            name: o.rpc_name.clone(),
+                            request_type: o.request_type.clone(),
+                            response_type: o.response_type.clone(),
+                            client_streaming: o.client_streaming,
+                            server_streaming: o.server_streaming,
+                            doc_comment: o.doc_comment.clone(),
+                        });
+                    }
+                    ProtoOp::RemoveRpc(o) => {
+                        let before = svc.rpcs.len();
+                        svc.rpcs.retain(|r| r.name != o.rpc_name);
+                        if svc.rpcs.len() == before {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "rpc '{}' not found in service '{}'",
+                                o.rpc_name, svc.name
+                            )));
+                        }
+                    }
+                    _ => return Err(MutationError::UnsupportedInV1),
+                }
+                wrap_service(&svc)
             }
             other => {
                 return Err(MutationError::MalformedBlob(format!("unknown DeclBlob kind {other}")));
@@ -978,5 +1029,158 @@ mod tests {
         let en = &fdp.enum_type[0];
         assert_eq!(en.name.as_deref(), Some("Status"));
         assert_eq!(en.value.len(), 2);
+    }
+
+    // ── New op tests ──────────────────────────────────────────────────────────
+
+    fn make_mutation(decl_name: &str, tag: u32, payload: Vec<u8>) -> Mutation {
+        use crate::operations::ProtoOperationEnvelope;
+        Mutation {
+            format_id: "protobuf".into(),
+            schema_path: SchemaPath::new("p", "r", "test.proto"),
+            declaration_name: decl_name.to_string(),
+            operation: crate::operations::ProtoOperationEnvelope::encode_op(tag, payload).into(),
+        }
+    }
+
+    #[test]
+    fn apply_mutation_remove_enum() {
+        use crate::operations::{op_tag, OpRemoveEnum};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; message Foo { string x = 1; } enum Status { UNKNOWN = 0; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let decls_before = plugin.list_declarations(&blob).unwrap();
+        assert!(decls_before.iter().any(|d| d.name == "Status"), "Status should exist before remove");
+
+        let op = OpRemoveEnum { enum_name: "Status".into() };
+        let mutation = make_mutation("", op_tag::REMOVE_ENUM, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let decls_after = plugin.list_declarations(&new_blob).unwrap();
+        assert!(!decls_after.iter().any(|d| d.name == "Status"), "Status should be gone after remove");
+        assert!(decls_after.iter().any(|d| d.name == "Foo"), "Foo should still exist");
+    }
+
+    #[test]
+    fn apply_mutation_add_service() {
+        use crate::operations::{op_tag, OpAddService};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; message Req { string x = 1; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpAddService { service_name: "FooService".into(), doc_comment: "A service".into() };
+        let mutation = make_mutation("", op_tag::ADD_SERVICE, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let decls = plugin.list_declarations(&new_blob).unwrap();
+        let svc = decls.iter().find(|d| d.name == "FooService").expect("FooService should exist");
+        assert_eq!(svc.kind, DeclKind::Service);
+    }
+
+    #[test]
+    fn apply_mutation_remove_service() {
+        use crate::operations::{op_tag, OpRemoveService};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; service FooService { } message Req { string x = 1; }"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRemoveService { service_name: "FooService".into() };
+        let mutation = make_mutation("", op_tag::REMOVE_SERVICE, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let decls = plugin.list_declarations(&new_blob).unwrap();
+        assert!(!decls.iter().any(|d| d.name == "FooService"), "FooService should be removed");
+        assert!(decls.iter().any(|d| d.name == "Req"), "Req should remain");
+    }
+
+    #[test]
+    fn apply_mutation_add_rpc() {
+        use crate::operations::{op_tag, OpAddRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; service PaySvc { } message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpAddRpc {
+            rpc_name: "Process".into(),
+            request_type: "Req".into(),
+            response_type: "Resp".into(),
+            client_streaming: false,
+            server_streaming: false,
+            doc_comment: String::new(),
+        };
+        let mutation = make_mutation("PaySvc", op_tag::ADD_RPC, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let text = plugin.print(&new_blob).unwrap();
+        assert!(text.contains("rpc Process(Req) returns (Resp);"), "rpc should appear in printed output: {text}");
+    }
+
+    #[test]
+    fn apply_mutation_add_rpc_duplicate_rejected() {
+        use crate::operations::{op_tag, OpAddRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; service PaySvc { rpc Process (Req) returns (Resp); } message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpAddRpc {
+            rpc_name: "Process".into(),
+            request_type: "Req".into(),
+            response_type: "Resp".into(),
+            client_streaming: false,
+            server_streaming: false,
+            doc_comment: String::new(),
+        };
+        let mutation = make_mutation("PaySvc", op_tag::ADD_RPC, op.encode_to_vec());
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "adding duplicate rpc should be rejected");
+    }
+
+    #[test]
+    fn apply_mutation_remove_rpc() {
+        use crate::operations::{op_tag, OpRemoveRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3";
+            service PaySvc {
+              rpc Process (Req) returns (Resp);
+              rpc Cancel (Req) returns (Resp);
+            }
+            message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRemoveRpc { rpc_name: "Process".into() };
+        let mutation = make_mutation("PaySvc", op_tag::REMOVE_RPC, op.encode_to_vec());
+        let new_blob = plugin.apply_mutation(&blob, &mutation).unwrap();
+
+        let text = plugin.print(&new_blob).unwrap();
+        assert!(!text.contains("rpc Process"), "Process rpc should be removed: {text}");
+        assert!(text.contains("rpc Cancel"), "Cancel rpc should remain: {text}");
+    }
+
+    #[test]
+    fn apply_mutation_remove_rpc_not_found_rejected() {
+        use crate::operations::{op_tag, OpRemoveRpc};
+        use prost::Message as _;
+
+        let plugin = ProtobufPlugin;
+        let source = r#"syntax = "proto3"; service PaySvc { } message Req {} message Resp {}"#;
+        let blob = plugin.parse(source).unwrap();
+
+        let op = OpRemoveRpc { rpc_name: "Nonexistent".into() };
+        let mutation = make_mutation("PaySvc", op_tag::REMOVE_RPC, op.encode_to_vec());
+        let result = plugin.apply_mutation(&blob, &mutation);
+        assert!(result.is_err(), "removing nonexistent rpc should be rejected");
     }
 }
