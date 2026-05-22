@@ -233,6 +233,18 @@ impl FormatPlugin for ProtobufPlugin {
                 let mut msg = unwrap_message(&decl_blob)?;
                 match &op {
                     ProtoOp::AddField(o) => {
+                        if msg.fields.iter().any(|f| f.name == o.field_name) {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "field '{}' already exists in message '{}'",
+                                o.field_name, msg.name
+                            )));
+                        }
+                        if msg.fields.iter().any(|f| f.number == o.field_number) {
+                            return Err(MutationError::InvalidOperation(format!(
+                                "field number {} is already in use in message '{}'",
+                                o.field_number, msg.name
+                            )));
+                        }
                         msg.fields.push(FieldDef {
                             name: o.field_name.clone(),
                             field_type: o.field_type.clone(),

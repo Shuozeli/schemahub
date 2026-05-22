@@ -15,6 +15,9 @@ service ExplorationService {
   // Return full detail for one named declaration.
   rpc GetDeclaration(GetDeclarationRequest) returns (GetDeclarationResponse);
 
+  // Return the raw source text of a schema file as originally uploaded.
+  rpc GetSchemaSource(GetSchemaSourceRequest) returns (GetSchemaSourceResponse);
+
   // Follow a field's type reference, potentially crossing import boundaries.
   rpc FollowType(FollowTypeRequest) returns (FollowTypeResponse);
 
@@ -69,6 +72,22 @@ message GetDeclarationResponse {
   bytes       detail     = 2;
   // The commit hash that was actually resolved (useful when `at` was a branch name).
   string      at_commit  = 3;
+}
+
+// ── GetSchemaSource ───────────────────────────────────────────────────────────
+
+message GetSchemaSourceRequest {
+  string     project     = 1;
+  string     repo        = 2;
+  string     schema_path = 3;  // e.g. "user.proto"
+  VersionRef at          = 4;  // defaults to HEAD of default branch
+}
+
+message GetSchemaSourceResponse {
+  // Raw source bytes as originally uploaded (UTF-8 text for .proto/.fbs/.yaml).
+  bytes  source     = 1;
+  // The commit hash that was actually resolved.
+  string at_commit  = 2;
 }
 
 // ── FollowType ────────────────────────────────────────────────────────────────

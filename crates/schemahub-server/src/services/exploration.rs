@@ -6,9 +6,10 @@ use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1::{
     DeclSummary as ProtoDeclSummary, FollowTypeRequest, FollowTypeResponse,
-    GetDeclarationRequest, GetDeclarationResponse, ListDeclarationsRequest,
-    ListDeclarationsResponse, ListDependenciesRequest, ListDependenciesResponse,
-    ListSchemasRequest, ListSchemasResponse, SchemaInfo, SearchRequest, SearchResponse,
+    GetDeclarationRequest, GetDeclarationResponse, GetSchemaSourceRequest, GetSchemaSourceResponse,
+    ListDeclarationsRequest, ListDeclarationsResponse, ListDependenciesRequest,
+    ListDependenciesResponse, ListSchemasRequest, ListSchemasResponse, SchemaInfo,
+    SearchRequest, SearchResponse,
     exploration_service_server::ExplorationService,
     version_ref::Ref as VersionRefKind,
 };
@@ -196,6 +197,32 @@ impl ExplorationService for ExplorationServiceImpl {
                 }))
             }
         }
+    }
+
+    async fn get_schema_source(
+        &self,
+        request: Request<GetSchemaSourceRequest>,
+    ) -> Result<Response<GetSchemaSourceResponse>, Status> {
+        let req = request.into_inner();
+        let commit_hex = resolve_version_ref_to_commit_hex(
+            &self.core,
+            &req.project,
+            &req.repo,
+            req.at,
+        )?;
+
+        let source_bytes = self.core
+            .get_schema_source(&req.project, &req.repo, &req.schema_path, &commit_hex)
+            .map_err(core_to_status)?
+            .ok_or_else(|| Status::not_found(format!(
+                "schema '{}' not found in {}/{}",
+                req.schema_path, req.project, req.repo
+            )))?;
+
+        Ok(Response::new(GetSchemaSourceResponse {
+            source: source_bytes.into(),
+            at_commit: commit_hex,
+        }))
     }
 
     async fn follow_type(

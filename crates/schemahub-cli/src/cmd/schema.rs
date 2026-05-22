@@ -1,9 +1,9 @@
 use anyhow::{bail, Context};
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
-    codegen_service_client::CodegenServiceClient,
+    exploration_service_client::ExplorationServiceClient,
     schema_service_client::SchemaServiceClient,
-    CreateSchemaRequest, GetDescriptorsRequest, SchemaFormat, VersionRef,
+    CreateSchemaRequest, GetSchemaSourceRequest, SchemaFormat, VersionRef,
 };
 use std::path::PathBuf;
 use tonic::transport::Channel;
@@ -150,9 +150,9 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
         SchemaAction::Pull { schema_path, branch } => {
             // schema_path is "project/repo/schema_name"
             let parts = parse_schema_path_3(&schema_path)?;
-            let mut client = CodegenServiceClient::new(channel);
+            let mut client = ExplorationServiceClient::new(channel);
             let resp = client
-                .get_descriptors(GetDescriptorsRequest {
+                .get_schema_source(GetSchemaSourceRequest {
                     project: parts.0,
                     repo: parts.1,
                     schema_path: parts.2,
@@ -161,11 +161,10 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
                     }),
                 })
                 .await
-                .context("GetDescriptors RPC")?;
+                .context("GetSchemaSource RPC")?;
 
-            let inner = resp.into_inner();
-            let source = String::from_utf8(inner.descriptor_bytes.to_vec())
-                .unwrap_or_else(|_| "(binary descriptor — not printable as UTF-8)".to_string());
+            let source = String::from_utf8(resp.into_inner().source.to_vec())
+                .context("schema source is not valid UTF-8")?;
             print!("{source}");
         }
         SchemaAction::Delete {

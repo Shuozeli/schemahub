@@ -141,6 +141,59 @@ impl Core {
         Ok(schemas)
     }
 
+    /// Return the raw source bytes of a schema as originally stored.
+    /// Returns `None` if the schema does not exist at the given commit.
+    pub fn get_schema_source(
+        &self,
+        _project: &str,
+        _repo: &str,
+        schema_name: &str,
+        commit_hex: &str,
+    ) -> Result<Option<Vec<u8>>, CoreError> {
+        let commit_hash = Hash::from_hex(commit_hex)
+            .map_err(|_| CoreError::InvalidArgument(format!("commit_hex is not a valid hash: {commit_hex}")))?;
+        let commit = version_control::commit::read_commit(self.storage.as_ref(), &commit_hash)?;
+        let (_, root_tree) = version_control::tree::root_tree_from_commit(self.storage.as_ref(), &commit)?;
+
+        let schema_entry = root_tree.entries.iter()
+            .find(|e| e.name == schema_name && e.kind == objects::KIND_SUBTREE);
+        let Some(schema_tree_entry) = schema_entry else { return Ok(None); };
+
+        let schema_tree_hash = Hash::from_hex(&schema_tree_entry.hash).map_err(|_| {
+            CoreError::ObjectCorrupted(format!(
+                "root tree entry '{}' has invalid hash: {}", schema_name, schema_tree_entry.hash
+            ))
+        })?;
+        let schema_tree_data = self.storage.read_object(&schema_tree_hash)?
+            .ok_or_else(|| CoreError::ObjectCorrupted(format!("schema tree {} not found", schema_tree_hash.to_hex())))?;
+        let schema_tree = objects::decode_tree(&schema_tree_data)
+            .map_err(|e| CoreError::ObjectCorrupted(format!("decode schema tree: {e}")))?;
+
+        let blob_entry = schema_tree.entries.iter()
+            .find(|e| e.name == "__schema__" && e.kind == objects::KIND_BLOB);
+        let Some(blob_entry) = blob_entry else { return Ok(None); };
+
+        let blob_hash = Hash::from_hex(&blob_entry.hash).map_err(|_| {
+            CoreError::ObjectCorrupted(format!("__schema__ entry has invalid hash: {}", blob_entry.hash))
+        })?;
+        let blob_data = self.storage.read_object(&blob_hash)?
+            .ok_or_else(|| CoreError::NotFound(format!("blob {} not found", blob_hash.to_hex())))?;
+
+        // Use the plugin's `print` method to reconstruct canonical source text from
+        // the internal blob representation. Falls back to raw bytes if no plugin found.
+        let format_id = detect_format_from_name(schema_name)
+            .unwrap_or_else(|| commit.format_id.clone());
+        if let Some(plugin) = self.plugins.get(&format_id) {
+            let blob = Blob::new(blob_data);
+            match plugin.print(&blob) {
+                Ok(src) => return Ok(Some(src.into_bytes())),
+                Err(_) => return Ok(Some(blob.as_bytes().to_vec())),
+            }
+        }
+
+        Ok(Some(blob_data))
+    }
+
     /// List all declarations in a schema at a given commit.
     pub fn list_declarations(
         &self,

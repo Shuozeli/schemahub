@@ -1,0 +1,15 @@
+// Item FlatBuffers schema.
+namespace item;
+
+table Item {
+  id: string;
+  name: string;
+  price_cents: int32;
+}
+
+enum ItemStatus: byte {
+  Available = 0,
+  OutOfStock = 1,
+}
+
+root_type Item;

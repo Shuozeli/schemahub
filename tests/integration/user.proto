@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package user.v1;
+
+// User message represents a user in the system.
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+}
+
+// UserStatus represents the status of a user account.
+enum UserStatus {
+  USER_STATUS_UNSPECIFIED = 0;
+  USER_STATUS_ACTIVE = 1;
+  USER_STATUS_INACTIVE = 2;
+}
+
+// UserService provides user management operations.
+service UserService {
+  rpc GetUser(User) returns (User);
+}

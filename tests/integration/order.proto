@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package order.v1;
+
+import "user.proto";
+
+// Order represents a purchase order.
+message Order {
+  string id = 1;
+  string user_id = 2;
+  int32 amount_cents = 3;
+}

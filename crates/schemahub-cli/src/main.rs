@@ -4,7 +4,7 @@ mod config;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
-use cmd::{branch, codegen, field, log, schema, tag};
+use cmd::{branch, codegen, field, log, repo, schema, tag};
 
 #[derive(Parser)]
 #[command(name = "schemahub", about = "schemahub schema registry CLI", version)]
@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a project and repo on the server
+    Repo(repo::RepoArgs),
     /// Schema file lifecycle operations
     Schema(schema::SchemaArgs),
     /// Field mutations on Protobuf schemas
@@ -63,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
     .context("loading config")?;
 
     match cli.command {
+        Commands::Repo(args) => {
+            let ch = client::build_channel(&cfg.server).await?;
+            repo::run(args, ch).await
+        }
         Commands::Schema(args) => {
             let ch = client::build_channel(&cfg.server).await?;
             schema::run(args, ch).await

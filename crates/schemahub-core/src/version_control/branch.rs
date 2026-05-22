@@ -57,6 +57,7 @@ pub fn create_branch(
 }
 
 /// Delete a branch ref.
+/// Returns `CoreError::NotFound` if the branch does not exist.
 pub fn delete_branch(
     storage: &dyn StorageBackend,
     project: &str,
@@ -64,6 +65,11 @@ pub fn delete_branch(
     name: &str,
 ) -> Result<(), CoreError> {
     let key = keys::branch_ref_key(project, repo, name);
+    if storage.get_ref(&key)?.is_none() {
+        return Err(CoreError::NotFound(format!(
+            "branch '{name}' not found in {project}/{repo}"
+        )));
+    }
     storage.delete_ref(&key)?;
     Ok(())
 }
