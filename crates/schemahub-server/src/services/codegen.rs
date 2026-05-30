@@ -31,7 +31,7 @@ impl CodegenService for CodegenHandler {
         &self,
         request: Request<pb::GetDescriptorsRequest>,
     ) -> Result<Response<pb::GetDescriptorsResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let bookmark = wire::version_ref_bookmark(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -58,7 +58,7 @@ impl CodegenService for CodegenHandler {
         &self,
         request: Request<pb::PreviewCodegenRequest>,
     ) -> Result<Response<pb::PreviewCodegenResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let bookmark = wire::version_ref_bookmark(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);

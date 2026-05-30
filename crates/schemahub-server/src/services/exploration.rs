@@ -37,7 +37,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::ListSchemasRequest>,
     ) -> Result<Response<pb::ListSchemasResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let names = self
@@ -64,7 +64,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::ListDeclarationsRequest>,
     ) -> Result<Response<pb::ListDeclarationsResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -80,7 +80,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::GetDeclarationRequest>,
     ) -> Result<Response<pb::GetDeclarationResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -108,7 +108,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::GetSchemaSourceRequest>,
     ) -> Result<Response<pb::GetSchemaSourceResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -126,7 +126,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::FollowTypeRequest>,
     ) -> Result<Response<pb::FollowTypeResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -159,7 +159,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::ListDependenciesRequest>,
     ) -> Result<Response<pb::ListDependenciesResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -186,7 +186,7 @@ impl ExplorationService for ExplorationHandler {
         &self,
         request: Request<pb::SearchRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Search is repo-scoped in the core; require project+repo and use "main".
         if r.project.is_empty() || r.repo.is_empty() {

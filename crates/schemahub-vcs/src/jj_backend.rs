@@ -191,7 +191,7 @@ impl Backend for DbBackend {
             .get_object(ObjectKind::Tree, &ObjectId(id.to_bytes()))
             .map_err(|e| not_found("tree", id.hex(), e))?;
         let proto = protos::Tree::decode(&*bytes).map_err(to_other_err)?;
-        Ok(tree_from_proto(proto))
+        tree_from_proto(proto)
     }
 
     async fn write_tree(&self, _path: &RepoPath, tree: &Tree) -> BackendResult<TreeId> {
@@ -272,16 +272,29 @@ fn tree_to_proto(tree: &Tree) -> protos::Tree {
     proto
 }
 
-fn tree_from_proto(proto: protos::Tree) -> Tree {
-    let entries = proto
-        .entries
-        .into_iter()
-        .map(|proto_entry| {
-            let value = tree_value_from_proto(proto_entry.value.unwrap());
-            (RepoPathComponentBuf::new(proto_entry.name).unwrap(), value)
-        })
-        .collect();
-    Tree::from_sorted_entries(entries)
+fn tree_from_proto(proto: protos::Tree) -> BackendResult<Tree> {
+    let mut entries = Vec::with_capacity(proto.entries.len());
+    for proto_entry in proto.entries {
+        // The on-disk tree bytes are content-addressed by jj's hash, so a
+        // missing oneof / malformed component name means the object store
+        // returned bytes that don't decode to a valid Tree. Surface that as
+        // a backend error instead of panicking inside a server worker.
+        let raw_value = proto_entry.value.ok_or_else(|| {
+            to_other_err(format!(
+                "malformed tree entry {:?}: missing tree_value oneof",
+                proto_entry.name
+            ))
+        })?;
+        let value = tree_value_from_proto(raw_value)?;
+        let name = RepoPathComponentBuf::new(proto_entry.name.clone()).map_err(|e| {
+            to_other_err(format!(
+                "malformed tree entry name {:?}: {e}",
+                proto_entry.name
+            ))
+        })?;
+        entries.push((name, value));
+    }
+    Ok(Tree::from_sorted_entries(entries))
 }
 
 fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
@@ -313,8 +326,11 @@ fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
     proto
 }
 
-fn tree_value_from_proto(proto: protos::TreeValue) -> TreeValue {
-    match proto.value.unwrap() {
+fn tree_value_from_proto(proto: protos::TreeValue) -> BackendResult<TreeValue> {
+    let value = proto.value.ok_or_else(|| {
+        to_other_err("malformed tree value: missing oneof".to_string())
+    })?;
+    Ok(match value {
         protos::tree_value::Value::TreeId(id) => TreeValue::Tree(TreeId::new(id)),
         protos::tree_value::Value::File(protos::tree_value::File {
             id,
@@ -326,7 +342,7 @@ fn tree_value_from_proto(proto: protos::TreeValue) -> TreeValue {
             copy_id: CopyId::new(copy_id),
         },
         protos::tree_value::Value::SymlinkId(id) => TreeValue::Symlink(SymlinkId::new(id)),
-    }
+    })
 }
 
 fn commit_to_proto(commit: &Commit) -> protos::Commit {

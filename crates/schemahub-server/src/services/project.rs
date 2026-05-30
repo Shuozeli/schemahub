@@ -40,7 +40,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::CreateProjectRequest>,
     ) -> Result<Response<pb::CreateProjectResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         if r.name.is_empty() {
             return Err(Status::invalid_argument("name must not be empty"));
@@ -63,7 +63,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::GetProjectRequest>,
     ) -> Result<Response<pb::GetProjectResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let meta = self
             .core
@@ -79,7 +79,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::ListProjectsRequest>,
     ) -> Result<Response<pb::ListProjectsResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let prefix = r.name_prefix;
         let visible = self
@@ -183,7 +183,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::AddMemberRequest>,
     ) -> Result<Response<pb::AddMemberResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let role = role_from_proto(r.role)?;
         if r.identity.is_empty() {
@@ -204,7 +204,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::RemoveMemberRequest>,
     ) -> Result<Response<pb::RemoveMemberResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         if r.identity.is_empty() {
             return Err(Status::invalid_argument("identity must not be empty"));
@@ -219,7 +219,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::UpdateMemberRoleRequest>,
     ) -> Result<Response<pb::UpdateMemberRoleResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let new_role = role_from_proto(r.new_role)?;
         if r.identity.is_empty() {
@@ -240,7 +240,7 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::ListMembersRequest>,
     ) -> Result<Response<pb::ListMembersResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let members = self
             .core

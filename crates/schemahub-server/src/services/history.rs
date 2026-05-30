@@ -33,7 +33,7 @@ impl HistoryService for HistoryHandler {
         &self,
         request: Request<pb::LogRequest>,
     ) -> Result<Response<pb::LogResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Honor the optional `at` ref (branch / tag / commit). When omitted,
         // pass `None` so Core resolves the repo's configured default bookmark
@@ -72,7 +72,7 @@ impl HistoryService for HistoryHandler {
         &self,
         request: Request<pb::OpLogRequest>,
     ) -> Result<Response<pb::OpLogResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let limit = if r.limit == 0 { None } else { Some(r.limit as usize) };
         let ops = self
@@ -96,7 +96,7 @@ impl HistoryService for HistoryHandler {
         &self,
         request: Request<pb::UndoRequest>,
     ) -> Result<Response<pb::UndoResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let author = if r.author.is_empty() {
             DEFAULT_AUTHOR
@@ -116,7 +116,7 @@ impl HistoryService for HistoryHandler {
         &self,
         request: Request<pb::RenderConflictRequest>,
     ) -> Result<Response<pb::RenderConflictResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let bookmark = wire::version_ref_bookmark(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
@@ -131,7 +131,7 @@ impl HistoryService for HistoryHandler {
         &self,
         request: Request<pb::ResolveConflictRequest>,
     ) -> Result<Response<pb::ResolveConflictResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Parse the resolved source and extract the named declaration's blob.
         let format_id = detect_format_from_name(&r.schema_path).ok_or_else(|| {

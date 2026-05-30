@@ -77,7 +77,7 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::CreateSchemaRequest>,
     ) -> Result<Response<pb::CreateSchemaResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Auth gate: schema lifecycle is a Write on (project, repo).
         self.core
@@ -121,7 +121,7 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::UpdateSchemaRequest>,
     ) -> Result<Response<pb::UpdateSchemaResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         self.core
             .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
@@ -163,7 +163,7 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::DeleteSchemaRequest>,
     ) -> Result<Response<pb::DeleteSchemaResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Deleting a schema file is a Write — design.md §6 protected-bookmark
         // policy is enforced by the VCS layer; auth gates the repo overall.
@@ -206,7 +206,7 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::ApplyMutationRequest>,
     ) -> Result<Response<pb::ApplyMutationResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let op = r
             .operation
@@ -234,7 +234,7 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::ApplyTransactionRequest>,
     ) -> Result<Response<pb::ApplyTransactionResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         if r.operations.is_empty() {
             return Err(Status::invalid_argument("transaction has no operations"));

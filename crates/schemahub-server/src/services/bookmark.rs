@@ -40,7 +40,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::GetCommitRequest>,
     ) -> Result<Response<pb::GetCommitResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Look up the commit in the real commit/change graph by its hash.
         let at = RefSpec::commit(r.commit.clone());
@@ -64,7 +64,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::ListCommitsRequest>,
     ) -> Result<Response<Self::ListCommitsStream>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Walk the real commit graph from `from` (default: default branch HEAD),
         // already returned newest-first by the VCS.
@@ -85,7 +85,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::DiffRequest>,
     ) -> Result<Response<pb::DiffResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Diff is a read; authorize before touching the VCS so anonymous
         // reads on private projects are refused (design.md §6).
@@ -147,7 +147,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::CreateBranchRequest>,
     ) -> Result<Response<pb::CreateBranchResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let from = wire::version_ref_to_refspec(&r.from, DEFAULT_BOOKMARK);
         let head = self
@@ -176,7 +176,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::DeleteBranchRequest>,
     ) -> Result<Response<pb::DeleteBranchResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         self.core
             .delete_bookmark(&r.project, &r.repo, &r.name, DEFAULT_AUTHOR, token.as_deref())
@@ -188,7 +188,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::ListBranchesRequest>,
     ) -> Result<Response<pb::ListBranchesResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let bms = self
             .core
@@ -212,7 +212,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::GetBranchRequest>,
     ) -> Result<Response<pb::GetBranchResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let bms = self
             .core
@@ -239,7 +239,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::CreateTagRequest>,
     ) -> Result<Response<pb::CreateTagResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.target, DEFAULT_BOOKMARK);
         let commit = self
@@ -275,7 +275,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::DeleteTagRequest>,
     ) -> Result<Response<pb::DeleteTagResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         // Tags are immutable pins; deletion requires an explicit force flag
         // (proto contract: FAILED_PRECONDITION otherwise).
@@ -294,7 +294,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::ListTagsRequest>,
     ) -> Result<Response<pb::ListTagsResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let tags = self
             .core
@@ -323,7 +323,7 @@ impl RefService for BookmarkHandler {
         &self,
         request: Request<pb::MergeRequest>,
     ) -> Result<Response<pb::MergeResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         let resp = self
             .core

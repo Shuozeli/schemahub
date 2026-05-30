@@ -43,11 +43,21 @@ impl DbOpHeadsStore {
             return Ok(vec![]);
         };
         let text = String::from_utf8(bytes).map_err(|e| OpHeadsStoreError::Read(Box::new(e)))?;
-        Ok(text
-            .split('\n')
-            .filter(|s| !s.is_empty())
-            .filter_map(|hex| OperationId::try_from_hex(hex))
-            .collect())
+        // Fail-fast on a malformed line. Silently dropping bad hex would
+        // shrink the head set on the read path and then have `update_op_heads`
+        // write the smaller set back, permanently losing the corrupted head
+        // rather than surfacing the corruption.
+        let mut heads = Vec::new();
+        for hex in text.split('\n').filter(|s| !s.is_empty()) {
+            let id = OperationId::try_from_hex(hex).ok_or_else(|| {
+                OpHeadsStoreError::Read(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("op-heads ref contains malformed hex id: {hex:?}"),
+                )))
+            })?;
+            heads.push(id);
+        }
+        Ok(heads)
     }
 
     fn write(&self, ids: &[OperationId]) -> Result<(), OpHeadsStoreError> {

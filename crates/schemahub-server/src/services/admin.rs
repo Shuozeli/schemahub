@@ -27,7 +27,7 @@ impl AdminService for AdminHandler {
         &self,
         request: Request<pb::RunGcRequest>,
     ) -> Result<Response<pb::RunGcResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         if r.project.is_empty() || r.repo.is_empty() {
             return Err(Status::invalid_argument(
@@ -54,7 +54,7 @@ impl AdminService for AdminHandler {
         &self,
         request: Request<pb::RebuildIndexRequest>,
     ) -> Result<Response<pb::RebuildIndexResponse>, Status> {
-        let token = token_from(&request);
+        let token = token_from(&request)?;
         let r = request.into_inner();
         self.core
             .rebuild_index(&r.project, &r.repo, token.as_deref())
