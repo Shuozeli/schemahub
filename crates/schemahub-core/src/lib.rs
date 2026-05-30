@@ -179,27 +179,44 @@ pub fn detect_format_from_name(schema_name: &str) -> Option<&'static str> {
 }
 
 /// Empty fallback `RoleStore` used when the server is built without an
-/// explicit one (the Noop default deployment). Every lookup is `None`; writes
-/// succeed silently (so a Noop-auth deployment can still call
-/// `add_member` without surfacing a "no store" error to clients).
+/// explicit one (the Noop default deployment).
+///
+/// Reads return `None` (no role configured); writes **fail** with
+/// `Unsupported` rather than silently dropping data. The previous behaviour
+/// — returning `Ok(())` from `set`/`remove` — let a Noop-auth deployment
+/// answer `CreateProject` / `AddMember` with success while persisting
+/// nothing, so subsequent reads disagreed with the write that just
+/// "succeeded". Per user rules: fail-fast over fail-safe.
 struct EmptyRoleStore;
+
+fn empty_store_err(op: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "{op}: no role/project store is configured \
+             (this server was built with Noop auth — populate \
+             `[auth]` in schemahub.toml to enable project/member management)"
+        ),
+    )
+}
 
 impl RoleStore for EmptyRoleStore {
     fn get(&self, _project: &str, _identity: &schemahub_types::Identity) -> Option<schemahub_types::Role> {
         None
     }
     fn set(&self, _project: &str, _identity_id: &str, _role: schemahub_types::Role) -> std::io::Result<()> {
-        Ok(())
+        Err(empty_store_err("RoleStore::set"))
     }
     fn remove(&self, _project: &str, _identity_id: &str) -> std::io::Result<()> {
-        Ok(())
+        Err(empty_store_err("RoleStore::remove"))
     }
     fn list_project(&self, _project: &str) -> Vec<(String, schemahub_types::Role)> {
         Vec::new()
     }
 }
 
-/// Empty fallback `ProjectStore`. See [`EmptyRoleStore`] for the rationale.
+/// Empty fallback `ProjectStore`. Same fail-fast semantics as
+/// [`EmptyRoleStore`].
 struct EmptyProjectStore;
 
 impl ProjectStore for EmptyProjectStore {
@@ -207,7 +224,7 @@ impl ProjectStore for EmptyProjectStore {
         None
     }
     fn set(&self, _meta: ProjectMeta) -> std::io::Result<()> {
-        Ok(())
+        Err(empty_store_err("ProjectStore::set"))
     }
     fn list(&self) -> Vec<ProjectMeta> {
         Vec::new()
