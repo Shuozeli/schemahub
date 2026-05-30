@@ -1,6 +1,7 @@
 pub mod branch;
 pub mod codegen;
 pub mod field;
+pub mod history;
 pub mod log;
 pub mod repo;
 pub mod schema;

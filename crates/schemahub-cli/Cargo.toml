@@ -8,7 +8,7 @@ name = "schemahub"
 path = "src/main.rs"
 
 [dependencies]
-schemahub-api = { path = "../../crates/schemahub-api" }
+schemahub-api = { path = "../schemahub-api" }
 tokio    = { workspace = true }
 tonic    = { workspace = true }
 prost    = { workspace = true }

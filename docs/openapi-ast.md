@@ -1,929 +1,248 @@
-# schemahub — OpenAPI AST Specification
+# schemahub — OpenAPI AST (v2: per-declaration, in-tree compiler)
 
-> This document specifies the internal AST model for OpenAPI schemas in schemahub. It exists because `design.md` (OQ-18) requires the OpenAPI AST to be fully specified before implementation — even though granular OpenAPI mutations are deferred to v2. The AST produced by v1's `parse` must be structurally identical to what v2 granular mutations would produce, to avoid a blob migration.
+> This document specifies the internal AST model for OpenAPI schemas in schemahub, **as implemented** in `crates/schemahub-compiler-openapi/`. OpenAPI has no sibling compiler (unlike Protobuf/FlatBuffers), so the AST, parser, and printer are in-tree (`design.md` §3.3, `crate-structure.md` §3.5).
+>
+> It supersedes the v1 spec (preserved in git history). Two things changed structurally in v2:
+>
+> 1. **No single envelope.** `parse` returns the `Compiler` trait's `ParsedSchema { meta, decls }` — one self-describing `DeclBlob` per top-level declaration, plus one document-level `MetaBlob`. There is no `OpenApiParseResult` wrapper and no `__metadata__` tree key.
+> 2. **serde_json, not prost.** Each AST node is a plain `serde` Rust type, encoded with `serde_json` (`blob.rs`). The v1 `prost`/`#[prost(...)]` framing is gone.
+>
+> **Source-of-truth note.** Where this doc and `design.md` disagree, the code wins (it is the implementation). Divergences are flagged **AS-BUILT**.
 
 ---
 
 ## 1. Background and Constraints
 
-### Why this document exists
-
-The `FormatPlugin::parse(source: &str) -> Blob` method ingests an OpenAPI document and produces a blob stored content-addressed in the object store. In v2, granular mutations (`AddEndpoint`, `RemoveParameter`, etc.) will produce blobs through a different code path. If the v1 and v2 AST structures differ, every existing OpenAPI blob requires migration at v2 launch.
-
-**Constraint:** The v1 AST must be designed assuming v2 granular mutations exist. Every element must be individually addressable by a stable path. The v1 `parse` path and the v2 mutation path must produce identical byte sequences for identical semantic content.
-
 ### OpenAPI version support
 
-This specification targets **OpenAPI 3.1.x**. OpenAPI 2.x (Swagger) is not supported in v1. The parser rejects documents with `openapi:` fields that don't start with `3.`.
+Targets **OpenAPI 3.1.x**. The parser requires an `openapi:` field starting with `3.`; otherwise it returns `ParseError::UnsupportedVersion`. (`parser.rs::parse_openapi`.)
 
 ### What schemahub stores vs. what it does not
 
 schemahub stores the **semantic content** of an OpenAPI document as a structured AST. It does NOT store:
 - YAML/JSON formatting (indentation, key ordering, comment placement)
-- `x-` extension fields (preserved as opaque bytes, not interpreted)
-- Example values that do not affect schema validation behavior
+- `x-` extension fields (preserved as opaque JSON bytes in an `Extensions` struct, not interpreted)
+- example values that don't affect schema validation
 
-The `print` method produces canonical YAML from the AST — round-tripping through parse→print may change formatting but must preserve all semantic content.
+`print` produces canonical YAML from the AST; round-tripping through parse→print may change formatting but preserves semantic content.
+
+### Why per-declaration
+
+Per the v2 requirement (`requirements.md` §1), a schema is stored as **one object per top-level declaration** plus a file-level metadata object — not as one opaque blob. For OpenAPI this is realized by splitting the document at `parse` time into named `DeclBlob`s and one `MetaBlob`.
 
 ---
 
-## 2. Blob Granularity
+## 2. Declaration Granularity and the Per-Declaration Key Scheme
 
-One blob per top-level addressable declaration. For OpenAPI, the top-level declarations are:
+`parse` splits an OpenAPI document into:
 
-| Declaration kind | One blob per... | Example |
-|-----------------|-----------------|---------|
-| `PathItem` | Path pattern | `/users`, `/users/{id}` |
-| `ComponentSchema` | Named schema in `components/schemas` | `User`, `Error` |
-| `ComponentParameter` | Named parameter in `components/parameters` | `PageSize`, `Authorization` |
-| `ComponentResponse` | Named response in `components/responses` | `NotFound`, `Unauthorized` |
-| `ComponentRequestBody` | Named requestBody in `components/requestBodies` | `CreateUserRequest` |
-| `DocumentMetadata` | The whole document (exactly one per schema file) | `(document root)` |
+| Declaration kind | One decl per… | Decl key (in `ParsedSchema.decls`) |
+|------------------|---------------|------------------------------------|
+| Path item | path pattern | `path:<pattern>` — e.g. `path:/users`, `path:/users/{id}` |
+| Component schema | named `components/schemas` entry | `schema:<name>` — e.g. `schema:User` |
+| Component parameter | named `components/parameters` entry | `param:<name>` — e.g. `param:PageSize` |
+| Component response | named `components/responses` entry | `response:<name>` — e.g. `response:NotFound` |
+| Component requestBody | named `components/requestBodies` entry | `requestBody:<name>` — e.g. `requestBody:CreateUserRequest` |
+| Document metadata | the whole document (exactly one) | *(not a decl)* — stored as `ParsedSchema.meta`, a `MetaBlob` |
 
-A single OpenAPI file therefore produces multiple blobs: one `DocumentMetadata` blob and one blob per path item and per component object. These are all listed in the schema-level tree (the second level of the two-level tree structure).
+The kind-prefix on each key (`path:`, `schema:`, `param:`, `response:`, `requestBody:`) avoids collisions between, say, a path named `User` and a component schema named `User`. The VCS layer keys each `DeclBlob` by this string in the schema-file subtree. (`parser.rs`, lines that `push((format!("path:{path_str}"), …))` etc.)
 
-### DocumentMetadata blob
-
-A special blob that stores document-level fields that are not declarations: the OpenAPI version string, `info`, and `servers`. Every OpenAPI schema file produces exactly one `DocumentMetadata` blob. It is stored in the schema tree under the reserved key `__metadata__`.
-
-```
-schema_tree["user-api.yaml"] → {
-    "__metadata__":       metadata_blob_hash,
-    "path:/users":        path_item_blob_hash_A,
-    "path:/users/{id}":   path_item_blob_hash_B,
-    "schema:User":        schema_blob_hash_C,
-    "schema:Error":       schema_blob_hash_D,
-    "param:PageSize":     param_blob_hash_E,
-    "response:NotFound":  response_blob_hash_F,
-}
-```
-
-The schema tree key format encodes the declaration kind as a prefix (`path:`, `schema:`, `param:`, `response:`, `requestBody:`) to avoid collisions between a path named `User` and a component schema named `User`.
+> **AS-BUILT — metadata is the `MetaBlob`, not a `__metadata__` tree entry.** The v1 doc and `design.md` §4.2 describe a reserved tree key (`__metadata__` / `__meta__`) holding the document metadata. The implementation instead returns it as `ParsedSchema.meta` (a `DocumentMetadataBlob` encoded into a `schemahub_types::MetaBlob`). It is **not** one of the named `decls` and has no `path:`/`schema:`-style key. The `DECL_KIND_DOCUMENT_METADATA` enum value exists for summaries but no decl blob carries it.
 
 ### Inline schemas
 
-OpenAPI allows schemas to be defined inline (not in `components/schemas`). Inline schemas are stored **within their containing blob** — they are not extracted into separate top-level blobs. A `$ref` to a component schema is stored symbolically (see Section 5). This means:
-
-- The PathItem blob for `/users` contains the full inline schema of its response body, if that body is not a `$ref`.
-- Only schemas listed under `components/schemas` get their own top-level blob.
-
-This matches how OpenAPI authors think about their documents: `components/schemas` entries are reusable named types; inline schemas are local to one operation.
+Schemas defined inline (not under `components/schemas`) are stored **within their containing decl blob**, not extracted into separate top-level decls. A `$ref` to a component is stored symbolically (§5). Only `components/schemas` entries get their own `schema:<name>` blob.
 
 ---
 
-## 3. Stable Path Model
+## 3. Self-Describing Decl Blobs
 
-Every element in the OpenAPI AST has a stable string path. These paths define:
-1. The future v2 granular mutation operation identifiers (`AddParameter { path: "path:/users/GET/parameters" }`)
-2. The `get_declaration` sub-element address within a blob
-3. The format for search and index entries
+Because each decl now stands alone in storage keyed only by its name string, the blob must carry its own **kind tag** — single-blob methods (`summarize_decl`, `decl_detail`, `diff_decl`, `validate_resolution`) must work without re-deriving the kind from a tree-key prefix. This is the v2 wrapper (`ast.rs`):
 
-### Path grammar
+```rust
+/// The current blob format version for every OpenAPI decl/meta blob.
+pub const BLOB_VERSION: u32 = 1;
 
-```
-document_path ::= "path:" path_pattern
-                | "schema:" component_name
-                | "param:" component_name
-                | "response:" component_name
-                | "requestBody:" component_name
-                | "__metadata__"
+/// The self-describing payload of one DeclBlob.
+pub struct OpenApiDecl {
+    pub blob_version: u32,     // rides on the wrapper, for migration
+    pub kind: DeclPayload,     // kind-tagged body
+}
 
-element_path  ::= document_path                              # top-level blob
-                | document_path "/" element_segment+         # sub-element within blob
-
-element_segment ::= http_method                              # GET, POST, PUT, DELETE, ...
-                  | "parameters" "/" "{" param_name "}"
-                  | "requestBody"
-                  | "responses" "/" "{" status_code "}"
-                  | "content" "/" "{" media_type "}"
-                  | "schema"
-                  | "properties" "/" "{" property_name "}"
-                  | "items"
-                  | "allOf" "/" "[" index "]"
-                  | "anyOf" "/" "[" index "]"
-                  | "oneOf" "/" "[" index "]"
+pub enum DeclPayload {
+    PathItem(PathItemBlob),
+    ComponentSchema(ComponentSchemaBlob),
+    ComponentParameter(ComponentParameterBlob),
+    ComponentResponse(ComponentResponseBlob),
+    ComponentRequestBody(ComponentRequestBodyBlob),
+}
 ```
 
-### Examples
+`OpenApiDecl::new(payload)` stamps `blob_version = BLOB_VERSION`.
 
-```
-# Top-level blobs (schema tree keys)
-path:/users
-path:/users/{id}
-schema:User
-param:PageSize
-response:NotFound
-__metadata__
-
-# Sub-elements within blobs (for future granular mutations)
-path:/users/GET
-path:/users/GET/parameters/{limit}
-path:/users/GET/parameters/{limit}/schema
-path:/users/GET/responses/{200}
-path:/users/GET/responses/{200}/content/{application/json}/schema
-path:/users/GET/responses/{200}/content/{application/json}/schema/properties/{id}
-path:/users/POST/requestBody/content/{application/json}/schema
-schema:User/properties/{email}
-schema:User/properties/{address}/properties/{street}
-schema:User/allOf/[0]
-```
+> **AS-BUILT — where `blob_version` lives.** v1 put `blob_version` as field 1 of *every* blob struct (`PathItemBlob`, `ComponentSchemaBlob`, …). In v2 the per-blob `blob_version` fields are **gone**; the version rides once on the `OpenApiDecl` wrapper (decls) and once on `DocumentMetadataBlob` (meta). The inner blob structs (`PathItemBlob` etc.) no longer carry it.
 
 ---
 
-## 4. Rust AST Type Definitions
+## 4. Blob Encoding (`blob.rs`)
 
-All types below are serialized to bytes via `prost` (Protocol Buffers). Every blob type carries `blob_version: u32` as field 1. The prost-encoded bytes of the root blob struct are stored in `objects/<hash>`.
+**Encoding: `serde_json`.** Rationale (from `blob.rs`): the in-tree AST is small and human-debuggable, `serde_json` is already a dependency (no `prost` build step), and it is deterministic — serde serializes struct fields in declaration order and `serde_json` does not reorder, so identical ASTs produce identical bytes.
 
-### 4.1 Shared primitive types
+- `encode_decl(&OpenApiDecl) -> DeclBlob` / `decode_decl(&DeclBlob) -> Result<OpenApiDecl, BlobError>`
+- `encode_meta(&DocumentMetadataBlob) -> MetaBlob` / `decode_meta(&MetaBlob) -> Result<DocumentMetadataBlob, BlobError>`
 
-```rust
-/// An HTTP method.
-#[derive(Clone, PartialEq, prost::Message)]
-pub enum HttpMethod {
-    Get     = 0,
-    Post    = 1,
-    Put     = 2,
-    Delete  = 3,
-    Patch   = 4,
-    Head    = 5,
-    Options = 6,
-    Trace   = 7,
-}
+`decode_*` reject any blob whose `blob_version > BLOB_VERSION`. An empty `MetaBlob` (the default before any parse) decodes to `DocumentMetadataBlob::default()` (treated as "no metadata yet"). `BlobError` converts into `ReadError::MalformedBlob` / `PrintError::MalformedBlob` / `DiffError::MalformedBlob`.
 
-/// Where a parameter appears.
-#[derive(Clone, PartialEq, prost::Message)]
-pub enum ParameterLocation {
-    Query  = 0,
-    Header = 1,
-    Path   = 2,
-    Cookie = 3,
-}
-
-/// A JSON Schema type keyword value.
-#[derive(Clone, PartialEq, prost::Message)]
-pub enum JsonSchemaType {
-    String  = 0,
-    Integer = 1,
-    Number  = 2,
-    Boolean = 3,
-    Array   = 4,
-    Object  = 5,
-    Null    = 6,
-}
-
-/// A reference to another schema — either local (within the same schemahub schema file)
-/// or external (another schemahub schema, tracked in the deps/ graph).
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct SchemaRef {
-    /// For local refs: the component name, e.g. "User".
-    /// Corresponds to #/components/schemas/User in the source document.
-    #[prost(string, tag = "1")]
-    pub local_name: String,
-
-    /// For external refs: the import that declares where this type lives.
-    /// Empty for local refs.
-    #[prost(message, optional, tag = "2")]
-    pub external_import: Option<Import>,
-}
-
-/// An import of an external schemahub schema (external $ref).
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct Import {
-    /// Logical path: "project/repo/schema-file-name"
-    #[prost(string, tag = "1")]
-    pub path: String,
-
-    /// Pinned commit hash at the time this import was added or last updated.
-    #[prost(string, tag = "2")]
-    pub resolved_commit: String,
-
-    /// The declaration name within the imported schema.
-    #[prost(string, tag = "3")]
-    pub decl_name: String,
-}
-
-/// An opaque map of extension fields (x- prefixed keys).
-/// Stored as raw JSON bytes; not interpreted by schemahub.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct Extensions {
-    #[prost(bytes, tag = "1")]
-    pub json_bytes: Vec<u8>,
-}
-```
-
-### 4.2 JSON Schema definition
-
-The core recursive type. Used inside ParameterDef, RequestBodyDef, ResponseDef, and as the body of ComponentSchemaBlob.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct JsonSchemaDef {
-    // ── Type and format ──────────────────────────────────────────────────────
-    /// The JSON Schema type keyword. Multiple types (OpenAPI 3.1 nullable arrays)
-    /// are expressed as anyOf with a null type.
-    #[prost(enumeration = "JsonSchemaType", repeated, tag = "1")]
-    pub types: Vec<i32>,
-
-    /// The format keyword (e.g. "date-time", "uuid", "int64").
-    #[prost(string, optional, tag = "2")]
-    pub format: Option<String>,
-
-    // ── String constraints ───────────────────────────────────────────────────
-    #[prost(uint64, optional, tag = "3")]
-    pub min_length: Option<u64>,
-    #[prost(uint64, optional, tag = "4")]
-    pub max_length: Option<u64>,
-    #[prost(string, optional, tag = "5")]
-    pub pattern: Option<String>,
-
-    // ── Numeric constraints ──────────────────────────────────────────────────
-    #[prost(double, optional, tag = "6")]
-    pub minimum: Option<f64>,
-    #[prost(double, optional, tag = "7")]
-    pub maximum: Option<f64>,
-    #[prost(bool, optional, tag = "8")]
-    pub exclusive_minimum: Option<bool>,
-    #[prost(bool, optional, tag = "9")]
-    pub exclusive_maximum: Option<bool>,
-    #[prost(double, optional, tag = "10")]
-    pub multiple_of: Option<f64>,
-
-    // ── Array constraints ────────────────────────────────────────────────────
-    #[prost(message, optional, boxed, tag = "11")]
-    pub items: Option<Box<SchemaOrRef>>,
-    #[prost(uint64, optional, tag = "12")]
-    pub min_items: Option<u64>,
-    #[prost(uint64, optional, tag = "13")]
-    pub max_items: Option<u64>,
-    #[prost(bool, optional, tag = "14")]
-    pub unique_items: Option<bool>,
-
-    // ── Object constraints ───────────────────────────────────────────────────
-    /// BTreeMap for deterministic serialization order.
-    #[prost(message, repeated, tag = "15")]
-    pub properties: Vec<PropertyDef>,
-    #[prost(string, repeated, tag = "16")]
-    pub required: Vec<String>,
-    /// additionalProperties: false is stored as additional_properties_allowed = false.
-    /// additionalProperties: <schema> is stored in additional_properties_schema.
-    #[prost(bool, optional, tag = "17")]
-    pub additional_properties_allowed: Option<bool>,
-    #[prost(message, optional, boxed, tag = "18")]
-    pub additional_properties_schema: Option<Box<SchemaOrRef>>,
-    #[prost(uint64, optional, tag = "19")]
-    pub min_properties: Option<u64>,
-    #[prost(uint64, optional, tag = "20")]
-    pub max_properties: Option<u64>,
-
-    // ── Composition keywords ─────────────────────────────────────────────────
-    #[prost(message, repeated, tag = "21")]
-    pub all_of: Vec<SchemaOrRef>,
-    #[prost(message, repeated, tag = "22")]
-    pub any_of: Vec<SchemaOrRef>,
-    #[prost(message, repeated, tag = "23")]
-    pub one_of: Vec<SchemaOrRef>,
-    #[prost(message, optional, boxed, tag = "24")]
-    pub not: Option<Box<SchemaOrRef>>,
-
-    // ── Enum and const ───────────────────────────────────────────────────────
-    /// JSON-encoded enum values (each entry is a JSON literal: `"active"`, `1`, `null`).
-    #[prost(string, repeated, tag = "25")]
-    pub enum_values: Vec<String>,
-    /// JSON-encoded const value.
-    #[prost(string, optional, tag = "26")]
-    pub const_value: Option<String>,
-
-    // ── Metadata ─────────────────────────────────────────────────────────────
-    #[prost(string, optional, tag = "27")]
-    pub title: Option<String>,
-    #[prost(string, optional, tag = "28")]
-    pub description: Option<String>,
-    /// JSON-encoded default value.
-    #[prost(string, optional, tag = "29")]
-    pub default: Option<String>,
-    #[prost(bool, optional, tag = "30")]
-    pub deprecated: Option<bool>,
-    #[prost(bool, optional, tag = "31")]
-    pub read_only: Option<bool>,
-    #[prost(bool, optional, tag = "32")]
-    pub write_only: Option<bool>,
-
-    // ── Extensions ───────────────────────────────────────────────────────────
-    #[prost(message, optional, tag = "33")]
-    pub extensions: Option<Extensions>,
-}
-
-/// A schema that is either inline or a $ref.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct SchemaOrRef {
-    #[prost(oneof = "schema_or_ref::Value", tags = "1, 2")]
-    pub value: Option<schema_or_ref::Value>,
-}
-pub mod schema_or_ref {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Value {
-        #[prost(message, tag = "1")]
-        Inline(super::JsonSchemaDef),
-        #[prost(message, tag = "2")]
-        Ref(super::SchemaRef),
-    }
-}
-
-/// A named property entry in an object schema.
-/// Stored as a Vec<PropertyDef> (not a HashMap) to preserve declaration order.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PropertyDef {
-    #[prost(string, tag = "1")]
-    pub name: String,
-    #[prost(message, optional, tag = "2")]
-    pub schema: Option<SchemaOrRef>,
-}
-```
-
-### 4.3 Parameter definition
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ParameterDef {
-    #[prost(string, tag = "1")]
-    pub name: String,
-
-    #[prost(enumeration = "ParameterLocation", tag = "2")]
-    pub location: i32,
-
-    #[prost(string, optional, tag = "3")]
-    pub description: Option<String>,
-
-    /// Path parameters are always required. For other locations, this is explicit.
-    #[prost(bool, tag = "4")]
-    pub required: bool,
-
-    #[prost(bool, optional, tag = "5")]
-    pub deprecated: Option<bool>,
-
-    /// The schema for this parameter's value.
-    #[prost(message, optional, tag = "6")]
-    pub schema: Option<SchemaOrRef>,
-
-    #[prost(message, optional, tag = "7")]
-    pub extensions: Option<Extensions>,
-}
-```
-
-### 4.4 Request body definition
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct RequestBodyDef {
-    #[prost(string, optional, tag = "1")]
-    pub description: Option<String>,
-
-    #[prost(bool, tag = "2")]
-    pub required: bool,
-
-    /// Media type → content definition. Stored as Vec for ordering stability.
-    #[prost(message, repeated, tag = "3")]
-    pub content: Vec<MediaTypeEntry>,
-
-    #[prost(message, optional, tag = "4")]
-    pub extensions: Option<Extensions>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct MediaTypeEntry {
-    /// e.g. "application/json", "multipart/form-data"
-    #[prost(string, tag = "1")]
-    pub media_type: String,
-
-    #[prost(message, optional, tag = "2")]
-    pub schema: Option<SchemaOrRef>,
-
-    #[prost(message, optional, tag = "3")]
-    pub extensions: Option<Extensions>,
-}
-```
-
-### 4.5 Response definition
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ResponseDef {
-    #[prost(string, tag = "1")]
-    pub description: String,  // required in OpenAPI 3.x
-
-    #[prost(message, repeated, tag = "2")]
-    pub content: Vec<MediaTypeEntry>,
-
-    /// Response headers.
-    #[prost(message, repeated, tag = "3")]
-    pub headers: Vec<HeaderDef>,
-
-    #[prost(message, optional, tag = "4")]
-    pub extensions: Option<Extensions>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct HeaderDef {
-    #[prost(string, tag = "1")]
-    pub name: String,
-    #[prost(string, optional, tag = "2")]
-    pub description: Option<String>,
-    #[prost(bool, optional, tag = "3")]
-    pub required: Option<bool>,
-    #[prost(message, optional, tag = "4")]
-    pub schema: Option<SchemaOrRef>,
-}
-
-/// A response that is either inline or a $ref to components/responses.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ResponseOrRef {
-    #[prost(oneof = "response_or_ref::Value", tags = "1, 2")]
-    pub value: Option<response_or_ref::Value>,
-}
-pub mod response_or_ref {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Value {
-        #[prost(message, tag = "1")]
-        Inline(super::ResponseDef),
-        /// Component name in components/responses.
-        #[prost(string, tag = "2")]
-        Ref(String),
-    }
-}
-```
-
-### 4.6 Operation definition
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct OperationDef {
-    #[prost(enumeration = "HttpMethod", tag = "1")]
-    pub method: i32,
-
-    #[prost(string, optional, tag = "2")]
-    pub operation_id: Option<String>,
-
-    #[prost(string, optional, tag = "3")]
-    pub summary: Option<String>,
-
-    #[prost(string, optional, tag = "4")]
-    pub description: Option<String>,
-
-    #[prost(string, repeated, tag = "5")]
-    pub tags: Vec<String>,
-
-    /// Parameters defined at the operation level.
-    /// These are merged with path-level parameters; operation parameters override.
-    #[prost(message, repeated, tag = "6")]
-    pub parameters: Vec<ParameterOrRef>,
-
-    #[prost(message, optional, tag = "7")]
-    pub request_body: Option<RequestBodyOrRef>,
-
-    /// Status code (or "default") → response. Stored as Vec for ordering stability.
-    #[prost(message, repeated, tag = "8")]
-    pub responses: Vec<ResponseEntry>,
-
-    #[prost(bool, optional, tag = "9")]
-    pub deprecated: Option<bool>,
-
-    #[prost(message, optional, tag = "10")]
-    pub extensions: Option<Extensions>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ResponseEntry {
-    /// HTTP status code as string, or "default".
-    #[prost(string, tag = "1")]
-    pub status_code: String,
-    #[prost(message, optional, tag = "2")]
-    pub response: Option<ResponseOrRef>,
-}
-
-/// A parameter that is either inline or a $ref to components/parameters.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ParameterOrRef {
-    #[prost(oneof = "parameter_or_ref::Value", tags = "1, 2")]
-    pub value: Option<parameter_or_ref::Value>,
-}
-pub mod parameter_or_ref {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Value {
-        #[prost(message, tag = "1")]
-        Inline(super::ParameterDef),
-        /// Component name in components/parameters.
-        #[prost(string, tag = "2")]
-        Ref(String),
-    }
-}
-
-/// A requestBody that is either inline or a $ref to components/requestBodies.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct RequestBodyOrRef {
-    #[prost(oneof = "request_body_or_ref::Value", tags = "1, 2")]
-    pub value: Option<request_body_or_ref::Value>,
-}
-pub mod request_body_or_ref {
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Value {
-        #[prost(message, tag = "1")]
-        Inline(super::RequestBodyDef),
-        /// Component name in components/requestBodies.
-        #[prost(string, tag = "2")]
-        Ref(String),
-    }
-}
-```
-
-### 4.7 Blob types (the stored objects)
-
-#### DocumentMetadataBlob
-
-Stored under `__metadata__` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct DocumentMetadataBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    /// e.g. "3.1.0"
-    #[prost(string, tag = "2")]
-    pub openapi_version: String,
-
-    #[prost(message, optional, tag = "3")]
-    pub info: Option<InfoObject>,
-
-    #[prost(message, repeated, tag = "4")]
-    pub servers: Vec<ServerObject>,
-
-    #[prost(message, optional, tag = "5")]
-    pub extensions: Option<Extensions>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct InfoObject {
-    #[prost(string, tag = "1")]
-    pub title: String,
-    #[prost(string, optional, tag = "2")]
-    pub description: Option<String>,
-    #[prost(string, tag = "3")]
-    pub version: String,
-    #[prost(string, optional, tag = "4")]
-    pub terms_of_service: Option<String>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ServerObject {
-    #[prost(string, tag = "1")]
-    pub url: String,
-    #[prost(string, optional, tag = "2")]
-    pub description: Option<String>,
-}
-```
-
-#### PathItemBlob
-
-Stored under `path:<path_pattern>` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PathItemBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    /// The path pattern, e.g. "/users/{id}". Stored in the blob (not just the tree key)
-    /// so the blob is self-describing after lookup.
-    #[prost(string, tag = "2")]
-    pub path_pattern: String,
-
-    #[prost(string, optional, tag = "3")]
-    pub summary: Option<String>,
-
-    #[prost(string, optional, tag = "4")]
-    pub description: Option<String>,
-
-    /// Path-level parameters (inherited by all operations unless overridden).
-    #[prost(message, repeated, tag = "5")]
-    pub parameters: Vec<ParameterOrRef>,
-
-    /// The operations on this path. At most one per HTTP method.
-    #[prost(message, repeated, tag = "6")]
-    pub operations: Vec<OperationDef>,
-
-    #[prost(message, optional, tag = "7")]
-    pub extensions: Option<Extensions>,
-}
-```
-
-#### ComponentSchemaBlob
-
-Stored under `schema:<name>` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ComponentSchemaBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    /// The component name, e.g. "User".
-    #[prost(string, tag = "2")]
-    pub name: String,
-
-    #[prost(message, optional, tag = "3")]
-    pub schema: Option<JsonSchemaDef>,
-
-    #[prost(message, optional, tag = "4")]
-    pub extensions: Option<Extensions>,
-}
-```
-
-#### ComponentParameterBlob
-
-Stored under `param:<name>` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ComponentParameterBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    #[prost(string, tag = "2")]
-    pub name: String,
-
-    #[prost(message, optional, tag = "3")]
-    pub parameter: Option<ParameterDef>,
-}
-```
-
-#### ComponentResponseBlob
-
-Stored under `response:<name>` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ComponentResponseBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    #[prost(string, tag = "2")]
-    pub name: String,
-
-    #[prost(message, optional, tag = "3")]
-    pub response: Option<ResponseDef>,
-}
-```
-
-#### ComponentRequestBodyBlob
-
-Stored under `requestBody:<name>` in the schema tree.
-
-```rust
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ComponentRequestBodyBlob {
-    #[prost(uint32, tag = "1")]
-    pub blob_version: u32,
-
-    #[prost(string, tag = "2")]
-    pub name: String,
-
-    #[prost(message, optional, tag = "3")]
-    pub request_body: Option<RequestBodyDef>,
-}
-```
+> **AS-BUILT — encoding changed from prost to serde_json.** The v1 doc said "All types below are serialized to bytes via `prost`." That is no longer true. The AST types derive `serde::{Serialize, Deserialize}` and are encoded with `serde_json`. There are no `#[prost(...)]` tags, no prost enum-discriminant integers, and no `.proto` for the AST. This also matches `design.md` §2.1's "`prost`/`serde` … whichever the sibling crate supports" — here, serde.
 
 ---
 
-## 5. `$ref` Handling
+## 5. Rust AST Type Definitions (`ast.rs`)
 
-### Local `$ref` (within the same schema file)
+All types derive `Clone, Debug, PartialEq, Serialize, Deserialize` (most also `Default`). Optional/empty fields use `#[serde(default, skip_serializing_if = …)]` so omitted values don't bloat the JSON.
 
-A `$ref` of the form `#/components/schemas/User` is stored as a `SchemaOrRef::Ref` with `local_name = "User"` and no `external_import`. The core does not resolve local refs at storage time — they remain symbolic.
+### 5.1 Enums (plain Rust enums)
 
-When the core needs to follow a local ref (e.g., for `FollowType` or `generate_descriptors`), it looks up `schema:User` in the same schema tree.
+`HttpMethod` (`Get`/`Post`/`Put`/`Delete`/`Patch`/`Head`/`Options`/`Trace`), `ParameterLocation` (`Query`/`Header`/`Path`/`Cookie`), `JsonSchemaType` (`String`/`Integer`/`Number`/`Boolean`/`Array`/`Object`/`Null`). Each has `from_str` / `to_str` helpers. These serialize as their variant names (not prost integer discriminants).
 
-### External `$ref` (cross-schema import)
-
-A `$ref` pointing to another file (e.g., `./common.yaml#/components/schemas/Address` or a full schemahub path `schemahub://payments/common-types/address.yaml#/components/schemas/Address`) is stored as a `SchemaOrRef::Ref` with a populated `external_import` field:
+### 5.2 Shared primitives
 
 ```rust
-SchemaOrRef::Ref(SchemaRef {
-    local_name: "",
-    external_import: Some(Import {
-        path:             "payments/common-types/address.yaml",
-        resolved_commit:  "a3f9c2d...",
-        decl_name:        "Address",
-    }),
-})
+pub struct SchemaRef {            // a $ref target
+    pub local_name: String,                       // component name for a local #/components/schemas/<name>
+    pub external_import: Option<ExternalImport>,  // populated for cross-file refs (v2-modeled)
+}
+pub struct ExternalImport { pub path: String, pub resolved_commit: String, pub decl_name: String }
+pub struct Extensions { pub json_bytes: Vec<u8> }  // raw JSON of x- fields, uninterpreted
 ```
 
-External imports are tracked in the `deps/` index. The `imports()` method on the plugin extracts all `Import` structs from a blob for BFS traversal.
+> **AS-BUILT** — the v1 type was `Import`; in the OpenAPI AST it is named `ExternalImport`, and the schemahub-wide `Import { path, resolved_commit }` lives in `schemahub-types`. External imports are modeled in the AST but, in v1, are not surfaced as document-level imports (see §6.5).
 
-### `$ref` in the source that points to a component within the same file
+### 5.3 JSON Schema (`JsonSchemaDef`)
 
-OpenAPI documents commonly reference their own components:
-```yaml
-responses:
-  '200':
-    content:
-      application/json:
-        schema:
-          $ref: '#/components/schemas/User'
-```
-
-This becomes `SchemaOrRef::Ref { local_name: "User", external_import: None }` in the PathItemBlob. The `ComponentSchemaBlob` for `User` is a separate blob in the same schema tree.
-
----
-
-## 6. `FormatPlugin` Method Behaviors for OpenAPI
-
-### 6.1 `parse(source: &str) -> Result<Blob, ParseError>`
-
-**Input:** Raw YAML or JSON string of a complete OpenAPI 3.1 document.
-
-**Output:** This method is unusual for OpenAPI — it produces not one blob but a set of blobs. However, the `FormatPlugin` interface returns a single `Blob`. The resolution:
-
-`parse` for OpenAPI returns a **root envelope blob** that contains the list of (schema-tree-key, blob-bytes) pairs for all declarations in the document. The core unwraps the envelope and stores each declaration blob separately, building the schema tree from the envelope contents.
+The core recursive type. Field set is unchanged from v1 in *content* (types, format, string/numeric/array/object constraints, `allOf`/`anyOf`/`oneOf`/`not`, `enum`/`const`, metadata, extensions) — only the encoding and `Option`/`Vec` skip attributes changed. `properties: Vec<PropertyDef>` preserves declaration order; `items`/`additional_properties_schema`/`not` are `Option<Box<SchemaOrRef>>`. `enum_values` and `const_value`/`default` are JSON-encoded strings.
 
 ```rust
-/// Returned by parse() for OpenAPI documents.
-/// The core unwraps this to populate the schema tree.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct OpenApiParseResult {
-    #[prost(uint32, tag = "1")]
+pub enum SchemaOrRef { Inline(JsonSchemaDef), Ref(SchemaRef) }   // default = Inline(default)
+pub struct PropertyDef { pub name: String, pub schema: Option<SchemaOrRef> }
+```
+
+> **AS-BUILT** — `SchemaOrRef` (and the other `*OrRef` types below) are now ordinary Rust `enum`s, not the v1 prost `oneof` helper modules (`schema_or_ref::Value`, etc.).
+
+### 5.4 Parameter / RequestBody / Response / Operation
+
+- `ParameterDef { name, location, description?, required, deprecated?, schema?, extensions? }`
+- `ParameterOrRef = Inline(ParameterDef) | Ref(String)` (Ref is the component name)
+- `RequestBodyDef { description?, required, content: Vec<MediaTypeEntry>, extensions? }`; `MediaTypeEntry { media_type, schema?, extensions? }`; `RequestBodyOrRef = Inline | Ref(String)`
+- `ResponseDef { description, content, headers: Vec<HeaderDef>, extensions? }`; `HeaderDef { name, description?, required?, schema? }`; `ResponseOrRef = Inline | Ref(String)`
+- `OperationDef { method, operation_id?, summary?, description?, tags, parameters: Vec<ParameterOrRef>, request_body?: RequestBodyOrRef, responses: Vec<ResponseEntry>, deprecated?, extensions? }`; `ResponseEntry { status_code: String, response?: ResponseOrRef }`. `OperationDef::empty(method)` builds a bare op.
+
+### 5.5 Blob types (the stored payloads)
+
+```rust
+pub struct DocumentMetadataBlob {     // → MetaBlob (NOT a decl)
     pub blob_version: u32,
-
-    /// One entry per top-level declaration.
-    #[prost(message, repeated, tag = "2")]
-    pub declarations: Vec<ParsedDeclaration>,
+    pub openapi_version: String,      // "3.1.0"
+    pub info: Option<InfoObject>,     // { title, description?, version, terms_of_service? }
+    pub servers: Vec<ServerObject>,   // { url, description? }
+    pub extensions: Option<Extensions>,
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct ParsedDeclaration {
-    /// The schema tree key, e.g. "path:/users", "schema:User", "__metadata__"
-    #[prost(string, tag = "1")]
-    pub tree_key: String,
-
-    /// The serialized blob bytes for this declaration.
-    #[prost(bytes, tag = "2")]
-    pub blob_bytes: Vec<u8>,
-}
+pub struct PathItemBlob          { path_pattern, summary?, description?, parameters: Vec<ParameterOrRef>, operations: Vec<OperationDef>, extensions? }
+pub struct ComponentSchemaBlob   { name, schema: Option<JsonSchemaDef>, extensions? }
+pub struct ComponentParameterBlob{ name, parameter: Option<ParameterDef> }
+pub struct ComponentResponseBlob { name, response: Option<ResponseDef> }
+pub struct ComponentRequestBodyBlob { name, request_body: Option<RequestBodyDef> }
 ```
 
-The core recognizes this envelope type by format_id and handles the multi-blob write path. This is an OpenAPI-specific carve-out to the "parse returns one blob" convention, justified by the fact that OpenAPI documents are inherently multi-declaration.
-
-**Parse errors:** The parser returns `ParseError` for:
-- Documents with `openapi:` version not starting with `3.`
-- Missing required fields (`info.title`, `info.version`)
-- Invalid `$ref` syntax
-- Duplicate operation IDs across the document
-- Path parameters declared in the path pattern but not in any parameter definition (and vice versa)
-
-### 6.2 `print(blob: &Blob) -> Result<String, PrintError>`
-
-`print` is called **per declaration blob**, not on the envelope. Each blob type renders to its canonical YAML fragment.
-
-For assembling a complete OpenAPI document from a schema tree (e.g., for `UpdateSchema` source round-trip or `GetDescriptors`), the core calls `generate_descriptors` instead, which assembles the full document from all blobs in the schema tree.
-
-The canonical YAML output from `print` is deterministic:
-- Keys are sorted alphabetically within objects, except for the top-level OpenAPI structure which follows canonical OpenAPI key order (`openapi`, `info`, `servers`, `paths`, `components`).
-- `properties` within schemas preserve the declaration order from the AST (BTreeMap → sorted, but the order stored in `Vec<PropertyDef>` is the original declaration order).
-- Enum values preserve their original order.
-
-### 6.3 `list_declarations(blob: &Blob) -> Result<Vec<DeclSummary>, ReadError>`
-
-Since the OpenAPI plugin stores multiple blobs per schema file, `list_declarations` is called on the `OpenApiParseResult` envelope blob. It returns one `DeclSummary` per declaration:
-
-```
-DeclSummary { name: "path:/users",        kind: PathItem,           doc: "User management endpoints" }
-DeclSummary { name: "path:/users/{id}",   kind: PathItem,           doc: None }
-DeclSummary { name: "schema:User",        kind: ComponentSchema,    doc: "A registered user" }
-DeclSummary { name: "schema:Error",       kind: ComponentSchema,    doc: "Standard error response" }
-DeclSummary { name: "param:PageSize",     kind: ComponentParameter, doc: "Number of results per page" }
-DeclSummary { name: "response:NotFound",  kind: ComponentResponse,  doc: "Resource not found" }
-DeclSummary { name: "__metadata__",       kind: DocumentMetadata,   doc: "Payments API v2.1" }
-```
-
-The `kind` field uses the `DeclKind` enum defined in the core:
-
-```rust
-pub enum DeclKind {
-    // Protobuf
-    Message, Enum, Service,
-    // FlatBuffers
-    Table, Struct, FbsEnum, Union,
-    // OpenAPI
-    PathItem, ComponentSchema, ComponentParameter, ComponentResponse, ComponentRequestBody, DocumentMetadata,
-}
-```
-
-### 6.4 `get_declaration(blob: &Blob, name: &str) -> Result<DeclDetail, ReadError>`
-
-`name` is the schema tree key (`"path:/users"`, `"schema:User"`, etc.). The method locates the corresponding blob in the envelope, deserializes it, and returns a `DeclDetail` — a JSON or YAML rendering of the full declaration suitable for display in the CLI or agent context.
-
-```
-DeclDetail for "path:/users":
-  PathItem "/users"
-    GET  listUsers
-      Parameters: limit (query, integer, optional), offset (query, integer, optional)
-      Response 200: content: application/json → $ref User
-    POST createUser
-      RequestBody: required, application/json → $ref CreateUserRequest
-      Response 201: content: application/json → $ref User
-      Response 422: content: application/json → $ref Error
-```
-
-### 6.5 `imports(blob: &Blob) -> Result<Vec<Import>, ReadError>`
-
-Scans all `SchemaOrRef::Ref` values in the envelope blob, collecting all `external_import` entries. Returns the deduplicated list. Called by the core during BFS transitive closure for `generate_descriptors`.
-
-### 6.6 `diff(old: &Blob, new: &Blob) -> Result<Vec<SchemaChange>, DiffError>`
-
-Compares two `OpenApiParseResult` envelope blobs. Produces `SchemaChange` entries:
-
-- A declaration present in `new` but not `old` → `DeclarationAdded { name }`
-- A declaration present in `old` but not `new` → `DeclarationRemoved { name }`
-- A declaration present in both with differing blob hashes → `DeclarationModified { name, detail }`
-
-The `detail` bytes for `DeclarationModified` contain a format-specific diff structure (e.g., which operations were added/removed, which parameters changed). The core does not interpret `detail`.
-
-### 6.7 `check_compatibility(old, new, rules) -> Result<(), Vec<CompatibilityViolation>>`
-
-Calls `diff` internally, then evaluates each `SchemaChange` against the compatibility table from `design.md` Section 4.4.
-
-For `DeclarationModified` entries, the compatibility checker recursively inspects the old and new blobs to determine the nature of the modification:
-
-**PathItem changes:**
-- New operation added (new HTTP method): BACKWARD-compatible (new capability, old clients unaffected)
-- Operation removed: FORWARD-compatible (old clients can still call it against old servers)
-- Parameter added as `required: true`: FORWARD-compatible only (old clients that don't send it are broken against new server)
-- Parameter added as `required: false`: FULL-compatible
-- Parameter removed: BACKWARD-compatible (old clients that send it — server ignores unknown query params)
-- Response field added as required: BACKWARD-compatible (old clients get extra fields; JSON is additive)
-- Response field removed: FORWARD-compatible (old clients expect it; new server doesn't send it)
-- Response field type changed: INCOMPATIBLE under all directions
-- `operationId` changed: INCOMPATIBLE (generated client code uses operationId as function name)
-
-**ComponentSchema changes:**
-- Property added (not in `required`): BACKWARD-compatible
-- Property added to `required`: FORWARD-compatible only
-- Property removed: FORWARD-compatible
-- Property type changed: INCOMPATIBLE
-- Enum value added: BACKWARD-compatible (new servers can produce it; old clients won't understand it — actually FORWARD depending on direction)
-
-See the full table in `design.md` Section 4.4.
-
-### 6.8 `apply_mutation` and `apply_mutations` (v1)
-
-In v1, OpenAPI mutations are whole-document pushes via `UpdateSchema`, not granular. The `apply_mutation` and `apply_mutations` methods on the OpenAPI plugin return `MutationError::UnsupportedInV1` for all inputs except the internal `PushDocument` mutation used by `UpdateSchema`. The `PushDocument` mutation carries the full source text and is handled by calling `parse` → `diff` → `check_compatibility` in sequence.
-
-This is explicitly a temporary v1 design. The v2 granular mutation operations will match the path model from Section 3.
-
-### 6.9 `generate_descriptors(blobs) -> Result<Bytes, DescriptorError>`
-
-Assembles a complete, resolved OpenAPI 3.1 YAML document from the transitive closure of blobs:
-
-1. Find the `__metadata__` blob → write `openapi:`, `info:`, `servers:` sections
-2. Collect all `path:*` blobs → write `paths:` section
-3. Collect all `schema:*`, `param:*`, `response:*`, `requestBody:*` blobs → write `components:` section
-4. For external `$ref` imports in any blob: inline the referenced schema from the imported blob (since the BFS closure already includes it)
-
-The output is a single self-contained YAML document with no unresolved `$ref` values pointing outside the document. Internal `$ref` values (local component references) are preserved as-is — they remain valid in the assembled document.
-
-### 6.10 `generate_code` (v1)
-
-Returns `CodegenError::UnsupportedLanguage` for all inputs. OpenAPI codegen (HTTP client/server generation) is deferred to v2.
+Each `*Blob` (except `DocumentMetadataBlob`) is wrapped in `OpenApiDecl { blob_version, kind: DeclPayload::<Kind>(blob) }` before encoding (§3). `path_pattern` / `name` stay inside the blob so it is self-describing after lookup.
 
 ---
 
-## 7. v2 Granular Mutations (Design Intent)
+## 6. `Compiler` Method Behaviors for OpenAPI (`lib.rs`)
 
-The following operations are NOT implemented in v1 but define the mutation shape that the v1 AST is designed to support. Implemented in v2, they will produce blobs identical in structure to v1's `parse`.
+The OpenAPI compiler implements `schemahub_types::Compiler`. Methods take/return the trait's per-declaration types (`ParsedSchema`, `SchemaObjects`, `DeclBlob`, `MetaBlob`, `MutationEffect`, …) — not a single envelope.
 
-```
-AddOperation       { path: "path:/users", method: POST, operation: OperationDef }
-RemoveOperation    { path: "path:/users", method: POST }
-AddParameter       { path: "path:/users/GET", parameter: ParameterDef }
-RemoveParameter    { path: "path:/users/GET/parameters/{limit}" }
-UpdateParameter    { path: "path:/users/GET/parameters/{limit}", changes: ... }
-AddResponseStatus  { path: "path:/users/GET", status_code: "404", response: ResponseDef }
-RemoveResponseStatus { path: "path:/users/GET/responses/{404}" }
-AddProperty        { path: "schema:User", property: PropertyDef }
-RemoveProperty     { path: "schema:User/properties/{email}" }
-MakeRequired       { path: "schema:User/properties/{email}" }
-MakeOptional       { path: "schema:User/properties/{email}" }
-AddPathItem        { path_pattern: "/orders", path_item: PathItemBlob }
-RemovePathItem     { path_pattern: "/orders" }
-```
+### 6.1 `parse(&self, source) -> Result<ParsedSchema, ParseError>`
 
-Every operation is addressed by the stable path from Section 3. The AST types in Section 4 are designed to make all these operations expressible as field-level mutations on the blob structs.
+Parses YAML/JSON (JSON is a YAML subset) via `serde_yaml`. Builds the document `DocumentMetadataBlob` (→ `meta`) and one `(key, DeclBlob)` per path item and per component (§2). Parse errors: non-`3.` version (`UnsupportedVersion`), missing `info.title` / `info.version`, non-mapping root.
+
+> **AS-BUILT — parse returns `ParsedSchema`, not a blob/envelope.** The v1 `OpenApiParseResult` "root envelope" (with `ParsedDeclaration { tree_key, blob_bytes }`) and the "OpenAPI-specific carve-out to the parse-returns-one-blob convention" are **gone**. `parse` returns `ParsedSchema { meta: MetaBlob, decls: Vec<(String, DeclBlob)> }` directly, exactly like the other compilers — the core's per-declaration write path needs no special case.
+
+### 6.2 `print(&self, schema: &SchemaObjects) -> Result<String, PrintError>` (`printer.rs`)
+
+Reassembles the whole schema file from `SchemaObjects` (a `MetaBlob` + `BTreeMap<key, DeclBlob>`) into canonical OpenAPI 3.1 YAML. `BTreeMap` iteration is key-sorted, so the `path:`/`schema:`/`param:`/`response:`/`requestBody:` prefixes keep kinds grouped and sorted within each kind. Top-level document key order follows OpenAPI structure (`openapi`, `info`, `servers`, `paths`, `components`); within a decl, declaration order (e.g. `properties`) is preserved.
+
+> **AS-BUILT — `print` operates on the whole `SchemaObjects`, not per-blob.** v1 said `print` is called per decl blob and a separate `generate_descriptors` reassembles the document. In v2, `print(SchemaObjects)` *is* the reassembly path; `decl_detail` handles single-decl rendering for display (§6.3).
+
+### 6.3 Read / exploration
+
+- `summarize_decl(&DeclBlob) -> DeclSummary` — decodes the `OpenApiDecl`, returns `{ name, kind, doc_comment }` with `name` re-prefixed (`path:<pattern>`, `schema:<name>`, …) and `kind` the matching `DeclKind`.
+- `decl_detail(&DeclBlob) -> DeclDetail` — human/agent-readable rendering of one declaration (`print_decl_detail`).
+- `imports(&MetaBlob) -> Vec<Import>` — **AS-BUILT: returns empty.** External cross-file `$ref` imports are modeled in the AST (`SchemaRef.external_import`) but live inside decl blobs, not the meta blob; the trait scopes `imports` to the meta blob, and OpenAPI v1 has no document-level imports.
+- `type_refs(&DeclBlob) -> Vec<TypeRef>` — collects the local component refs a decl references, deduplicated, as `schema:<name>` / `param:<name>` / `response:<name>` / `requestBody:<name>` keys (used for `FollowType` and the dependency index).
+
+### 6.4 `diff_decl` / `check_compatibility`
+
+`diff_decl(old, new) -> DeclChange` (`diff.rs`) and `check_compatibility(old, new, rules) -> Result<(), Vec<CompatibilityViolation>>` (`compat.rs`) operate on a **pair of single decl blobs**, not on envelopes.
+
+> **AS-BUILT — diff/compat are per-declaration, not whole-document.** v1 described `diff`/`check_compatibility` comparing two `OpenApiParseResult` envelopes and producing add/remove/modify across the document. In v2 the VCS layer already knows which decls changed (per-declaration tree), so these methods compare one decl against its counterpart; whole-document add/remove falls out of the tree diff at the core layer. The compatibility rule intent (operation/parameter/response/property/enum rules) is unchanged.
+
+### 6.5 `$ref` handling
+
+- **Local** `#/components/schemas/User` → `SchemaOrRef::Ref(SchemaRef { local_name: "User", external_import: None })`; the `ComponentSchemaBlob` for `User` is a separate `schema:User` decl in the same file. Refs stay symbolic. Parameter/response/requestBody refs strip their `#/components/<kind>/` prefix to the bare component name.
+- **External** (cross-file) → `SchemaRef { local_name: "", external_import: Some(ExternalImport { path, resolved_commit, decl_name }) }`. Modeled but v2-resolved (not surfaced via `imports`).
+
+### 6.6 Mutations (`operations.rs`, `lib.rs::apply_one`)
+
+`apply_mutation(schema, op)` decodes an `OpenApiOp` and applies it; `apply_mutations(schema, ops)` folds an ordered batch over a working copy and returns the **net** `MutationEffect` (only the final state validated).
+
+> **AS-BUILT — granular OpenAPI mutations are partially implemented, not deferred-entirely.** v1 said the only OpenAPI mutation is the internal whole-document `PushDocument`, with all granular ops returning `UnsupportedInV1`. The implementation ships these granular ops in addition to `PushDocument`:
+>
+> | Op | Effect |
+> |----|--------|
+> | `PushDocument { source }` | whole-document replace: re-parse, upsert all decls + meta, remove dropped decls (used by `UpdateSchema`) |
+> | `AddPath { path_pattern, summary, description }` | new empty `path:<pattern>` decl (errors if it exists) |
+> | `RemovePath { path_pattern }` | remove the `path:<pattern>` decl |
+> | `AddOperation { path_pattern, method, operation_id, summary, description }` | add one HTTP method to a path item |
+> | `RemoveOperation { path_pattern, method }` | remove one HTTP method from a path item |
+> | `AddComponentSchema { schema_name, schema_type, description }` | new `schema:<name>` decl |
+> | `RemoveComponentSchema { schema_name }` | remove the `schema:<name>` decl |
+>
+> Any other granular op returns `MutationError::UnsupportedInV1`. These map to the `OpenApiMutation` oneof in `mutations.proto` (see `grpc-api.md` §4.3) and are reachable via `ApplyMutation` but **not** `ApplyTransaction`.
+
+### 6.7 Conflicts
+
+- `render_conflict(&ConflictSides) -> String` — renders `base` (if present) and each competing side as YAML fragments (`# ===== base =====` / `# ===== side N =====`); `EmptyConflict` error if no sides.
+- `validate_resolution(&DeclBlob) -> Result<(), ConflictError>` — a valid resolution must `decode_decl` to a well-formed `OpenApiDecl`; otherwise `InvalidResolution`.
+
+### 6.8 Codegen
+
+- `generate_descriptors(&SchemaClosure) -> Bytes` — assembles each schema file's reconstructed YAML via `print_schema_objects`; multiple files in a closure are concatenated as a YAML multi-document stream (`---` separators), sorted by schema name. Local `$ref`s stay symbolic (valid within each document).
+- `generate_code(_, lang) -> Result<String, CodegenError>` — returns `CodegenError::UnsupportedLanguage(lang)`. OpenAPI client/server codegen is out of scope (v2).
 
 ---
 
-## 8. Blob Version History
+## 7. Blob Version History
 
-| `blob_version` | Change | Released |
-|---------------|--------|---------|
-| 1 | Initial v1 AST | v0.1.0 |
+| `blob_version` | Change | Notes |
+|---------------|--------|-------|
+| 1 | Initial v2 in-tree AST | `BLOB_VERSION = 1`; serde_json encoding; self-describing `OpenApiDecl` wrapper; `DocumentMetadataBlob` as the `MetaBlob` |
 
-Migrations are defined in the `schemahub-openapi-plugin` crate following the migration chain model in `design.md` Section 3.5.
+`decode_decl` / `decode_meta` reject `blob_version` greater than `BLOB_VERSION`. Future migrations live in `schemahub-compiler-openapi`.
+
+---
+
+## 8. Relationship to the v1 Spec (what changed)
+
+| v1 (prost / single-envelope) | v2 (as implemented) |
+|------------------------------|---------------------|
+| `parse` returns an `OpenApiParseResult` envelope blob; core unwraps it | `parse` returns `ParsedSchema { meta, decls }` directly |
+| Document metadata stored under reserved tree key `__metadata__` | Document metadata is `ParsedSchema.meta` — a `DocumentMetadataBlob` `MetaBlob`, not a keyed decl |
+| Every blob is a `prost::Message` with `blob_version` as field 1; `oneof` helper modules | serde types encoded with `serde_json`; `blob_version` only on `OpenApiDecl` + `DocumentMetadataBlob`; plain Rust enums |
+| Tree-key prefix tells you the decl kind | each `DeclBlob` self-describes via `OpenApiDecl.kind` (kind tag) |
+| `print` per-blob; `generate_descriptors` reassembles | `print(SchemaObjects)` reassembles; `decl_detail` renders one decl |
+| `diff`/`check_compatibility` over whole-document envelopes | `diff_decl`/`check_compatibility` over single decl-blob pairs |
+| OpenAPI mutations: whole-document `PushDocument` only | `PushDocument` **plus** six granular ops (add/remove path, operation, component schema) |
+
+The path/key scheme itself (`path:`, `schema:`, `param:`, `response:`, `requestBody:`) is unchanged from v1 — that part of the design carried over intact.

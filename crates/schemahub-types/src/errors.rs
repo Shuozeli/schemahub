@@ -53,6 +53,18 @@ pub enum ReadError {
 }
 
 #[derive(Debug, Error)]
+pub enum ConflictError {
+    #[error("blob is malformed: {0}")]
+    MalformedBlob(String),
+    #[error("proposed resolution is not a valid declaration: {0}")]
+    InvalidResolution(String),
+    #[error("conflict has no sides to render")]
+    EmptyConflict,
+    #[error("conflict error: {0}")]
+    Other(String),
+}
+
+#[derive(Debug, Error)]
 pub enum DescriptorError {
     #[error("blob is malformed: {0}")]
     MalformedBlob(String),

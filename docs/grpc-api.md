@@ -1,1359 +1,463 @@
-# schemahub — gRPC API Design
+# schemahub — gRPC API (v2: Compilers + Jujutsu-style VCS)
 
-> This document specifies the complete gRPC API surface: all services, RPCs, request/response types, and mutation types. The `.proto` files described here are the external contract that the CLI, AI agents, and any future client libraries depend on. The internal Rust core translates these wire types into the internal `Mutation` envelope described in `design.md` Section 3.4.
+> This document specifies the gRPC API surface **as implemented**: all services, RPCs, request/response shapes, and mutation types. The `.proto` files described here are the external contract that the CLI, AI agents, and any future client libraries depend on. The server (`schemahub-server`) translates these wire types into the internal `Mutation` envelope and `Core` calls described in `design.md`.
+>
+> It supersedes the v1 git-style API design (preserved in git history). Two project-level decisions drive the v2 surface (see `design.md`, `requirements.md`):
+>
+> 1. **Jujutsu-style VCS.** Writes no longer reject on a base-revision CAS mismatch. Every write returns a stable **`change_id`** (durable identity that survives rewrite/rebase) alongside the new commit, and may report **`conflicted_decls`** — declarations that landed as first-class conflicts rather than hard-failing. A new **`HistoryService`** exposes the operation log, `Undo`, and conflict render/resolve.
+> 2. **Compilers, not plugins.** "branches" map to jj **bookmarks** (the server keeps the `RefService`/branch names as an alias over bookmarks); per-declaration storage; the format-specific work is owned by a `Compiler` (`design.md` §2).
+>
+> **Source-of-truth note.** Where this doc and `design.md` disagree, the protos + server win — they are the implementation. Divergences are flagged inline with **AS-BUILT**.
 
 ---
 
 ## 1. File Structure and Package Conventions
 
+The `.proto` files live in `crates/schemahub-api/proto/schemahub/v1/`. The v2 layout split the old monolithic `common.proto` into focused files and added `history_service.proto`:
+
 ```
-proto/
-  schemahub/
-    v1/
-      common.proto          # shared types used across multiple files
-      mutations.proto       # ProtobufMutation, FlatBuffersMutation, OpenApiMutation
-      schema_service.proto  # SchemaService (lifecycle + mutations)
-      ref_service.proto     # RefService (branches, tags, commits, diff, merge)
-      exploration_service.proto  # ExplorationService (read API)
-      codegen_service.proto # CodegenService (descriptors, preview)
-      project_service.proto # ProjectService (projects, repos, ACL)
-      admin_service.proto   # AdminService (GC, index rebuild)
+proto/schemahub/v1/
+  enums.proto              # SchemaFormat, CompatibilityDirection, DeclKind, Role, Language
+  resources.proto          # CommitInfo, DeclSummary, SchemaInfo, BranchInfo, TagInfo
+  refs.proto               # VersionRef (oneof branch|tag|commit)
+  errors.proto             # ConflictDetail, CompatibilityViolation/Error, MutationValidationError, MergeConflictDetail
+  mutations.proto          # ProtobufMutation, FlatBuffersMutation, OpenApiMutation
+  schema_service.proto     # SchemaService     (lifecycle + mutations)
+  ref_service.proto        # RefService        (commits, diff, branches==bookmarks, tags, merge)
+  history_service.proto    # HistoryService    (NEW: log, op log, undo, render/resolve conflict)
+  exploration_service.proto# ExplorationService (read API)
+  codegen_service.proto    # CodegenService    (descriptors, preview)
+  project_service.proto    # ProjectService    (projects, repos, members/ACL)
+  admin_service.proto      # AdminService      (GC, index rebuild, server config)
 ```
 
-**Package:** `schemahub.v1`
+**Package:** `schemahub.v1` · **Go option:** `option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";` · **Rust:** generated via `tonic-build`; all types land in `schemahub_api::schemahub_v1`. All files are `syntax = "proto3"`.
 
-**Go package option:** `option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";`
-
-**Rust:** generated via `tonic-build` in `build.rs`. All generated types land in the `schemahub_v1` module.
-
-All `.proto` files use `syntax = "proto3"`.
+> **AS-BUILT — `refs.proto` vs `resources.proto`:** the design assumed a single `common.proto`. The implementation split shared types: `VersionRef` lives in `refs.proto`; `CommitInfo`/`DeclSummary`/`SchemaInfo`/`BranchInfo`/`TagInfo` in `resources.proto`; the structured error details in `errors.proto`. `ref_service.proto` defines the version-control RPCs (the file `refs.proto` holds only `VersionRef`).
 
 ---
 
-## 2. `common.proto` — Shared Types
+## 2. The Jujutsu Concurrency Model on the Wire
+
+This is the single biggest change from v1 and shapes every write RPC.
+
+### 2.1 No CAS rejection — concurrency yields conflicts
+
+In v1 a write carried a `base_revision` and the server **rejected** with `FAILED_PRECONDITION` + `ConflictDetail` if it did not match the branch HEAD. In v2 the VCS is jj-style:
+
+- Two writes starting from the same state **both commit**. jj records concurrent operations and merges their views on next load.
+- Edits to **different** declarations merge automatically (different per-declaration files in the tree).
+- Edits to the **same** declaration produce a **first-class conflict** on that one declaration — the second writer is *not* rejected; the conflict is recorded for later resolution.
+
+`base_revision` is therefore advisory in v2 (kept for wire compatibility and as an optimistic hint); the durable identity of a write is the returned **`change_id`**, and the durable record of concurrency is the **operation log** plus the **`conflicted_decls`** field.
+
+> **AS-BUILT — `ConflictDetail` / `MergeConflictDetail` are vestigial.** They remain defined in `errors.proto` for wire compatibility, but the implemented write path does not return `ConflictDetail` (no CAS reject) and `Merge` is fast-forward-only (see §5.6). Treat them as deprecated.
+
+### 2.2 Common write-response fields
+
+Every mutating RPC on `SchemaService` (and `ResolveConflict` on `HistoryService`) returns:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `new_commit` | `string` | hash of the commit created by this write |
+| `change_id` | `string` | the stable jj **change ID** — durable identity of the edit across rewrite/rebase (`design.md` §5.1) |
+| `conflicted_decls` | `repeated string` | declaration names that landed **conflicted** because of concurrency (empty on a clean write). Resolve with `HistoryService.ResolveConflict`. |
+
+`DeleteSchemaResponse` carries `new_commit` + `change_id` only (a delete cannot itself produce a conflicted decl).
+
+---
+
+## 3. `enums.proto`, `resources.proto`, `refs.proto`, `errors.proto` — Shared Types
+
+### 3.1 `enums.proto`
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
-import "google/protobuf/timestamp.proto";
-import "google/rpc/status.proto";
-
-// ── Enumerations ─────────────────────────────────────────────────────────────
-
-enum SchemaFormat {
-  SCHEMA_FORMAT_UNSPECIFIED  = 0;
-  SCHEMA_FORMAT_PROTOBUF     = 1;
-  SCHEMA_FORMAT_FLATBUFFERS  = 2;
-  SCHEMA_FORMAT_OPENAPI      = 3;
-}
-
-enum CompatibilityDirection {
-  COMPATIBILITY_DIRECTION_UNSPECIFIED = 0;
-  COMPATIBILITY_DIRECTION_BACKWARD    = 1;
-  COMPATIBILITY_DIRECTION_FORWARD     = 2;
-  COMPATIBILITY_DIRECTION_FULL        = 3;
-  COMPATIBILITY_DIRECTION_DISABLED    = 4;  // no checks (dev repos)
-}
+enum SchemaFormat            { UNSPECIFIED=0; PROTOBUF=1; FLATBUFFERS=2; OPENAPI=3; }   // names prefixed SCHEMA_FORMAT_
+enum CompatibilityDirection  { UNSPECIFIED=0; BACKWARD=1; FORWARD=2; FULL=3; DISABLED=4; }
+enum Role                    { UNSPECIFIED=0; READER=1; WRITER=2; MAINTAINER=3; OWNER=4; }
+enum Language                { UNSPECIFIED=0; RUST=1; GO=2; TYPESCRIPT=3; PYTHON=4; JAVA=5; }
 
 enum DeclKind {
-  DECL_KIND_UNSPECIFIED           = 0;
-  // Protobuf
-  DECL_KIND_MESSAGE               = 1;
-  DECL_KIND_ENUM                  = 2;
-  DECL_KIND_SERVICE               = 3;
-  // FlatBuffers
-  DECL_KIND_TABLE                 = 4;
-  DECL_KIND_STRUCT                = 5;
-  DECL_KIND_FBS_ENUM              = 6;
-  DECL_KIND_UNION                 = 7;
-  // OpenAPI
-  DECL_KIND_PATH_ITEM             = 8;
-  DECL_KIND_COMPONENT_SCHEMA      = 9;
-  DECL_KIND_COMPONENT_PARAMETER   = 10;
-  DECL_KIND_COMPONENT_RESPONSE    = 11;
-  DECL_KIND_COMPONENT_REQUEST_BODY = 12;
-  DECL_KIND_DOCUMENT_METADATA     = 13;
+  DECL_KIND_UNSPECIFIED            = 0;
+  DECL_KIND_MESSAGE               = 1;   DECL_KIND_ENUM = 2;   DECL_KIND_SERVICE = 3;          // Protobuf
+  DECL_KIND_TABLE                 = 4;   DECL_KIND_STRUCT = 5; DECL_KIND_FBS_ENUM = 6; DECL_KIND_UNION = 7;  // FlatBuffers
+  DECL_KIND_PATH_ITEM             = 8;   DECL_KIND_COMPONENT_SCHEMA = 9;
+  DECL_KIND_COMPONENT_PARAMETER   = 10;  DECL_KIND_COMPONENT_RESPONSE = 11;
+  DECL_KIND_COMPONENT_REQUEST_BODY = 12; DECL_KIND_DOCUMENT_METADATA  = 13;                    // OpenAPI
 }
+```
 
-enum Role {
-  ROLE_UNSPECIFIED  = 0;
-  ROLE_READER       = 1;
-  ROLE_WRITER       = 2;
-  ROLE_MAINTAINER   = 3;
-  ROLE_OWNER        = 4;
-}
+### 3.2 `resources.proto`
 
-enum Language {
-  LANGUAGE_UNSPECIFIED = 0;
-  LANGUAGE_RUST        = 1;
-  LANGUAGE_GO          = 2;
-  LANGUAGE_TYPESCRIPT  = 3;
-  LANGUAGE_PYTHON      = 4;
-  LANGUAGE_JAVA        = 5;
-}
-
-// ── Core resource types ───────────────────────────────────────────────────────
-
-// A commit in the version history.
+```proto
 message CommitInfo {
-  string hash                           = 1;
-  repeated string parent_hashes         = 2;
-  google.protobuf.Timestamp timestamp   = 3;
-  string author                         = 4;
-  string message                        = 5;
-  bool   force                          = 6;
-  string format_id                      = 7;  // "protobuf", "flatbuffers", "openapi"
+  string hash                          = 1;
+  repeated string parent_hashes        = 2;
+  google.protobuf.Timestamp timestamp  = 3;
+  string author                        = 4;
+  string message                       = 5;
+  bool   force                         = 6;
+  string format_id                     = 7;   // "protobuf" | "flatbuffers" | "openapi"
 }
 
-// A summary of one top-level declaration within a schema file.
-message DeclSummary {
-  string   name        = 1;  // e.g. "UserRequest", "path:/users", "schema:User"
-  DeclKind kind        = 2;
-  string   doc_comment = 3;  // first line of leading comment; empty if none
-}
+message DeclSummary { string name = 1; DeclKind kind = 2; string doc_comment = 3; }
+// name is the per-declaration key: "UserRequest" (proto/fbs) or "path:/users", "schema:User" (openapi).
 
-// A schema file within a repo.
-message SchemaInfo {
-  string       name      = 1;  // e.g. "user.proto"
-  SchemaFormat format    = 2;
-  string       head_blob = 3;  // hash of the schema tree at HEAD
-}
+message SchemaInfo  { string name = 1; SchemaFormat format = 2; string head_blob = 3; }
+message BranchInfo  { string project=1; string repo=2; string name=3; string head_commit=4; bool protected=5; }
+message TagInfo     { string project=1; string repo=2; string name=3; string commit_hash=4;
+                      bool annotated=5; string tagger=6; string message=7; google.protobuf.Timestamp timestamp=8; }
+```
 
-// A branch.
-message BranchInfo {
-  string project     = 1;
-  string repo        = 2;
-  string name        = 3;
-  string head_commit = 4;
-  bool   protected   = 5;
-}
+> **AS-BUILT** — `CommitInfo` is reconstructed from the operation-log-derived history (see §5.1); the server currently fills `hash`, `parent_hashes`, `author`, `message` and leaves `timestamp`/`force`/`format_id` empty when deriving from the log.
 
-// A tag.
-message TagInfo {
-  string project      = 1;
-  string repo         = 2;
-  string name         = 3;
-  string commit_hash  = 4;  // resolved commit (even for annotated tags)
-  bool   annotated    = 5;
-  string tagger       = 6;  // empty for lightweight tags
-  string message      = 7;  // empty for lightweight tags
-  google.protobuf.Timestamp timestamp = 8;
-}
+### 3.3 `refs.proto`
 
-// ── Version reference ─────────────────────────────────────────────────────────
-
-// A pointer to a specific point in history. Used in read RPCs to specify
-// which version to read.
+```proto
 message VersionRef {
-  oneof ref {
-    string branch = 1;  // resolves to HEAD of the branch at request time
-    string tag    = 2;  // resolves to the tagged commit
-    string commit = 3;  // pinned commit hash; never changes
+  oneof ref {                 // exactly one set
+    string branch = 1;        // HEAD of the bookmark at request time
+    string tag    = 2;        // the tagged commit
+    string commit = 3;        // pinned commit hash
   }
-}
-
-// ── Error detail types ────────────────────────────────────────────────────────
-// These are embedded in google.rpc.Status.details as google.protobuf.Any.
-
-// Returned when base_revision does not match current branch HEAD.
-// gRPC status: FAILED_PRECONDITION
-message ConflictDetail {
-  string current_head   = 1;  // what the branch is actually at
-  string provided_base  = 2;  // what the caller sent
-  string branch         = 3;
-}
-
-// One compatibility violation found by check_compatibility.
-message CompatibilityViolation {
-  string                 schema_path      = 1;
-  string                 declaration_name = 2;
-  string                 field_name       = 3;  // empty if declaration-level
-  string                 message          = 4;  // human-readable explanation
-  CompatibilityDirection direction        = 5;  // the direction that was violated
-}
-
-// Returned when compatibility check fails.
-// gRPC status: FAILED_PRECONDITION
-message CompatibilityError {
-  repeated CompatibilityViolation violations = 1;
-}
-
-// Returned when a mutation is rejected by the format validator.
-// gRPC status: INVALID_ARGUMENT
-message MutationValidationError {
-  string schema_path      = 1;
-  string declaration_name = 2;
-  string field_name       = 3;
-  string reason           = 4;
-}
-
-// Returned when a merge cannot fast-forward.
-// gRPC status: FAILED_PRECONDITION
-message MergeConflictDetail {
-  string source_branch      = 1;
-  string target_branch      = 2;
-  string diverged_at_commit = 3;  // the LCA
-  repeated string source_only_commits = 4;
-  repeated string target_only_commits = 5;
 }
 ```
 
+> **AS-BUILT — read-path resolution.** `Core`'s read/exploration/history/codegen paths resolve a `VersionRef` to a **bookmark name** (branch); unset defaults to `"main"`. Tag/commit refs are honored only where the bookmark namespace resolves them by name. Pinned-commit reads are not yet fully wired through exploration. (`server/src/services/exploration.rs`, `wire::version_ref_bookmark`.)
+
+### 3.4 `errors.proto` (structured `status.details`)
+
+`CompatibilityViolation` / `CompatibilityError` (compat failure → `FAILED_PRECONDITION`) and `MutationValidationError` (validator reject → `INVALID_ARGUMENT`) are the actively-used detail types. `ConflictDetail` and `MergeConflictDetail` are retained but vestigial under the jj model (§2.1).
+
 ---
 
-## 3. `mutations.proto` — Mutation Operation Types
+## 4. `mutations.proto` — Mutation Operation Types
+
+Granular, typed operations on one schema file. The compiler validates each against the real AST.
+
+### 4.1 `ProtobufMutation` (oneof `operation`)
+
+Field ops: `ProtoAddField`, `ProtoRemoveField` (auto-reserves number+name), `ProtoRenameField`, `ProtoChangeFieldType` (wire-type-compatible allowlist), `ProtoChangeFieldLabel`, `ProtoReorderFields`. Message ops: `ProtoAddMessage`, `ProtoRemoveMessage`, `ProtoRenameMessage`. Enum ops: `ProtoAddEnum`, `ProtoRemoveEnum`, `ProtoAddEnumValue`, `ProtoRemoveEnumValue`, `ProtoRenameEnumValue`. Service ops: `ProtoAddService`, `ProtoRemoveService`, `ProtoAddRpc`, `ProtoRemoveRpc`, `ProtoRenameRpc`. Import: `ProtoUpdateImport`. (Shapes unchanged from v1; see the proto for fields.)
+
+### 4.2 `FlatBuffersMutation` (oneof `operation`)
+
+Field ops: `FbsAddField` (always appended), `FbsDeprecateField`, `FbsRenameField` (rename is safe — wire identity is the slot index). `RemoveField`/`ReorderFields` are intentionally absent (always rejected). Table ops: `FbsAddTable`, `FbsRemoveTable`, `FbsRenameTable`. Enum: `FbsAddEnum`, `FbsAddEnumValue`. Union: `FbsAddUnion`, **`FbsAddUnionMember`**, **`FbsRemoveUnionMember`**. Import: `FbsUpdateImport`.
+
+> **AS-BUILT** — `FbsAddUnionMember` / `FbsRemoveUnionMember` are present in the implemented proto (not in the v1 design's union set).
+
+### 4.3 `OpenApiMutation` (oneof `operation`)
+
+The implemented OpenAPI surface is **broader than v1's whole-document-only design** — the compiler implements a handful of granular ops:
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
-// ── Protobuf mutations ────────────────────────────────────────────────────────
-
-// All Protobuf mutations on one schema file.
-message ProtobufMutation {
-  // The schema file to mutate, e.g. "user.proto"
-  string schema_path = 1;
-
-  oneof operation {
-    // Field mutations
-    ProtoAddField      add_field      = 2;
-    ProtoRemoveField   remove_field   = 3;
-    ProtoRenameField   rename_field   = 4;
-    ProtoChangeFieldType change_field_type = 5;
-    ProtoChangeFieldLabel change_field_label = 6;
-    ProtoReorderFields reorder_fields = 7;
-
-    // Message mutations
-    ProtoAddMessage    add_message    = 10;
-    ProtoRemoveMessage remove_message = 11;
-    ProtoRenameMessage rename_message = 12;
-
-    // Enum mutations
-    ProtoAddEnum       add_enum       = 20;
-    ProtoRemoveEnum    remove_enum    = 21;
-    ProtoAddEnumValue  add_enum_value = 22;
-    ProtoRemoveEnumValue remove_enum_value = 23;
-    ProtoRenameEnumValue rename_enum_value = 24;
-
-    // Service mutations
-    ProtoAddService    add_service    = 30;
-    ProtoRemoveService remove_service = 31;
-    ProtoAddRpc        add_rpc        = 32;
-    ProtoRemoveRpc     remove_rpc     = 33;
-    ProtoRenameRpc     rename_rpc     = 34;
-
-    // Import mutations
-    ProtoUpdateImport  update_import  = 40;
-  }
-}
-
-// ── Protobuf field mutations ──────────────────────────────────────────────────
-
-message ProtoAddField {
-  string message_name  = 1;  // the message to add a field to
-  string field_name    = 2;
-  // Fully qualified type name: "string", "int32", "bytes",
-  // or a message/enum type like "payments.v1.Currency".
-  string field_type    = 3;
-  uint32 field_number  = 4;  // must not be in use or reserved
-  bool   repeated      = 5;
-  string doc_comment   = 6;
-}
-
-message ProtoRemoveField {
-  string message_name = 1;
-  string field_name   = 2;
-  // Server automatically adds a reservation for this field's number and name.
-  // No separate ReserveField mutation is needed.
-}
-
-message ProtoRenameField {
-  string message_name   = 1;
-  string old_field_name = 2;
-  string new_field_name = 3;
-}
-
-message ProtoChangeFieldType {
-  string message_name = 1;
-  string field_name   = 2;
-  // Must be wire-type compatible per the allowlist in design.md Section 4.2.
-  // Cross-wire-type changes are rejected at validation time.
-  string new_type     = 3;
-}
-
-message ProtoChangeFieldLabel {
-  string message_name = 1;
-  string field_name   = 2;
-  // "optional" or "repeated". Changing from repeated to optional is breaking;
-  // the validator enforces compatibility rules.
-  string new_label    = 3;
-}
-
-message ProtoReorderFields {
-  string message_name        = 1;
-  // All field names in the desired new order. Must be a permutation of all
-  // current field names. Field numbers are unchanged by reordering.
-  repeated string field_order = 2;
-}
-
-// ── Protobuf message mutations ────────────────────────────────────────────────
-
-message ProtoAddMessage {
-  string message_name = 1;
-  string doc_comment  = 2;
-  // Fields are added via subsequent ProtoAddField mutations.
-}
-
-message ProtoRemoveMessage {
-  string message_name = 1;
-  // Rejected if any field in the same schema references this message type,
-  // unless --force is set.
-}
-
-message ProtoRenameMessage {
-  string old_name    = 1;
-  string new_name    = 2;
-  // Automatically updates all same-file references. Cross-file references
-  // are flagged; the caller must issue UpdateImport or update referencing schemas.
-}
-
-// ── Protobuf enum mutations ───────────────────────────────────────────────────
-
-message ProtoAddEnum {
-  string enum_name   = 1;
-  string doc_comment = 2;
-  // The first value added must have number 0 (proto3 requirement).
-}
-
-message ProtoRemoveEnum {
-  string enum_name = 1;
-}
-
-message ProtoAddEnumValue {
-  string enum_name   = 1;
-  string value_name  = 2;
-  int32  number      = 3;
-  string doc_comment = 4;
-}
-
-message ProtoRemoveEnumValue {
-  string enum_name  = 1;
-  string value_name = 2;
-}
-
-message ProtoRenameEnumValue {
-  string enum_name      = 1;
-  string old_value_name = 2;
-  string new_value_name = 3;
-}
-
-// ── Protobuf service mutations ────────────────────────────────────────────────
-
-message ProtoAddService {
-  string service_name = 1;
-  string doc_comment  = 2;
-}
-
-message ProtoRemoveService {
-  string service_name = 1;
-}
-
-message ProtoAddRpc {
-  string service_name    = 1;
-  string rpc_name        = 2;
-  // Fully qualified message names, e.g. "payments.v1.GetUserRequest"
-  string request_type    = 3;
-  string response_type   = 4;
-  bool   client_streaming = 5;
-  bool   server_streaming = 6;
-  string doc_comment     = 7;
-}
-
-message ProtoRemoveRpc {
-  string service_name = 1;
-  string rpc_name     = 2;
-}
-
-message ProtoRenameRpc {
-  string service_name = 1;
-  string old_rpc_name = 2;
-  string new_rpc_name = 3;
-}
-
-// ── Protobuf import mutations ─────────────────────────────────────────────────
-
-message ProtoUpdateImport {
-  // Logical path of the imported schema: "project/repo/schema.proto"
-  string import_path  = 1;
-  // Exactly one of the following must be set.
-  // If none are set, re-pins to the latest commit on the imported schema's default branch.
-  string to_commit    = 2;  // pin to a specific commit hash
-  string to_tag       = 3;  // pin to a specific tag name
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// FlatBuffers mutations
-// ═════════════════════════════════════════════════════════════════════════════
-
-message FlatBuffersMutation {
-  string schema_path = 1;  // e.g. "payments.fbs"
-
-  oneof operation {
-    // Field mutations (tables only)
-    FbsAddField      add_field      = 2;
-    FbsDeprecateField deprecate_field = 3;
-    FbsRenameField   rename_field   = 4;
-    // Note: RemoveField and ReorderFields are always rejected for FlatBuffers.
-
-    // Table mutations
-    FbsAddTable      add_table      = 10;
-    FbsRemoveTable   remove_table   = 11;
-    FbsRenameTable   rename_table   = 12;
-
-    // Enum mutations
-    FbsAddEnum       add_enum       = 20;
-    FbsAddEnumValue  add_enum_value = 21;
-
-    // Union mutations
-    FbsAddUnion      add_union      = 30;
-
-    // Import mutations
-    FbsUpdateImport  update_import  = 40;
-  }
-}
-
-// ── FlatBuffers field mutations ───────────────────────────────────────────────
-
-message FbsAddField {
-  string table_name    = 1;
-  string field_name    = 2;
-  // FlatBuffers scalar type or table/enum/union name.
-  // e.g. "string", "int32", "float64", "bool", "PaymentStatus", "[Order]"
-  string field_type    = 3;
-  // Default value for scalar fields only. Stored as string, parsed by the plugin.
-  // Fields at their default value are not written to the buffer.
-  string default_value = 4;
-  string doc_comment   = 5;
-  // The field is always appended at the end of the table (highest slot index).
-  // The caller cannot specify a position; the validator enforces this.
-}
-
-message FbsDeprecateField {
-  // Marks the field as deprecated. Its slot index is preserved.
-  // Use instead of RemoveField (which is permanently rejected for FlatBuffers).
-  string table_name = 1;
-  string field_name = 2;
-}
-
-message FbsRenameField {
-  // Safe: FlatBuffers wire identity is slot index, not name.
-  string table_name     = 1;
-  string old_field_name = 2;
-  string new_field_name = 3;
-}
-
-// ── FlatBuffers table mutations ───────────────────────────────────────────────
-
-message FbsAddTable {
-  string table_name  = 1;
-  string doc_comment = 2;
-  // Structs cannot be added via the mutation API; they are immutable once
-  // defined and should be included in CreateSchema / UpdateSchema source.
-}
-
-message FbsRemoveTable {
-  string table_name = 1;
-}
-
-message FbsRenameTable {
-  string old_name = 1;
-  string new_name = 2;
-}
-
-// ── FlatBuffers enum mutations ────────────────────────────────────────────────
-
-message FbsAddEnum {
-  string enum_name   = 1;
-  // The underlying integer type: "int8", "int16", "int32", "int64",
-  // "uint8", "uint16", "uint32", "uint64"
-  string base_type   = 2;
-  string doc_comment = 3;
-}
-
-message FbsAddEnumValue {
-  string enum_name   = 1;
-  string value_name  = 2;
-  int64  value       = 3;
-  string doc_comment = 4;
-}
-
-// ── FlatBuffers union mutations ───────────────────────────────────────────────
-
-message FbsAddUnion {
-  string          union_name   = 1;
-  repeated string member_types = 2;  // table names that are union members
-  string          doc_comment  = 3;
-}
-
-// ── FlatBuffers import mutations ──────────────────────────────────────────────
-
-message FbsUpdateImport {
-  string import_path = 1;  // "project/repo/schema.fbs"
-  string to_commit   = 2;
-  string to_tag      = 3;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// OpenAPI mutations (v1: whole-document only)
-// ═════════════════════════════════════════════════════════════════════════════
-
-// In v1, the only OpenAPI mutation is a whole-document push.
-// This is called internally by UpdateSchema; clients use UpdateSchema directly.
-// Granular operations (AddOperation, RemoveParameter, etc.) are deferred to v2.
 message OpenApiMutation {
-  string schema_path  = 1;
-  // Exactly one variant must be set.
+  string schema_path = 1;
   oneof operation {
-    OpenApiPushDocument push_document = 2;
+    OpenApiPushDocument          push_document            = 2;   // whole-document replace (used by UpdateSchema)
+    OpenApiAddPath               add_path                 = 10;
+    OpenApiRemovePath            remove_path              = 11;
+    OpenApiAddOperation          add_operation            = 20;
+    OpenApiRemoveOperation       remove_operation         = 21;
+    OpenApiAddComponentSchema    add_component_schema     = 30;
+    OpenApiRemoveComponentSchema remove_component_schema  = 31;
   }
-}
-
-message OpenApiPushDocument {
-  // Full YAML or JSON source text of the new document version.
-  string source = 1;
 }
 ```
 
+> **AS-BUILT** — the design (`design.md` §3.3, `openapi-ast.md`) says OpenAPI is whole-document-only in v1 with granular ops deferred. The implementation already ships these six granular ops (`compiler-openapi/src/operations.rs`, `lib.rs::apply_one`); any other granular op returns `MutationError::UnsupportedInV1`. They are reachable via `ApplyMutation` (`openapi_op`) — **but not via `ApplyTransaction`**, whose `TransactionOp` oneof carries only `protobuf_op` / `fbs_op`.
+
 ---
 
-## 4. `schema_service.proto` — Schema Lifecycle and Mutations
+## 5. `ref_service.proto` — Commits, Diff, Branches (== Bookmarks), Tags, Merge
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
+service RefService {
+  rpc GetCommit(GetCommitRequest)       returns (GetCommitResponse);
+  rpc ListCommits(ListCommitsRequest)   returns (stream CommitInfo);   // newest first
+  rpc Diff(DiffRequest)                 returns (DiffResponse);
 
-import "schemahub/v1/common.proto";
-import "schemahub/v1/mutations.proto";
+  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
+  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse); // UNIMPLEMENTED
+  rpc ListBranches(ListBranchesRequest) returns (ListBranchesResponse);
+  rpc GetBranch(GetBranchRequest)       returns (GetBranchResponse);
 
+  rpc CreateTag(CreateTagRequest)       returns (CreateTagResponse);
+  rpc DeleteTag(DeleteTagRequest)       returns (DeleteTagResponse);    // UNIMPLEMENTED
+  rpc ListTags(ListTagsRequest)         returns (ListTagsResponse);
+
+  rpc Merge(MergeRequest)               returns (MergeResponse);        // fast-forward only
+}
+```
+
+A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService` is the compatibility-shaped face of bookmark operations. Handler: `server/src/services/bookmark.rs`.
+
+### 5.1 Commits & Diff (AS-BUILT — derived from the op log)
+
+- **`ListCommits`** streams `CommitInfo` newest-first. **AS-BUILT:** the implementation derives the commit list from the operation-log-based `Core::log`, then reverses; `from`/`stop_at_commit`/`schema_path` filters in the request are accepted but not yet applied.
+- **`GetCommit`** finds the matching entry in that derived log; `NOT_FOUND` if absent.
+- **`Diff`** computes a per-declaration semantic diff between `base` and `head` refs. Returns `DeclarationChange { change_type: "added"|"removed"|"modified", decl_name, detail }`; `detail` carries format-specific bytes only for `"modified"` (empty for add/remove). When `schema_path` is empty, it diffs the union of schema files present on either side.
+
+### 5.2 Branches (bookmarks)
+
+- **`CreateBranch`** creates a bookmark from `from` (default `"main"`); returns `BranchInfo` (`protected` is always reported `false` — protection lives in repo config, §8).
+- **`ListBranches`** / **`GetBranch`** enumerate bookmarks (optional `name_prefix`), reporting each bookmark's first target as `head_commit`.
+- **`DeleteBranch`** → **UNIMPLEMENTED** (`Status::unimplemented`): "branch deletion is not exposed by the VCS layer in v1."
+
+### 5.3 Tags
+
+- **`CreateTag`** points a tag at `target` (default `"main"`); `annotated` is set when `message` is non-empty.
+- **`ListTags`** enumerates tags (optional `name_prefix`).
+- **`DeleteTag`** → **UNIMPLEMENTED**: "tag deletion is not exposed by the VCS layer in v1."
+
+### 5.4 Merge
+
+`Merge(source_branch → target_branch)` returns the commit `target_branch` points to afterward. **AS-BUILT:** fast-forward style via `Core::merge`; `base_revision`/`idempotency_key`/`message` are accepted. Under the jj model, an unmergeable case surfaces as conflicts on the affected declarations rather than a `MergeConflictDetail` error.
+
+---
+
+## 6. `history_service.proto` — Operation Log, Undo, Conflicts (NEW in v2)
+
+This service did not exist in v1; it is the wire surface for the jj operation log and first-class conflicts. Handler: `server/src/services/history.rs`.
+
+```proto
+service HistoryService {
+  rpc Log(LogRequest)                     returns (LogResponse);             // commit/change graph
+  rpc OpLog(OpLogRequest)                 returns (OpLogResponse);           // operation log (audit)
+  rpc Undo(UndoRequest)                   returns (UndoResponse);            // undo last operation
+  rpc RenderConflict(RenderConflictRequest)   returns (RenderConflictResponse);
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+}
+```
+
+### 6.1 `Log` — commit/change history
+
+`LogRequest { project, repo }` → `LogResponse { repeated LogEntry }`, where:
+
+```proto
+message LogEntry { string commit_id=1; string change_id=2; repeated string parents=3;
+                   string author=4; string message=5; string timestamp=6; }
+```
+
+Each entry exposes both the **`commit_id`** and the stable **`change_id`**. Ordered oldest→newest along the parent chain.
+
+### 6.2 `OpLog` — the audit record
+
+`OpLogRequest { project, repo }` → `OpLogResponse { repeated OperationRecord }`:
+
+```proto
+message OperationRecord { string op_id=1; repeated string parents=2;
+                          string description=3; string author=4; string timestamp=5; }
+```
+
+Every schemahub write (mutation, transaction, bookmark move, tag, undo, …) is one operation. Newest last.
+
+### 6.3 `Undo`
+
+`UndoRequest { project, repo, author }` → `UndoResponse { undone_op_id }`. Restores the repo to the parent operation's view. Undo is itself an append-only operation. `author` defaults to `"schemahub"` when empty.
+
+### 6.4 `RenderConflict` — inspect competing sides
+
+`RenderConflictRequest { project, repo, schema_path, declaration_name, VersionRef at }` → `RenderConflictResponse { rendered }`. `rendered` is a human/agent-readable view of the conflicting sides (e.g. `base` / `side 0` / `side 1` fragments via `Compiler::render_conflict`). Returns `FAILED_PRECONDITION` if the declaration is not conflicted. `at` is resolved to a bookmark for the read (default `"main"`).
+
+### 6.5 `ResolveConflict` — submit a resolution
+
+```proto
+message ResolveConflictRequest {
+  string project=1; string repo=2; string bookmark=3;
+  string schema_path=4; string declaration_name=5;
+  string resolved_source=6;   // full source of the schema FILE containing the resolved decl
+  string author=7; string message=8;
+}
+message ResolveConflictResponse { string new_commit=1; string change_id=2; }
+```
+
+**AS-BUILT:** the client submits the **full source** of the schema file; the server parses it with the compiler selected by file extension, extracts the named declaration's blob, validates it (`Compiler::validate_resolution`), and commits the resolution as one operation. `INVALID_ARGUMENT` if the resolved source does not define `declaration_name`.
+
+---
+
+## 7. `schema_service.proto` — Schema Lifecycle and Mutations
+
+```proto
 service SchemaService {
-  // ── Schema lifecycle ────────────────────────────────────────────────────────
-  // Create a new schema file on a branch.
-  // Returns ALREADY_EXISTS if the schema name exists on the branch.
-  rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
-
-  // Update an existing schema (whole-document push for all formats;
-  // also the only update path for OpenAPI in v1).
-  // Returns NOT_FOUND if the schema does not exist.
-  // Runs compatibility check if the branch is protected.
-  rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
-
-  // Delete a schema from a branch. Rejected if other schemas on the same branch
-  // import it, unless --force is set.
-  rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
-
-  // ── Mutations ───────────────────────────────────────────────────────────────
-  // Apply a single granular mutation to one declaration.
-  rpc ApplyMutation(ApplyMutationRequest) returns (ApplyMutationResponse);
-
-  // Apply a sequence of mutations across one or more schemas atomically.
-  // All schemas in one transaction must use the same format.
-  // Limits: ≤ 500 operations, ≤ 20 schemas, 30-second server-side timeout.
+  rpc CreateSchema(CreateSchemaRequest)         returns (CreateSchemaResponse);
+  rpc UpdateSchema(UpdateSchemaRequest)         returns (UpdateSchemaResponse);
+  rpc DeleteSchema(DeleteSchemaRequest)         returns (DeleteSchemaResponse);
+  rpc ApplyMutation(ApplyMutationRequest)       returns (ApplyMutationResponse);
   rpc ApplyTransaction(ApplyTransactionRequest) returns (ApplyTransactionResponse);
 }
-
-// ── CreateSchema ──────────────────────────────────────────────────────────────
-
-message CreateSchemaRequest {
-  string       project     = 1;
-  string       repo        = 2;
-  string       branch      = 3;
-  string       schema_name = 4;  // e.g. "user.proto"
-  SchemaFormat format      = 5;  // required; server does not infer from content
-  string       source      = 6;  // full source text
-  string       base_revision    = 7;  // current HEAD commit hash (OCC)
-  string       idempotency_key  = 8;
-}
-
-message CreateSchemaResponse {
-  string new_commit = 1;  // hash of the commit created
-}
-
-// ── UpdateSchema ──────────────────────────────────────────────────────────────
-
-message UpdateSchemaRequest {
-  string project         = 1;
-  string repo            = 2;
-  string branch          = 3;
-  string schema_name     = 4;
-  string source          = 5;  // full source text of the new version
-  string base_revision   = 6;
-  string idempotency_key = 7;
-  bool   force           = 8;  // skip compatibility check; requires Maintainer role
-}
-
-message UpdateSchemaResponse {
-  string new_commit = 1;
-}
-
-// ── DeleteSchema ──────────────────────────────────────────────────────────────
-
-message DeleteSchemaRequest {
-  string project         = 1;
-  string repo            = 2;
-  string branch          = 3;
-  string schema_name     = 4;
-  string base_revision   = 5;
-  string idempotency_key = 6;
-  bool   force           = 7;  // delete even if dependents exist
-}
-
-message DeleteSchemaResponse {
-  string new_commit = 1;
-}
-
-// ── ApplyMutation ─────────────────────────────────────────────────────────────
-
-message ApplyMutationRequest {
-  string project         = 1;
-  string repo            = 2;
-  string branch          = 3;
-  string base_revision   = 4;
-  string idempotency_key = 5;
-  bool   force           = 6;
-  oneof operation {
-    ProtobufMutation    protobuf_op = 7;
-    FlatBuffersMutation fbs_op      = 8;
-    OpenApiMutation     openapi_op  = 9;
-  }
-}
-
-message ApplyMutationResponse {
-  string new_commit = 1;
-}
-
-// ── ApplyTransaction ──────────────────────────────────────────────────────────
-
-message ApplyTransactionRequest {
-  string project         = 1;
-  string repo            = 2;
-  string branch          = 3;
-  string base_revision   = 4;
-  string idempotency_key = 5;
-  bool   force           = 6;
-  // All operations must target the same format.
-  // Mixed-format transactions are rejected with INVALID_ARGUMENT.
-  repeated TransactionOp operations = 7;
-}
-
-// One operation within a transaction. The oneof mirrors ApplyMutationRequest
-// but without the top-level fields (project, repo, branch) which are shared.
-message TransactionOp {
-  oneof operation {
-    ProtobufMutation    protobuf_op = 1;
-    FlatBuffersMutation fbs_op      = 2;
-    // OpenApi granular ops are v2; use UpdateSchema for OpenAPI in v1.
-  }
-}
-
-message ApplyTransactionResponse {
-  string new_commit = 1;
-}
 ```
+
+All requests carry `project`, `repo`, `branch` (the bookmark), plus `base_revision` (advisory, §2.1) and `idempotency_key` (RPC-edge dedupe). Handler: `server/src/services/schema.rs`.
+
+### 7.1 Lifecycle (`CreateSchema` / `UpdateSchema` / `DeleteSchema`)
+
+All three are **format-agnostic, whole-document** and share one mechanism: the server picks the compiler from the schema-file extension, `parse`s `source` into per-declaration objects, diffs against the current content of that file, and commits a `MutationEffect` (upsert every new decl + meta, remove dropped decls). `DeleteSchema` empties the file's subtree.
+
+- `CreateSchemaRequest`: `project, repo, branch, schema_name, SchemaFormat format, source, base_revision, idempotency_key`.
+- `UpdateSchemaRequest`: adds `force` (skip the compatibility gate on a protected bookmark; requires Maintainer+).
+- `DeleteSchemaRequest`: adds `force` (delete even if dependents exist).
+- Responses: `Create`/`Update` → `{ new_commit, change_id, conflicted_decls }`; `Delete` → `{ new_commit, change_id }`.
+
+> **AS-BUILT** — the create path tolerates a missing base bookmark (first write may create the bookmark): it loads the base schema with `unwrap_or_default()`. There is no separate "branch already exists" pre-check on create.
+
+### 7.2 `ApplyMutation` — one granular edit
+
+`ApplyMutationRequest { project, repo, branch, base_revision, idempotency_key, force, oneof { protobuf_op | fbs_op | openapi_op } }` → `{ new_commit, change_id, conflicted_decls }`. The op is decoded to the internal `Mutation` and run through `Core::apply_mutation` (auth + compatibility gate, then a jj transaction).
+
+### 7.3 `ApplyTransaction` — atomic batch
+
+`ApplyTransactionRequest { …, repeated TransactionOp operations }` applies an ordered batch in **one** commit / one operation; compatibility + reference integrity are checked on the **final** state. `TransactionOp` carries only `protobuf_op` | `fbs_op` (OpenAPI granular ops are not transactionable — §4.3). Empty `operations` → `INVALID_ARGUMENT`.
+
+> **AS-BUILT — limits.** The proto comment says ≤500 ops / ≤20 schemas / 30 s. `AdminService.GetServerConfig` actually reports `max_ops_per_transaction = 100`, `max_schemas_per_transaction = 1`, `transaction_timeout_secs = 30`. Treat the served config as authoritative.
 
 ---
 
-## 5. `ref_service.proto` — Version Control
+## 8. `exploration_service.proto` — Read API
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
-import "google/protobuf/timestamp.proto";
-import "schemahub/v1/common.proto";
-
-service RefService {
-  // ── Commits ─────────────────────────────────────────────────────────────────
-  rpc GetCommit(GetCommitRequest) returns (GetCommitResponse);
-  // Streams commits in reverse chronological order (newest first).
-  // Terminate the stream when the client has received enough (standard gRPC cancellation).
-  rpc ListCommits(ListCommitsRequest) returns (stream CommitInfo);
-  // Returns the semantic diff between two refs (or two commits).
-  rpc Diff(DiffRequest) returns (DiffResponse);
-
-  // ── Branches ────────────────────────────────────────────────────────────────
-  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
-  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse);
-  rpc ListBranches(ListBranchesRequest) returns (ListBranchesResponse);
-  rpc GetBranch(GetBranchRequest) returns (GetBranchResponse);
-
-  // ── Tags ─────────────────────────────────────────────────────────────────────
-  rpc CreateTag(CreateTagRequest) returns (CreateTagResponse);
-  rpc DeleteTag(DeleteTagRequest) returns (DeleteTagResponse);
-  rpc ListTags(ListTagsRequest) returns (ListTagsResponse);
-
-  // ── Merge ────────────────────────────────────────────────────────────────────
-  // Fast-forward merge only in v1.
-  // Returns MergeConflictDetail in status.details if not fast-forwardable.
-  rpc Merge(MergeRequest) returns (MergeResponse);
-}
-
-// ── Commits ───────────────────────────────────────────────────────────────────
-
-message GetCommitRequest {
-  string project = 1;
-  string repo    = 2;
-  string commit  = 3;  // commit hash
-}
-
-message GetCommitResponse {
-  CommitInfo commit = 1;
-}
-
-message ListCommitsRequest {
-  string     project = 1;
-  string     repo    = 2;
-  VersionRef from    = 3;  // start walking from here (default: HEAD of default branch)
-  // Optional: stop when this ref is reached (exclusive). Used to list only the
-  // commits on a feature branch: from=feature/xyz, stop_at=main.
-  string     stop_at_commit = 4;
-  // Optional: filter to commits that touched a specific schema file.
-  string     schema_path    = 5;
-}
-// Response: stream of CommitInfo, newest first.
-
-message DiffRequest {
-  string project = 1;
-  string repo    = 2;
-  // Two sides of the diff. Typically "base" is main and "head" is a feature branch.
-  VersionRef base = 3;
-  VersionRef head = 4;
-  // Optional: restrict diff to one schema file.
-  string schema_path = 5;
-}
-
-message DiffResponse {
-  repeated SchemaDiff schema_diffs = 1;
-}
-
-message SchemaDiff {
-  string schema_path   = 1;
-  // Each entry is a DeclarationChange for one top-level declaration.
-  repeated DeclarationChange changes = 2;
-}
-
-message DeclarationChange {
-  string change_type = 1;  // "added", "removed", "modified"
-  string decl_name   = 2;
-  // Format-specific change detail, opaque to the client UI layer.
-  // Deserialize with the appropriate client-side plugin library.
-  bytes  detail      = 3;
-}
-
-// ── Branches ──────────────────────────────────────────────────────────────────
-
-message CreateBranchRequest {
-  string project   = 1;
-  string repo      = 2;
-  string name      = 3;
-  // Start the branch from this ref. Defaults to the default branch HEAD.
-  VersionRef from  = 4;
-}
-
-message CreateBranchResponse {
-  BranchInfo branch = 1;
-}
-
-message DeleteBranchRequest {
-  string project = 1;
-  string repo    = 2;
-  string name    = 3;
-  // Protected branches cannot be deleted; returns FAILED_PRECONDITION.
-}
-
-message DeleteBranchResponse {}
-
-message ListBranchesRequest {
-  string project      = 1;
-  string repo         = 2;
-  string name_prefix  = 3;  // optional filter; e.g. "feature/" to list feature branches
-}
-
-message ListBranchesResponse {
-  repeated BranchInfo branches = 1;
-}
-
-message GetBranchRequest {
-  string project = 1;
-  string repo    = 2;
-  string name    = 3;
-}
-
-message GetBranchResponse {
-  BranchInfo branch = 1;
-}
-
-// ── Tags ──────────────────────────────────────────────────────────────────────
-
-message CreateTagRequest {
-  string     project  = 1;
-  string     repo     = 2;
-  string     name     = 3;
-  VersionRef target   = 4;  // commit/branch/tag to tag
-  // If message is set, an annotated tag object is created.
-  // If message is empty, a lightweight tag (ref only) is created.
-  string     message  = 5;
-}
-
-message CreateTagResponse {
-  TagInfo tag = 1;
-}
-
-message DeleteTagRequest {
-  string project = 1;
-  string repo    = 2;
-  string name    = 3;
-  // Requires --force equivalent (force=true) because tags are immutable.
-  // Returns FAILED_PRECONDITION if force is not set.
-  bool   force   = 4;
-}
-
-message DeleteTagResponse {}
-
-message ListTagsRequest {
-  string project     = 1;
-  string repo        = 2;
-  string name_prefix = 3;
-}
-
-message ListTagsResponse {
-  repeated TagInfo tags = 1;
-}
-
-// ── Merge ─────────────────────────────────────────────────────────────────────
-
-message MergeRequest {
-  string project         = 1;
-  string repo            = 2;
-  string source_branch   = 3;  // the branch to merge in
-  string target_branch   = 4;  // the branch to merge into
-  string base_revision   = 5;  // current HEAD of target_branch (OCC)
-  string idempotency_key = 6;
-  string message         = 7;  // optional; used in commit message if a merge commit is created
-}
-
-message MergeResponse {
-  // The commit that target_branch now points to after the merge.
-  // For fast-forward: this is the former HEAD of source_branch.
-  string new_commit = 1;
-}
-```
-
----
-
-## 6. `exploration_service.proto` — Read API
-
-```proto
-syntax = "proto3";
-package schemahub.v1;
-
-import "schemahub/v1/common.proto";
-
 service ExplorationService {
-  // List all schema files in a repo at a given ref.
-  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
-
-  // List all top-level declarations in a schema file.
-  rpc ListDeclarations(ListDeclarationsRequest) returns (ListDeclarationsResponse);
-
-  // Return full detail for one named declaration.
-  rpc GetDeclaration(GetDeclarationRequest) returns (GetDeclarationResponse);
-
-  // Follow a field's type reference, potentially crossing import boundaries.
-  rpc FollowType(FollowTypeRequest) returns (FollowTypeResponse);
-
-  // List all schemas imported by a schema, at their pinned resolved_commit.
-  rpc ListDependencies(ListDependenciesRequest) returns (ListDependenciesResponse);
-
-  // Search for declarations by name across schemas and repos.
-  rpc Search(SearchRequest) returns (SearchResponse);
-}
-
-// ── ListSchemas ───────────────────────────────────────────────────────────────
-
-message ListSchemasRequest {
-  string     project = 1;
-  string     repo    = 2;
-  VersionRef at      = 3;  // defaults to HEAD of default branch
-}
-
-message ListSchemasResponse {
-  repeated SchemaInfo schemas = 1;
-}
-
-// ── ListDeclarations ──────────────────────────────────────────────────────────
-
-message ListDeclarationsRequest {
-  string     project     = 1;
-  string     repo        = 2;
-  string     schema_path = 3;  // e.g. "user.proto"
-  VersionRef at          = 4;
-  // Optional: filter by kind.
-  DeclKind   kind_filter = 5;
-}
-
-message ListDeclarationsResponse {
-  repeated DeclSummary declarations = 1;
-}
-
-// ── GetDeclaration ────────────────────────────────────────────────────────────
-
-message GetDeclarationRequest {
-  string     project          = 1;
-  string     repo             = 2;
-  string     schema_path      = 3;
-  string     declaration_name = 4;  // e.g. "UserRequest", "path:/users"
-  VersionRef at               = 5;
-}
-
-message GetDeclarationResponse {
-  DeclSummary summary    = 1;
-  // Full detail as format-specific bytes. The client-side plugin library
-  // deserializes this for display. The CLI renders it as human-readable text.
-  bytes       detail     = 2;
-  // The commit hash that was actually resolved (useful when `at` was a branch name).
-  string      at_commit  = 3;
-}
-
-// ── FollowType ────────────────────────────────────────────────────────────────
-
-message FollowTypeRequest {
-  string     project          = 1;
-  string     repo             = 2;
-  string     schema_path      = 3;
-  string     declaration_name = 4;  // the declaration containing the field
-  string     field_name       = 5;  // the field whose type to follow
-  VersionRef at               = 6;
-}
-
-message FollowTypeResponse {
-  // The schema and declaration where the field's type is defined.
-  // May be in a different project/repo (cross-repo import).
-  string resolved_project     = 1;
-  string resolved_repo        = 2;
-  string resolved_schema_path = 3;
-  string resolved_commit      = 4;  // the pinned import commit that was followed
-  DeclSummary summary         = 5;
-  bytes       detail          = 6;
-}
-
-// ── ListDependencies ──────────────────────────────────────────────────────────
-
-message ListDependenciesRequest {
-  string     project     = 1;
-  string     repo        = 2;
-  string     schema_path = 3;
-  VersionRef at          = 4;
-  // If true, return the transitive closure (all transitive imports).
-  // If false (default), return only direct imports.
-  bool       transitive  = 5;
-}
-
-message ListDependenciesResponse {
-  repeated DependencyEntry dependencies = 1;
-}
-
-message DependencyEntry {
-  string importing_schema  = 1;
-  string importing_decl    = 2;
-  string imported_project  = 3;
-  string imported_repo     = 4;
-  string imported_schema   = 5;
-  string imported_decl     = 6;
-  string resolved_commit   = 7;  // the pinned commit hash
-}
-
-// ── Search ────────────────────────────────────────────────────────────────────
-
-message SearchRequest {
-  string   query   = 1;  // declaration name prefix to search for
-  // Optional scope filters. If omitted, searches all projects/repos visible to caller.
-  string   project = 2;
-  string   repo    = 3;
-  DeclKind kind    = 4;  // filter by kind; UNSPECIFIED = all kinds
-  uint32   limit   = 5;  // max results; default 50, max 200
-}
-
-message SearchResponse {
-  repeated SearchResult results = 1;
-}
-
-message SearchResult {
-  string      project     = 1;
-  string      repo        = 2;
-  string      schema_path = 3;
-  DeclSummary declaration = 4;
+  rpc ListSchemas(...)       returns (...);   // schema files at a ref
+  rpc ListDeclarations(...)  returns (...);   // per-declaration summaries in a file
+  rpc GetDeclaration(...)    returns (...);   // one decl → summary + format-specific detail bytes
+  rpc GetSchemaSource(...)   returns (...);   // AS-BUILT: source text for a schema file
+  rpc FollowType(...)        returns (...);
+  rpc ListDependencies(...)  returns (...);
+  rpc Search(...)            returns (...);
 }
 ```
 
+Per-declaration storage makes each read a direct object lookup. Handler: `server/src/services/exploration.rs`. All take a `VersionRef at` resolved to a bookmark (default `"main"`).
+
+- **`GetDeclaration`** returns `DeclSummary summary` + `bytes detail` (the compiler's `DeclDetail` rendering) + `at_commit`. `declaration_name` is the per-declaration key (`"UserRequest"`, `"path:/users"`, `"schema:User"`, …).
+- **`GetSchemaSource`** (`get_schema_source`) returns the schema file's source as bytes + `at_commit`. **AS-BUILT** — this RPC exists in the implemented proto and maps to `Core::get_schema_source`; it was not in the v1 doc's exploration service.
+- **`Search`** — **AS-BUILT:** repo-scoped. The server requires non-empty `project` and `repo` and searches at `"main"`; cross-repo search returns `INVALID_ARGUMENT` ("cross-repo search is v2").
+- **`FollowType`** — **AS-BUILT, partial:** resolves a declaration's type refs against file imports and reports the first matching import's `resolved_schema_path` + `resolved_commit`, else echoes the request schema; `summary`/`detail` are currently left empty.
+- **`ListDependencies`** — **AS-BUILT:** for OpenAPI, document-level imports are empty (external `$ref` imports are v2-modeled), so dependency lists come from the compiler's `imports(meta)`.
+
 ---
 
-## 7. `codegen_service.proto` — Descriptors and Code Generation
+## 9. `codegen_service.proto` — Descriptors and Preview
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
-import "schemahub/v1/common.proto";
-
 service CodegenService {
-  // Returns the schema in its native descriptor format, reconstructed from
-  // the AST. Includes all transitive imports.
-  //   Protobuf    → serialized FileDescriptorSet (binary proto)
-  //   FlatBuffers → bundle of reconstructed .fbs source files (as a tar archive)
-  //   OpenAPI     → resolved YAML document with all $ref inlined
   rpc GetDescriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
-
-  // Renders generated code for a given language server-side.
-  // No files written; response contains the rendered source text.
-  // Returns UNIMPLEMENTED for language/format combinations not yet supported.
   rpc PreviewCodegen(PreviewCodegenRequest) returns (PreviewCodegenResponse);
 }
-
-message GetDescriptorsRequest {
-  string     project     = 1;
-  string     repo        = 2;
-  string     schema_path = 3;
-  VersionRef at          = 4;
-}
-
-message GetDescriptorsResponse {
-  // The raw descriptor artifact bytes.
-  // Consumers should use the format field to interpret the bytes correctly.
-  bytes        descriptor_bytes = 1;
-  SchemaFormat format           = 2;
-  // The commit that was actually resolved.
-  string       at_commit        = 3;
-}
-
-message PreviewCodegenRequest {
-  string     project     = 1;
-  string     repo        = 2;
-  string     schema_path = 3;
-  VersionRef at          = 4;
-  Language   language    = 5;
-}
-
-message PreviewCodegenResponse {
-  // Generated source text. For multi-file outputs, this is a tar archive.
-  // Single-file outputs (e.g. a single .rs file) are returned directly as UTF-8.
-  bytes  content       = 1;
-  bool   is_archive    = 2;   // true if content is a tar archive
-  string at_commit     = 3;
-}
 ```
+
+- **`GetDescriptors`** reconstructs the native descriptor artifact from the AST closure: Protobuf → `FileDescriptorSet` bytes; FlatBuffers → reconstructed `.fbs`; OpenAPI → resolved YAML (multi-document stream for multi-file closures). Response: `{ descriptor_bytes, SchemaFormat format, at_commit }`. **AS-BUILT** — `format` is derived from the schema-file extension; `at_commit` is currently left empty.
+- **`PreviewCodegen`** renders generated source for a `Language`. Response `{ bytes content, bool is_archive, at_commit }`; `is_archive` is currently always `false`. Unsupported language/format → `UNIMPLEMENTED` (e.g. OpenAPI `generate_code` returns `UnsupportedLanguage`).
 
 ---
 
-## 8. `project_service.proto` — Projects, Repos, and ACL
+## 10. `project_service.proto` — Projects, Repos, Members
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
-import "schemahub/v1/common.proto";
-
 service ProjectService {
-  // ── Projects ─────────────────────────────────────────────────────────────────
-  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
-  rpc GetProject(GetProjectRequest)       returns (GetProjectResponse);
-  rpc ListProjects(ListProjectsRequest)   returns (ListProjectsResponse);
-  rpc DeleteProject(DeleteProjectRequest) returns (DeleteProjectResponse);
-
-  // ── Repos ────────────────────────────────────────────────────────────────────
-  rpc CreateRepo(CreateRepoRequest) returns (CreateRepoResponse);
-  rpc GetRepo(GetRepoRequest)       returns (GetRepoResponse);
-  rpc UpdateRepo(UpdateRepoRequest) returns (UpdateRepoResponse);
-  rpc ListRepos(ListReposRequest)   returns (ListReposResponse);
-  rpc DeleteRepo(DeleteRepoRequest) returns (DeleteRepoResponse);
-
-  // ── Members and ACL ───────────────────────────────────────────────────────────
-  rpc AddMember(AddMemberRequest)         returns (AddMemberResponse);
-  rpc RemoveMember(RemoveMemberRequest)   returns (RemoveMemberResponse);
-  rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (UpdateMemberRoleResponse);
-  rpc ListMembers(ListMembersRequest)     returns (ListMembersResponse);
-}
-
-// ── Project messages ──────────────────────────────────────────────────────────
-
-message ProjectInfo {
-  string name       = 1;
-  bool   is_public  = 2;  // public projects: read RPCs require no auth
-  string owner      = 3;  // identity of the Owner role member
-}
-
-message CreateProjectRequest {
-  string name      = 1;
-  bool   is_public = 2;
-}
-
-message CreateProjectResponse {
-  ProjectInfo project = 1;
-}
-
-message GetProjectRequest {
-  string name = 1;
-}
-
-message GetProjectResponse {
-  ProjectInfo project = 1;
-}
-
-message ListProjectsRequest {
-  // If empty, returns all projects visible to the caller.
-  string name_prefix = 1;
-}
-
-message ListProjectsResponse {
-  repeated ProjectInfo projects = 1;
-}
-
-message DeleteProjectRequest {
-  string name = 1;
-  // Requires Owner role. Fails if the project has repos unless force=true.
-  bool   force = 2;
-}
-
-message DeleteProjectResponse {}
-
-// ── Repo messages ─────────────────────────────────────────────────────────────
-
-message RepoConfig {
-  string                 project                  = 1;
-  string                 name                     = 2;
-  string                 default_branch           = 3;  // e.g. "main"
-  CompatibilityDirection compatibility_direction  = 4;
-  repeated string        protected_branches       = 5;  // supports glob patterns
-}
-
-message CreateRepoRequest {
-  string                 project                 = 1;
-  string                 name                    = 2;
-  string                 default_branch          = 3;  // default: "main"
-  CompatibilityDirection compatibility_direction = 4;  // default: FULL
-  repeated string        protected_branches      = 5;  // default: ["main"]
-}
-
-message CreateRepoResponse {
-  RepoConfig repo = 1;
-}
-
-message GetRepoRequest {
-  string project = 1;
-  string repo    = 2;
-}
-
-message GetRepoResponse {
-  RepoConfig repo = 1;
-}
-
-message UpdateRepoRequest {
-  string                 project                 = 1;
-  string                 repo                    = 2;
-  // Only set fields that should change.
-  CompatibilityDirection compatibility_direction = 3;
-  repeated string        protected_branches      = 4;  // full replacement; empty = no change
-  string                 default_branch          = 5;
-}
-
-message UpdateRepoResponse {
-  RepoConfig repo = 1;
-}
-
-message ListReposRequest {
-  string project     = 1;
-  string name_prefix = 2;
-}
-
-message ListReposResponse {
-  repeated RepoConfig repos = 1;
-}
-
-message DeleteRepoRequest {
-  string project = 1;
-  string repo    = 2;
-  // Fails if the repo has schemas unless force=true.
-  bool   force   = 3;
-}
-
-message DeleteRepoResponse {}
-
-// ── Member/ACL messages ───────────────────────────────────────────────────────
-
-message MemberEntry {
-  string identity = 1;  // user identifier (opaque string; format depends on AuthnProvider)
-  Role   role     = 2;
-}
-
-message AddMemberRequest {
-  string   project  = 1;
-  string   identity = 2;
-  Role     role     = 3;
-}
-
-message AddMemberResponse {
-  MemberEntry member = 1;
-}
-
-message RemoveMemberRequest {
-  string project  = 1;
-  string identity = 2;
-}
-
-message RemoveMemberResponse {}
-
-message UpdateMemberRoleRequest {
-  string project  = 1;
-  string identity = 2;
-  Role   new_role = 3;
-}
-
-message UpdateMemberRoleResponse {
-  MemberEntry member = 1;
-}
-
-message ListMembersRequest {
-  string project = 1;
-}
-
-message ListMembersResponse {
-  repeated MemberEntry members = 1;
+  rpc CreateProject / GetProject / ListProjects / DeleteProject
+  rpc CreateRepo / GetRepo / UpdateRepo / ListRepos / DeleteRepo
+  rpc AddMember / RemoveMember / UpdateMemberRole / ListMembers
 }
 ```
 
+> **AS-BUILT — projects/repos are implicit in the jj model.** A `(project, repo)` springs into existence on first write (its op-log/bookmark set is created lazily). There is no persisted project/repo registry yet, so the handlers (`server/src/services/project.rs`) are thin:
+
+| RPC | Behavior |
+|-----|----------|
+| `CreateProject`, `GetProject` | echo back the requested `ProjectInfo` (`Get` reports `is_public = true`) |
+| `CreateRepo`, `GetRepo`, `UpdateRepo` | echo back a `RepoConfig` with defaults (`default_branch="main"`, `protected_branches=["main"]`, direction `FULL`) |
+| `ListProjects`, `ListRepos`, `ListMembers` | return empty lists (no registry) |
+| `DeleteProject`, `DeleteRepo` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1" |
+| `AddMember`, `RemoveMember`, `UpdateMemberRole` | **UNIMPLEMENTED** — "member management requires the RBAC layer (deferred; Noop auth ships by default)" |
+
+`RepoConfig` (`compatibility_direction`, `protected_branches`) is the home of the compatibility-protection policy (`design.md` §7) — but is not yet persisted/enforced server-side beyond the echoed defaults.
+
 ---
 
-## 9. `admin_service.proto` — Operational RPCs
+## 11. `admin_service.proto` — Operational RPCs
 
 ```proto
-syntax = "proto3";
-package schemahub.v1;
-
 service AdminService {
-  // Run garbage collection. Removes unreachable objects older than the
-  // configured age threshold. Non-blocking: returns immediately with stats.
-  rpc RunGC(RunGCRequest) returns (RunGCResponse);
-
-  // Rebuild the deps/ and index/ derived indices by scanning all reachable blobs.
-  // Use when an index is suspected to be corrupted or out of sync.
-  // This is a slow operation on large repos.
-  rpc RebuildIndex(RebuildIndexRequest) returns (RebuildIndexResponse);
-
-  // Returns the live server configuration (limits, thresholds, backend info).
+  rpc RunGC(RunGCRequest)                     returns (RunGCResponse);
+  rpc RebuildIndex(RebuildIndexRequest)       returns (RebuildIndexResponse);
   rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse);
 }
-
-message RunGCRequest {
-  // Optional: restrict GC to objects belonging to one project/repo.
-  // If empty, GC runs across all projects/repos.
-  string project = 1;
-  string repo    = 2;
-  // If true, report what would be deleted without deleting anything.
-  bool   dry_run = 3;
-}
-
-message RunGCResponse {
-  uint64 objects_scanned   = 1;
-  uint64 objects_deleted   = 2;
-  uint64 bytes_reclaimed   = 3;
-  uint64 pending_entries_cleaned = 4;
-  uint64 idempotency_entries_cleaned = 5;
-}
-
-message RebuildIndexRequest {
-  string project = 1;
-  string repo    = 2;
-}
-
-message RebuildIndexResponse {
-  uint64 blobs_scanned     = 1;
-  uint64 index_entries_written = 2;
-  uint64 deps_entries_written  = 3;
-}
-
-message GetServerConfigRequest {}
-
-message GetServerConfigResponse {
-  uint32 max_ops_per_transaction    = 1;
-  uint32 max_schemas_per_transaction = 2;
-  uint32 transaction_timeout_secs   = 3;
-  uint32 pending_cleanup_threshold_secs = 4;
-  uint32 idempotency_ttl_hours      = 5;
-  uint32 gc_age_threshold_hours     = 6;
-  string storage_backend            = 7;  // e.g. "redb"
-  string server_version             = 8;
-}
 ```
 
----
-
-## 10. Authentication
-
-Authentication is transport-level, not encoded in the proto types.
-
-**Token auth (default):** The caller includes an `Authorization: Bearer <token>` metadata header. The `AuthnProvider` trait implementation extracts the token and resolves it to an `Identity`.
-
-**No-auth mode (getting started):** The no-op `AuthnProvider` returns `Identity::Anonymous` for all requests, and the no-op `AuthzPolicy` allows all operations. The server starts in no-auth mode when no auth configuration is provided.
-
-**gRPC metadata key:** `authorization` (lowercase, as required by the HTTP/2 / gRPC metadata spec).
-
-There are no auth-specific RPCs in the API — auth configuration is managed via the server config file (`schemahub.toml`), not via gRPC.
+> **AS-BUILT** (`server/src/services/admin.rs`):
+> - **`RunGC`** requires non-empty `project` + `repo` (global GC is v2 → `INVALID_ARGUMENT` otherwise). `dry_run` is honored by skipping the sweep. `RunGCResponse` reports `objects_scanned`/`objects_deleted` (both = swept count); `bytes_reclaimed` and the v1 `pending_*`/`idempotency_*` counters are `0` (those v1 GC roots no longer exist under the op-log model).
+> - **`RebuildIndex`** calls `Core::rebuild_index`; the response counters are currently `0`.
+> - **`GetServerConfig`** returns the live limits (see §7.3): `max_ops_per_transaction=100`, `max_schemas_per_transaction=1`, `transaction_timeout_secs=30`, `storage_backend="redb"`, `server_version` from `CARGO_PKG_VERSION`; the v1 `pending_*`/`idempotency_*`/`gc_age_*` fields report `0`.
 
 ---
 
-## 11. Error Handling
+## 12. Authentication
 
-### Status codes used
+Transport-level, not in the proto types. The server reads an `authorization` metadata header (`Bearer <token>`, lowercased key), strips the prefix, and passes the token to the `AuthnProvider`. The getting-started default ships **Noop** auth/authz (`Identity::Anonymous`, all operations allowed), so the token is accepted but effectively ignored. There are no auth RPCs.
+
+---
+
+## 13. Error Handling
 
 | gRPC Status | When |
 |-------------|------|
 | `OK` | Success |
-| `NOT_FOUND` | Project, repo, schema, branch, tag, or declaration does not exist |
-| `ALREADY_EXISTS` | `CreateSchema` on an existing schema name; `CreateBranch` with an existing name |
-| `INVALID_ARGUMENT` | Missing required field; transaction exceeds limits; mixed-format transaction; unsupported language for `PreviewCodegen` |
-| `FAILED_PRECONDITION` | Base revision mismatch (`ConflictDetail`); compatibility violation (`CompatibilityError`); merge not fast-forwardable (`MergeConflictDetail`); deleting protected branch |
-| `PERMISSION_DENIED` | AuthZ check failed (wrong role) |
-| `UNAUTHENTICATED` | AuthN failed (invalid or missing token) |
-| `RESOURCE_EXHAUSTED` | Transaction timeout exceeded (`DeadlineExceeded` behavior) |
-| `INTERNAL` | Server bug |
-| `UNIMPLEMENTED` | Language/format combination not supported in `PreviewCodegen` |
+| `NOT_FOUND` | project/repo/schema/branch/tag/commit/declaration absent |
+| `INVALID_ARGUMENT` | missing/empty required field; unknown file extension; no compiler for format; empty transaction; mutation validator reject (`MutationValidationError`); resolved source lacks the declaration; repo-scope-required (Search/GC) |
+| `FAILED_PRECONDITION` | compatibility violation (`CompatibilityError`); `RenderConflict` on a non-conflicted decl |
+| `PERMISSION_DENIED` / `UNAUTHENTICATED` | authz / authn failure (Noop default never raises these) |
+| `UNIMPLEMENTED` | `DeleteBranch`, `DeleteTag`, `DeleteProject`, `DeleteRepo`, `AddMember`/`RemoveMember`/`UpdateMemberRole`; unsupported `PreviewCodegen` language/format |
+| `INTERNAL` | server/VCS error |
 
-### Rich error details
-
-All `FAILED_PRECONDITION` errors include structured details in `google.rpc.Status.details` (as `google.protobuf.Any`). The type URL identifies the detail type:
-
-```
-type.googleapis.com/schemahub.v1.ConflictDetail
-type.googleapis.com/schemahub.v1.CompatibilityError
-type.googleapis.com/schemahub.v1.MergeConflictDetail
-type.googleapis.com/schemahub.v1.MutationValidationError
-```
-
-The CLI unpacks these details and renders them as human-readable output. AI agents can inspect `CompatibilityError.violations` to understand which exact change caused a failure and decide whether to retry with `--force` or reformulate the mutation.
+Structured `status.details` (as `google.protobuf.Any`) carry `CompatibilityError` and `MutationValidationError` for programmatic inspection; the CLI unpacks and renders them.
 
 ---
 
-## 12. Design Decisions
+## 14. CLI Surface (as implemented)
 
-**One service per concern, not one mega-service.** Six services keeps each `.proto` file focused and the generated Rust traits manageable. Clients that only need the read API import only `ExplorationService`; clients doing schema mutations only import `SchemaService`.
+The CLI (`schemahub-cli`) is a pure gRPC client. Top-level commands (`main.rs`) and their actions:
 
-**`stream CommitInfo` for `ListCommits`.** Commit history can be unbounded. Server streaming lets the client cancel after receiving the commits it needs without the server materializing the full history.
+```bash
+schemahub repo init <project/repo> [--public] [--default-branch main]     # ProjectService (create project+repo)
 
-**`VersionRef` uses `oneof`, not a single string.** A single string like `"main"` or `"v1.0.0"` is ambiguous — is it a branch or a tag? `oneof` forces the caller to declare intent explicitly. This also makes the server's resolution logic unambiguous.
+schemahub schema create <file> --project P --repo R [--branch main] [--name N] [--base-revision ""]
+schemahub schema update <file> --project P --repo R [--branch] [--name] [--base-revision] [--force]
+schemahub schema pull   <project/repo/schema> [--branch main]              # prints reconstructed source
+schemahub schema delete <project/repo/schema> [--branch] [--base-revision] [--force]
 
-**`format` is always explicit.** No content-type inference. The CLI infers from file extension and always sets the field. This prevents format misdetection from silently producing wrong ASTs.
+schemahub field add    <project/repo/schema> <message> <name:type:number> [--branch] [--base-revision]
+schemahub field remove <project/repo/schema> <message> <field>            # auto-reserves number+name
+schemahub field rename <project/repo/schema> <message> <old> <new>
 
-**`base_revision` and `idempotency_key` are on every write RPC.** This makes OCC and idempotency opt-out impossible — callers must always provide both. Clients that don't care about retries generate a fresh UUID for `idempotency_key` and set `base_revision` to the latest HEAD they have.
+schemahub branch create <project/repo> <name> [--from main]
+schemahub branch delete <project/repo> <name>                              # server returns UNIMPLEMENTED
+schemahub branch list   <project/repo> [--prefix ""]
+schemahub branch merge  <project/repo> <source> [--into main] [--base-revision] [--message]
 
-**No pagination tokens for list RPCs.** In v1, list operations return complete results. Schema counts are bounded (a repo with 10,000 schema files is pathological). If pagination becomes necessary, it's added in v2 — the response messages have no `next_page_token` field to accidentally leave empty.
+schemahub tag create <project/repo> <name> (--commit <id> | --branch <name>) [--message]
+schemahub tag delete <project/repo> <name> [--force]                       # server returns UNIMPLEMENTED
+schemahub tag list   <project/repo> [--prefix ""]
 
-**`OpenApiMutation` wraps `PushDocument` in v1.** Rather than removing the `OpenApiMutation` wrapper entirely, keeping the wrapper allows v2 to add granular operations (`AddOperation`, `RemoveParameter`) inside the same oneof without changing the top-level `ApplyMutationRequest` structure. No client breakage.
+schemahub log  <project/repo> [...]                                        # commit/change history
+schemahub op log <project/repo>                                            # operation log (audit)
+schemahub undo <project/repo> [--author]
+schemahub resolve <project/repo/schema> <declaration> [--branch main] [--from <file>] [--author] [--message]
+                                                                           # --from omitted → render the conflict
+schemahub diff <project/repo> <base..head> [--schema-path ""]
+
+schemahub codegen get     <project/repo/schema> [--branch] [--lang] [--out ./gen]
+schemahub codegen preview <project/repo/schema> [--branch] [--lang]
+```
+
+> **AS-BUILT — CLI scope.** Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). There is no top-level `merge` command — merge lives under `branch merge`. `op log` is the only `op` subcommand. Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env, or `~/.schemahub` profile (`--profile`). CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch.
+
+---
+
+## 15. Design Decisions (retained / revised)
+
+- **One service per concern.** Seven services keep each `.proto` focused; `HistoryService` isolates the jj-specific surface so non-history clients ignore it.
+- **`change_id` on every write.** Durable identity replaces v1's CAS-as-identity. A client answers "did my edit land, and where is it now" via the change ID + op log even after the bookmark advanced or history was rewritten.
+- **`conflicted_decls`, not rejection.** Concurrency is surfaced as data the caller can resolve, never a hard error to retry against a moving target — the core agents-and-humans-editing-concurrently goal.
+- **Branches == bookmarks.** `RefService` keeps git-flavored branch/tag/merge naming as a thin alias over jj bookmarks, easing migration; deletion is deferred (UNIMPLEMENTED) until the VCS layer exposes it.
+- **`VersionRef` oneof.** Forces the caller to declare branch vs. tag vs. commit intent; read paths currently lean on the bookmark form.
+- **Format always explicit on create.** No content sniffing; the CLI infers from extension and sets `SchemaFormat`.

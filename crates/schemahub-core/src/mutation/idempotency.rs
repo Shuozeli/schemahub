@@ -1,91 +1,40 @@
-use serde::{Deserialize, Serialize};
-use schemahub_storage::{StorageBackend, keys};
+//! RPC-edge idempotency dedupe (design.md §5.1 step 1).
+//!
+//! A literal network retry carrying the same `idempotency_key` must return the
+//! stored result rather than re-applying the mutation. This is *not* durable
+//! identity — that is the `ChangeId` the VCS assigns. The store here only
+//! collapses retries within the process lifetime; the server may back it with a
+//! durable table later.
 
-use crate::error::CoreError;
-use crate::objects::unix_now;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "status")]
-pub enum IdempotencyResult {
-    #[serde(rename = "success")]
-    Success { commit_hash: String },
-    #[serde(rename = "error")]
-    Error { code: String, message: String },
+use crate::request::MutationResponse;
+
+/// A simple keyed cache of prior mutation responses. Thread-safe so it can live
+/// behind the shared `Arc<Core>`.
+#[derive(Default)]
+pub struct IdempotencyStore {
+    seen: Mutex<HashMap<String, MutationResponse>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct IdempotencyEntry {
-    pub result: IdempotencyResult,
-    pub expires_at_unix: i64,
-}
-
-/// Check whether an idempotency key already has a stored result.
-/// Returns `None` if the key is not found or has expired.
-pub fn check_idempotency(
-    storage: &dyn StorageBackend,
-    project: &str,
-    repo: &str,
-    key: &str,
-) -> Result<Option<IdempotencyResult>, CoreError> {
-    if key.is_empty() {
-        return Ok(None);
-    }
-    let storage_key = keys::idempotency_key(project, repo, key);
-    match storage.get(&storage_key)? {
-        None => Ok(None),
-        Some(bytes) => {
-            let entry: IdempotencyEntry = serde_json::from_slice(&bytes)
-                .map_err(|e| CoreError::ObjectCorrupted(format!("idempotency entry is malformed: {e}")))?;
-            let now = unix_now();
-            if entry.expires_at_unix <= now {
-                // Expired — treat as absent.
-                return Ok(None);
-            }
-            Ok(Some(entry.result))
+impl IdempotencyStore {
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
         }
     }
-}
 
-/// Scan the idempotency/ namespace and delete all expired entries.
-/// Returns the count of entries deleted (or that would be deleted in dry_run mode).
-pub fn gc_idempotency_entries(
-    storage: &dyn StorageBackend,
-    dry_run: bool,
-) -> Result<u64, CoreError> {
-    let now = unix_now();
-    let all = storage.scan_prefix("idempotency/")?;
-    let mut cleaned = 0u64;
-    for (key, value) in &all {
-        let expired = serde_json::from_slice::<IdempotencyEntry>(value)
-            .map(|e| e.expires_at_unix <= now)
-            .unwrap_or(true); // malformed entry — treat as expired
-        if expired {
-            if !dry_run {
-                let _ = storage.delete(key);
-            }
-            cleaned += 1;
-        }
+    /// Return a previously stored result for `key`, if any.
+    pub fn get(&self, key: &str) -> Option<MutationResponse> {
+        self.seen.lock().expect("idempotency lock").get(key).cloned()
     }
-    Ok(cleaned)
-}
 
-/// Store an idempotency result with a TTL in hours.
-pub fn store_idempotency(
-    storage: &dyn StorageBackend,
-    project: &str,
-    repo: &str,
-    key: &str,
-    result: IdempotencyResult,
-    ttl_hours: u32,
-) -> Result<(), CoreError> {
-    if key.is_empty() {
-        return Ok(());
+    /// Record the result for `key`.
+    pub fn put(&self, key: &str, result: MutationResponse) {
+        self.seen
+            .lock()
+            .expect("idempotency lock")
+            .insert(key.to_string(), result);
     }
-    let expires_at_unix = unix_now() + (ttl_hours as i64) * 3600;
-    let entry = IdempotencyEntry { result, expires_at_unix };
-    let bytes = serde_json::to_vec(&entry)
-        .map_err(|e| CoreError::InvalidArgument(format!("failed to serialize idempotency entry: {e}")))?;
-    let storage_key = keys::idempotency_key(project, repo, key);
-    storage.put(&storage_key, &bytes)?;
-    Ok(())
 }

@@ -1,86 +1,75 @@
-mod error;
-mod services;
+//! `schemahub-server` — the gRPC server and composition root
+//! (crate-structure.md §3.6).
+//!
+//! Startup: load config (`schemahub.toml`, optional), open the redb object
+//! store, build the `Core` over the three compilers, register every gRPC
+//! service, and serve. Binds to `TAILSCALE_IP` (user infra convention) when set
+//! and no explicit `--listen` is given, else `0.0.0.0`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context;
 use clap::Parser;
-use schemahub_api::schemahub_v1::{
-    admin_service_server::AdminServiceServer,
-    codegen_service_server::CodegenServiceServer,
-    exploration_service_server::ExplorationServiceServer,
-    project_service_server::ProjectServiceServer,
-    ref_service_server::RefServiceServer,
-    schema_service_server::SchemaServiceServer,
-};
-use schemahub_core::{Core, PluginRegistry};
-use schemahub_plugin_flatbuffers::FlatBuffersPlugin;
-use schemahub_plugin_openapi::OpenApiPlugin;
-use schemahub_plugin_protobuf::ProtobufPlugin;
-use schemahub_storage::RedbBackend;
-use schemahub_types::{NoopAuthn, NoopAuthz};
-use tonic::transport::Server;
+use schemahub_vcs::{ObjectDb, RedbObjectDb};
 
-use services::{
-    admin::AdminServiceImpl, codegen::CodegenServiceImpl, exploration::ExplorationServiceImpl,
-    project::ProjectServiceImpl, refs::RefServiceImpl, schema::SchemaServiceImpl,
-};
+use schemahub_server::{build_core, build_router, config::Config};
 
-#[derive(Parser)]
-#[command(name = "schemahub-server", about = "SchemaHub gRPC server")]
+#[derive(Parser, Debug)]
+#[command(name = "schemahub-server", about = "schemahub gRPC server", version)]
 struct Args {
-    /// The address to listen on
-    #[arg(long, default_value = "[::1]:50051")]
-    listen: String,
-
-    /// Path to the redb database file
-    #[arg(long, default_value = "schemahub.db")]
-    db: String,
+    /// Listen address, e.g. "0.0.0.0:50051". Overrides config + TAILSCALE_IP.
+    #[arg(long)]
+    listen: Option<String>,
+    /// Path to the redb database file. Overrides config.
+    #[arg(long)]
+    db: Option<String>,
+    /// Path to schemahub.toml (optional).
+    #[arg(long, default_value = "schemahub.toml")]
+    config: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let config = Config::load(&args.config)?;
 
-    // ── Storage ───────────────────────────────────────────────────────────────
-    let storage = RedbBackend::open(&args.db)?;
-    let storage: Arc<dyn schemahub_storage::StorageBackend> = Arc::new(storage);
+    let db_path = args.db.unwrap_or_else(|| config.storage.path.clone());
+    let db: Arc<dyn ObjectDb> =
+        Arc::new(RedbObjectDb::open(&db_path).context("opening redb object store")?);
 
-    // ── Plugin registry ───────────────────────────────────────────────────────
-    let mut plugins = PluginRegistry::new();
-    plugins.register(Arc::new(ProtobufPlugin));
-    plugins.register(Arc::new(FlatBuffersPlugin));
-    plugins.register(Arc::new(OpenApiPlugin));
+    let core = build_core(db, &config);
 
-    // ── Core ──────────────────────────────────────────────────────────────────
-    let core = Arc::new(Core::new(
-        storage,
-        plugins,
-        Arc::new(NoopAuthn),
-        Arc::new(NoopAuthz),
-    ));
+    let addr = resolve_listen_addr(args.listen, &config)?;
 
-    // ── gRPC services ─────────────────────────────────────────────────────────
-    let schema_svc = SchemaServiceServer::new(SchemaServiceImpl::new(Arc::clone(&core)));
-    let ref_svc = RefServiceServer::new(RefServiceImpl::new(Arc::clone(&core)));
-    let exploration_svc =
-        ExplorationServiceServer::new(ExplorationServiceImpl::new(Arc::clone(&core)));
-    let codegen_svc = CodegenServiceServer::new(CodegenServiceImpl::new(Arc::clone(&core)));
-    let project_svc = ProjectServiceServer::new(ProjectServiceImpl::new(Arc::clone(&core)));
-    let admin_svc = AdminServiceServer::new(AdminServiceImpl::new(Arc::clone(&core)));
+    // Surface a MagicDNS-friendly hint when bound to the Tailscale IP.
+    println!("schemahub-server listening on {addr}");
 
-    // ── Listen ────────────────────────────────────────────────────────────────
-    let addr = args.listen.parse()?;
-    eprintln!("schemahub-server listening on {addr}");
-
-    Server::builder()
-        .add_service(schema_svc)
-        .add_service(ref_svc)
-        .add_service(exploration_svc)
-        .add_service(codegen_svc)
-        .add_service(project_svc)
-        .add_service(admin_svc)
+    build_router(core)
         .serve(addr)
-        .await?;
-
+        .await
+        .context("serving gRPC")?;
     Ok(())
+}
+
+/// Determine the listen address: explicit `--listen` > `TAILSCALE_IP:50051` >
+/// config `[listen].addr` > `0.0.0.0:50051`.
+fn resolve_listen_addr(explicit: Option<String>, config: &Config) -> anyhow::Result<SocketAddr> {
+    if let Some(a) = explicit {
+        return a.parse().context("parsing --listen address");
+    }
+    if let Ok(ip) = std::env::var("TAILSCALE_IP") {
+        if !ip.trim().is_empty() {
+            let port = config
+                .listen
+                .addr
+                .rsplit(':')
+                .next()
+                .unwrap_or("50051");
+            return format!("{}:{}", ip.trim(), port)
+                .parse()
+                .context("parsing TAILSCALE_IP listen address");
+        }
+    }
+    config.listen.addr.parse().context("parsing config listen address")
 }

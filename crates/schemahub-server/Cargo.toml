@@ -8,18 +8,24 @@ name = "schemahub-server"
 path = "src/main.rs"
 
 [dependencies]
-schemahub-types            = { path = "../../crates/schemahub-types" }
-schemahub-storage          = { path = "../../crates/schemahub-storage" }
-schemahub-core             = { path = "../../crates/schemahub-core" }
-schemahub-api              = { path = "../../crates/schemahub-api" }
-schemahub-plugin-protobuf  = { path = "../../crates/schemahub-plugin-protobuf" }
-schemahub-plugin-flatbuffers = { path = "../../crates/schemahub-plugin-flatbuffers" }
-schemahub-plugin-openapi   = { path = "../../crates/schemahub-plugin-openapi" }
+schemahub-types                = { path = "../schemahub-types" }
+schemahub-vcs                  = { path = "../schemahub-vcs" }
+schemahub-core                 = { path = "../schemahub-core" }
+schemahub-api                  = { path = "../schemahub-api" }
+schemahub-compiler-protobuf    = { path = "../schemahub-compiler-protobuf" }
+schemahub-compiler-flatbuffers = { path = "../schemahub-compiler-flatbuffers" }
+schemahub-compiler-openapi     = { path = "../schemahub-compiler-openapi" }
 tokio    = { workspace = true }
 tonic    = { workspace = true }
-prost    = { workspace = true }
-bytes    = { workspace = true }
 anyhow   = { workspace = true }
+prost    = { workspace = true }
+prost-types = { workspace = true }
+bytes    = { workspace = true }
+serde    = { workspace = true }
+toml     = { workspace = true }
 clap     = { workspace = true }
-tokio-stream = { version = "0.1" }
-prost-types  = { workspace = true }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-stream = { version = "0.1", features = ["net"] }

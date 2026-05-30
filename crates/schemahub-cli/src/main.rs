@@ -4,7 +4,7 @@ mod config;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
-use cmd::{branch, codegen, field, log, repo, schema, tag};
+use cmd::{branch, codegen, field, history, log, repo, schema, tag};
 
 #[derive(Parser)]
 #[command(name = "schemahub", about = "schemahub schema registry CLI", version)]
@@ -39,6 +39,12 @@ enum Commands {
     Tag(tag::TagArgs),
     /// Show commit history for a repo
     Log(log::LogArgs),
+    /// Operation log (jj-style audit record): `op log <project/repo>`
+    Op(history::OpArgs),
+    /// Undo the last operation on a repo
+    Undo(history::UndoArgs),
+    /// Render or resolve a conflicted declaration
+    Resolve(history::ResolveArgs),
     /// Code generation
     Codegen(codegen::CodegenArgs),
     /// Print diff between two refs
@@ -88,6 +94,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Log(args) => {
             let ch = client::build_channel(&cfg.server).await?;
             log::run(args, ch).await
+        }
+        Commands::Op(args) => {
+            let ch = client::build_channel(&cfg.server).await?;
+            history::run_op(args, ch).await
+        }
+        Commands::Undo(args) => {
+            let ch = client::build_channel(&cfg.server).await?;
+            history::run_undo(args, ch).await
+        }
+        Commands::Resolve(args) => {
+            let ch = client::build_channel(&cfg.server).await?;
+            history::run_resolve(args, ch).await
         }
         Commands::Codegen(args) => {
             let ch = client::build_channel(&cfg.server).await?;

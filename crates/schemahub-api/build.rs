@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/schemahub/v1/codegen_service.proto",
                 "proto/schemahub/v1/project_service.proto",
                 "proto/schemahub/v1/admin_service.proto",
+                "proto/schemahub/v1/history_service.proto",
             ],
             &[proto_dir],
         )?;

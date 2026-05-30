@@ -42,6 +42,9 @@ pub async fn run(args: LogArgs, channel: Channel) -> anyhow::Result<()> {
             None => break,
             Some(commit) => {
                 println!("commit {}", commit.hash);
+                if !commit.parent_hashes.is_empty() {
+                    println!("Parents: {}", commit.parent_hashes.join(" "));
+                }
                 println!("Author: {}", commit.author);
                 println!("    {}", commit.message);
                 println!();

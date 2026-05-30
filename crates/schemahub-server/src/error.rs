@@ -1,25 +1,82 @@
+//! Core errors → `tonic::Status` (crate-structure.md §3.6).
+//!
+//! Maps each [`CoreError`] variant to the gRPC status code that best matches
+//! the failure semantics (design.md §5/§6/§7). Compatibility violations and
+//! conflict-related preconditions map to `FAILED_PRECONDITION`; auth failures to
+//! `UNAUTHENTICATED` / `PERMISSION_DENIED`; bad input to `INVALID_ARGUMENT`.
+
 use schemahub_core::CoreError;
+use schemahub_types::{AuthnError, AuthzError, MutationError};
+use schemahub_vcs::VcsError;
 use tonic::Status;
 
-/// Convert a CoreError into a tonic Status.
-pub fn core_to_status(e: CoreError) -> Status {
-    match e {
-        CoreError::NotFound(msg) => Status::not_found(msg),
-        CoreError::AlreadyExists(msg) => Status::already_exists(msg),
-        CoreError::InvalidArgument(msg) => Status::invalid_argument(msg),
-        CoreError::PermissionDenied(msg) => Status::permission_denied(msg),
-        CoreError::Unauthenticated(msg) => Status::unauthenticated(msg),
-        CoreError::Conflict { current_head, provided_base } => Status::failed_precondition(
-            format!(
-                "conflict: current HEAD is {current_head}, but provided base is {provided_base}"
-            ),
-        ),
-        CoreError::CompatibilityViolation(violations) => {
-            let msgs: Vec<String> = violations.iter().map(|v| v.message.clone()).collect();
-            Status::failed_precondition(format!("compatibility violations: {}", msgs.join("; ")))
+/// Convert a [`CoreError`] into a `tonic::Status`.
+pub fn to_status(err: CoreError) -> Status {
+    match err {
+        CoreError::UnknownFormat(f) => {
+            Status::invalid_argument(format!("no compiler registered for format '{f}'"))
         }
-        CoreError::MutationError(e) => Status::invalid_argument(e.to_string()),
-        CoreError::Storage(e) => Status::internal(e.to_string()),
-        CoreError::ObjectCorrupted(msg) => Status::internal(format!("object corrupted: {msg}")),
+        CoreError::UndetectableFormat(s) => {
+            Status::invalid_argument(format!("could not detect a format for schema '{s}'"))
+        }
+        CoreError::Vcs(e) => vcs_to_status(e),
+        CoreError::Authn(e) => authn_to_status(e),
+        CoreError::Authz(AuthzError::PermissionDenied(m)) => Status::permission_denied(m),
+        CoreError::Mutation(e) => mutation_to_status(e),
+        CoreError::Parse(e) => Status::invalid_argument(format!("parse error: {e}")),
+        CoreError::Print(e) => Status::internal(format!("print error: {e}")),
+        CoreError::Diff(e) => Status::internal(format!("diff error: {e}")),
+        CoreError::Read(e) => Status::not_found(format!("read error: {e}")),
+        CoreError::Conflict(e) => Status::failed_precondition(format!("conflict error: {e}")),
+        CoreError::Descriptor(e) => Status::internal(format!("descriptor error: {e}")),
+        CoreError::Codegen(e) => Status::unimplemented(format!("codegen error: {e}")),
+        CoreError::Incompatible(violations) => Status::failed_precondition(format!(
+            "compatibility violation: {} issue(s) on a protected bookmark",
+            violations.len()
+        )),
+        CoreError::LimitExceeded(m) => {
+            Status::invalid_argument(format!("transaction limit exceeded: {m}"))
+        }
+        CoreError::EmptyTransaction => Status::invalid_argument("transaction has no operations"),
+        CoreError::MixedTransaction(m) => {
+            Status::invalid_argument(format!("invalid transaction batch: {m}"))
+        }
+        CoreError::Other(m) => Status::internal(m),
+    }
+}
+
+fn vcs_to_status(err: VcsError) -> Status {
+    match err {
+        VcsError::ObjectNotFound
+        | VcsError::DeclNotFound(_)
+        | VcsError::SchemaNotFound(_)
+        | VcsError::BookmarkNotFound(_)
+        | VcsError::TagNotFound(_) => Status::not_found(err.to_string()),
+        VcsError::BookmarkExists(_) => Status::already_exists(err.to_string()),
+        VcsError::NothingToUndo | VcsError::NotConflicted { .. } | VcsError::BadRef(_) => {
+            Status::failed_precondition(err.to_string())
+        }
+        VcsError::ObjectDb(_) | VcsError::Corrupt(_) | VcsError::Other(_) => {
+            Status::internal(err.to_string())
+        }
+    }
+}
+
+fn authn_to_status(err: AuthnError) -> Status {
+    match err {
+        AuthnError::MissingCredentials | AuthnError::InvalidToken => {
+            Status::unauthenticated(err.to_string())
+        }
+        AuthnError::Other(m) => Status::unauthenticated(m),
+    }
+}
+
+fn mutation_to_status(err: MutationError) -> Status {
+    match err {
+        MutationError::DeclarationNotFound(_) | MutationError::FieldNotFound { .. } => {
+            Status::not_found(err.to_string())
+        }
+        MutationError::UnsupportedInV1 => Status::unimplemented(err.to_string()),
+        _ => Status::invalid_argument(err.to_string()),
     }
 }

@@ -2,12 +2,12 @@
 resolver = "2"
 members = [
     "crates/schemahub-types",
-    "crates/schemahub-storage",
+    "crates/schemahub-vcs",
     "crates/schemahub-core",
     "crates/schemahub-api",
-    "crates/schemahub-plugin-protobuf",
-    "crates/schemahub-plugin-flatbuffers",
-    "crates/schemahub-plugin-openapi",
+    "crates/schemahub-compiler-protobuf",
+    "crates/schemahub-compiler-flatbuffers",
+    "crates/schemahub-compiler-openapi",
     "crates/schemahub-server",
     "crates/schemahub-cli",
 ]
@@ -18,9 +18,18 @@ tonic       = "0.12"
 tonic-build = "0.12"
 prost       = "0.13"
 prost-types = "0.13"
+# jj-lib is the real Jujutsu VCS library; schemahub-vcs implements its
+# Backend + OpStore traits over our ObjectDb (see schemahub-vcs/DECISIONS.md).
+jj-lib      = { version = "0.41", default-features = false }
+pollster    = "0.4"
+async-trait = "0.1"
+futures     = "0.3"
+tempfile    = "3"
 redb        = "2"
 bytes       = "1"
 serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
 toml        = "0.8"
 clap        = { version = "4", features = ["derive", "env"] }
 anyhow      = "1"
@@ -28,5 +37,11 @@ thiserror   = "1"
 sha2        = "0.10"
 hex         = "0.4"
 uuid        = { version = "1", features = ["v4"] }
-serde_json  = "1"
-serde_yaml  = "0.9"
+
+# sibling compilers (path deps within ~/projects/shuozeli/compilers/)
+protoc-rs-parser  = { path = "../../compilers/protobuf-rs/parser" }
+protoc-rs-schema  = { path = "../../compilers/protobuf-rs/schema" }
+protoc-rs-codegen = { path = "../../compilers/protobuf-rs/codegen" }
+flatc-rs-parser   = { path = "../../compilers/flatbuffers-rs/parser" }
+flatc-rs-schema   = { path = "../../compilers/flatbuffers-rs/schema" }
+flatc-rs-codegen  = { path = "../../compilers/flatbuffers-rs/codegen" }

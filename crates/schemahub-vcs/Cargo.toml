@@ -1,0 +1,32 @@
+[package]
+name    = "schemahub-vcs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+schemahub-types = { path = "../schemahub-types" }
+redb            = { workspace = true }
+bytes           = { workspace = true }
+thiserror       = { workspace = true }
+sha2            = { workspace = true }
+hex             = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+uuid            = { workspace = true }
+
+# DECISION (see DECISIONS.md): schemahub-vcs is built on the REAL Jujutsu
+# library. We implement `jj_lib::backend::Backend` (DbBackend) and
+# `jj_lib::op_store::OpStore` (DbOpStore) over our `ObjectDb`, and drive writes
+# through jj's RepoLoader/MutableRepo/Transaction/CommitBuilder/MergedTreeBuilder.
+# Disable jj-lib's default `git` feature — we bypass git interop (design §4.6).
+jj-lib      = { workspace = true, default-features = false }
+pollster    = { workspace = true }
+async-trait = { workspace = true }
+# jj-lib's Backend trait uses tokio AsyncRead; pulled in for the file reader.
+tokio       = { workspace = true }
+futures     = { workspace = true }
+tempfile    = { workspace = true }
+# blake2 (jj's content-hash algorithm) + prost (jj's proto encoding) — used by
+# the DbBackend to compute jj ids and (de)serialize jj's proto objects.
+blake2      = "0.10"
+prost       = "0.14"

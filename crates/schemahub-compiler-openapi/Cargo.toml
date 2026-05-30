@@ -1,0 +1,11 @@
+[package]
+name    = "schemahub-compiler-openapi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+schemahub-types = { path = "../schemahub-types" }
+bytes           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+serde_yaml      = { workspace = true }

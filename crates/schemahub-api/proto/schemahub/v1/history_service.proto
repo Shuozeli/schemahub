@@ -1,0 +1,117 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/refs.proto";
+
+// HistoryService exposes the jj-style operation log, undo, and first-class
+// conflict resolution (design.md §6, §12). These RPCs are new in v2: the v1
+// protos predate the jj model.
+service HistoryService {
+  // The commit/change history graph for a repo (design.md §12 `log`).
+  // Walks the real commit/change graph from the default branch HEAD: each
+  // entry carries a content-addressed commit_id and a stable jj change_id.
+  rpc Log(LogRequest) returns (LogResponse);
+
+  // The operation log (the audit record, design.md §4.4). Newest last
+  // (oldest→newest along the parent chain).
+  rpc OpLog(OpLogRequest) returns (OpLogResponse);
+
+  // Undo the last operation — restores the repo to the parent op's view
+  // (design.md §4.4). Undo is itself an operation (append-only log).
+  rpc Undo(UndoRequest) returns (UndoResponse);
+
+  // Render a conflicted declaration's competing sides for human/agent display
+  // (design.md §6). Returns FAILED_PRECONDITION if the decl is not conflicted.
+  rpc RenderConflict(RenderConflictRequest) returns (RenderConflictResponse);
+
+  // Submit a resolved declaration blob, replacing the conflict and recording
+  // the resolution as an operation (design.md §6).
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+
+message LogRequest {
+  string project = 1;
+  string repo    = 2;
+}
+
+message LogEntry {
+  string          commit_id = 1;
+  string          change_id = 2;
+  repeated string parents   = 3;
+  string          author    = 4;
+  string          message   = 5;
+  string          timestamp = 6;
+}
+
+message LogResponse {
+  repeated LogEntry entries = 1;
+}
+
+// ── OpLog ─────────────────────────────────────────────────────────────────────
+
+message OpLogRequest {
+  string project = 1;
+  string repo    = 2;
+}
+
+message OperationRecord {
+  string          op_id       = 1;
+  repeated string parents     = 2;
+  string          description = 3;
+  string          author      = 4;
+  string          timestamp   = 5;
+}
+
+message OpLogResponse {
+  repeated OperationRecord operations = 1;
+}
+
+// ── Undo ──────────────────────────────────────────────────────────────────────
+
+message UndoRequest {
+  string project = 1;
+  string repo    = 2;
+  string author  = 3;  // recorded as the author of the undo operation
+}
+
+message UndoResponse {
+  string undone_op_id = 1;  // the id of the operation that was undone
+}
+
+// ── RenderConflict ──────────────────────────────────────────────────────────
+
+message RenderConflictRequest {
+  string     project          = 1;
+  string     repo             = 2;
+  string     schema_path      = 3;
+  string     declaration_name = 4;
+  VersionRef at               = 5;  // bookmark/tag/commit; resolved to a bookmark for reads
+}
+
+message RenderConflictResponse {
+  string rendered = 1;  // human/agent-readable view of the competing sides
+}
+
+// ── ResolveConflict ─────────────────────────────────────────────────────────
+
+message ResolveConflictRequest {
+  string project          = 1;
+  string repo             = 2;
+  string bookmark         = 3;
+  string schema_path      = 4;
+  string declaration_name = 5;
+  // The resolved declaration: full source for the single schema file containing
+  // the resolved declaration. The server parses it and extracts the named decl.
+  string resolved_source  = 6;
+  string author           = 7;
+  string message          = 8;
+}
+
+message ResolveConflictResponse {
+  string new_commit = 1;
+  string change_id  = 2;
+}

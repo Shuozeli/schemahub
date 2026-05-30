@@ -1,9 +1,0 @@
-[package]
-name    = "schemahub-storage"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-schemahub-types = { path = "../schemahub-types" }
-redb      = { workspace = true }
-thiserror = { workspace = true }

@@ -1,705 +1,243 @@
+//! `SchemaService` — schema lifecycle (create/update/delete) + granular and
+//! transactional mutations (design.md §5, crate-structure.md §3.6).
+//!
+//! Lifecycle (create/update/delete-from-source) is format-agnostic: the server
+//! parses `source` with the compiler selected by file extension, turns the
+//! resulting [`ParsedSchema`] into a [`MutationEffect`], and commits via the
+//! VCS. Granular mutations route through `Core::apply_mutation`, which runs the
+//! auth + compatibility gate (design.md §5.1 steps 2–10).
+
 use std::sync::Arc;
 
-use bytes::Bytes;
-use prost::Message;
-use schemahub_core::{Core, MutateRequest};
-use schemahub_types::{Mutation, SchemaPath};
+use schemahub_core::{detect_format_from_name, Core, MutationRequest, TransactionRequest};
+use schemahub_types::{MutationEffect, SchemaObjects};
+use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};
 
-use schemahub_api::schemahub_v1::{
-    ApplyMutationRequest, ApplyMutationResponse, ApplyTransactionRequest,
-    ApplyTransactionResponse, CreateSchemaRequest, CreateSchemaResponse, DeleteSchemaRequest,
-    DeleteSchemaResponse, FlatBuffersMutation, OpenApiMutation, ProtobufMutation,
-    UpdateSchemaRequest, UpdateSchemaResponse,
-    apply_mutation_request::Operation as MutationOperation,
-    schema_service_server::SchemaService,
-    transaction_op::Operation as TxOp,
-};
-use schemahub_core::mutation::batch::BatchMutateRequest;
+use schemahub_api::schemahub_v1 as pb;
+use schemahub_api::schemahub_v1::schema_service_server::SchemaService;
 
-use schemahub_plugin_protobuf::operations::{
-    self as proto_ops, ProtoOperationEnvelope,
-};
-use schemahub_plugin_flatbuffers::operations::{
-    self as fbs_ops, FbsOperationEnvelope,
-};
-use schemahub_plugin_openapi::operations::{
-    self as openapi_ops, OpenApiOperationEnvelope,
-};
+use crate::error::to_status;
+use crate::services::token_from;
+use crate::wire;
 
-use crate::error::core_to_status;
+/// The default commit author when no auth identity is resolved.
+const DEFAULT_AUTHOR: &str = "schemahub";
 
-pub struct SchemaServiceImpl {
+pub struct SchemaHandler {
     core: Arc<Core>,
 }
 
-impl SchemaServiceImpl {
+impl SchemaHandler {
     pub fn new(core: Arc<Core>) -> Self {
         Self { core }
     }
-}
 
-/// Translate a `ProtobufMutation` API proto into `ProtoOperationEnvelope` bytes
-/// suitable for `Mutation.operation`.
-fn proto_to_envelope(m: &ProtobufMutation) -> Result<Bytes, Status> {
-    use schemahub_api::schemahub_v1::protobuf_mutation::Operation as ApiOp;
+    /// Parse `source` into the per-declaration objects and build a
+    /// [`MutationEffect`] that replaces the schema file's whole content (meta +
+    /// every decl), removing any decls present in `base` that the new source
+    /// dropped.
+    fn effect_from_source(
+        &self,
+        schema_name: &str,
+        source: &str,
+        base: &SchemaObjects,
+    ) -> Result<MutationEffect, Status> {
+        let format_id = detect_format_from_name(schema_name)
+            .ok_or_else(|| Status::invalid_argument(format!("unknown extension: {schema_name}")))?;
+        let compiler = self
+            .core
+            .registry()
+            .get(format_id)
+            .ok_or_else(|| Status::invalid_argument(format!("no compiler for {format_id}")))?;
+        let parsed = compiler
+            .parse(source)
+            .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
 
-    let (tag, payload) = match &m.operation {
-        Some(ApiOp::AddField(o)) => {
-            let inner = proto_ops::OpAddField {
-                field_name: o.field_name.clone(),
-                field_type: o.field_type.clone(),
-                field_number: o.field_number,
-                repeated: o.repeated,
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveField(o)) => {
-            let inner = proto_ops::OpRemoveField {
-                field_name: o.field_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameField(o)) => {
-            let inner = proto_ops::OpRenameField {
-                old_field_name: o.old_field_name.clone(),
-                new_field_name: o.new_field_name.clone(),
-            };
-            (proto_ops::op_tag::RENAME_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::ChangeFieldType(o)) => {
-            let inner = proto_ops::OpChangeFieldType {
-                field_name: o.field_name.clone(),
-                new_type: o.new_type.clone(),
-            };
-            (proto_ops::op_tag::CHANGE_FIELD_TYPE, inner.encode_to_vec())
-        }
-        Some(ApiOp::ChangeFieldLabel(o)) => {
-            let inner = proto_ops::OpChangeFieldLabel {
-                field_name: o.field_name.clone(),
-                new_label: o.new_label.clone(),
-            };
-            (proto_ops::op_tag::CHANGE_FIELD_LABEL, inner.encode_to_vec())
-        }
-        Some(ApiOp::ReorderFields(o)) => {
-            let inner = proto_ops::OpReorderFields {
-                field_order: o.field_order.clone(),
-            };
-            (proto_ops::op_tag::REORDER_FIELDS, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddMessage(o)) => {
-            let inner = proto_ops::OpAddMessage {
-                message_name: o.message_name.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_MESSAGE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveMessage(o)) => {
-            let inner = proto_ops::OpRemoveMessage {
-                message_name: o.message_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_MESSAGE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameMessage(o)) => {
-            let inner = proto_ops::OpRenameMessage {
-                old_name: o.old_name.clone(),
-                new_name: o.new_name.clone(),
-            };
-            (proto_ops::op_tag::RENAME_MESSAGE, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddEnum(o)) => {
-            let inner = proto_ops::OpAddEnum {
-                enum_name: o.enum_name.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_ENUM, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddEnumValue(o)) => {
-            let inner = proto_ops::OpAddEnumValue {
-                enum_name: o.enum_name.clone(),
-                value_name: o.value_name.clone(),
-                number: o.number,
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_ENUM_VALUE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveEnum(o)) => {
-            let inner = proto_ops::OpRemoveEnum {
-                enum_name: o.enum_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_ENUM, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddService(o)) => {
-            let inner = proto_ops::OpAddService {
-                service_name: o.service_name.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_SERVICE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveService(o)) => {
-            let inner = proto_ops::OpRemoveService {
-                service_name: o.service_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_SERVICE, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddRpc(o)) => {
-            // service_name flows into mutation.declaration_name via extract_proto_decl_name
-            let inner = proto_ops::OpAddRpc {
-                rpc_name: o.rpc_name.clone(),
-                request_type: o.request_type.clone(),
-                response_type: o.response_type.clone(),
-                client_streaming: o.client_streaming,
-                server_streaming: o.server_streaming,
-                doc_comment: o.doc_comment.clone(),
-            };
-            (proto_ops::op_tag::ADD_RPC, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveRpc(o)) => {
-            // service_name flows into mutation.declaration_name via extract_proto_decl_name
-            let inner = proto_ops::OpRemoveRpc {
-                rpc_name: o.rpc_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_RPC, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveEnumValue(o)) => {
-            let inner = proto_ops::OpRemoveEnumValue {
-                enum_name: o.enum_name.clone(),
-                value_name: o.value_name.clone(),
-            };
-            (proto_ops::op_tag::REMOVE_ENUM_VALUE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameEnumValue(o)) => {
-            let inner = proto_ops::OpRenameEnumValue {
-                enum_name: o.enum_name.clone(),
-                old_value_name: o.old_value_name.clone(),
-                new_value_name: o.new_value_name.clone(),
-            };
-            (proto_ops::op_tag::RENAME_ENUM_VALUE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameRpc(o)) => {
-            // service_name flows into mutation.declaration_name via extract_proto_decl_name
-            let inner = proto_ops::OpRenameRpc {
-                old_rpc_name: o.old_rpc_name.clone(),
-                new_rpc_name: o.new_rpc_name.clone(),
-            };
-            (proto_ops::op_tag::RENAME_RPC, inner.encode_to_vec())
-        }
-        Some(ApiOp::UpdateImport(o)) => {
-            // UpdateImport: add or update a pinned import in the __metadata__ blob.
-            // to_commit / to_tag are stored as the resolved_commit hint; the plugin
-            // layer uses them when printing the schema. If neither is set, the entry
-            // is added/updated with an empty resolved_commit (re-pins to latest).
-            let resolved = if !o.to_commit.is_empty() {
-                o.to_commit.clone()
-            } else if !o.to_tag.is_empty() {
-                o.to_tag.clone()
-            } else {
-                String::new()
-            };
-            let inner = proto_ops::OpUpdateImport {
-                import_path: o.import_path.clone(),
-                resolved_commit: resolved,
-                remove: false,
-            };
-            (proto_ops::op_tag::UPDATE_IMPORT, inner.encode_to_vec())
-        }
-        None => {
-            return Err(Status::invalid_argument(
-                "ProtobufMutation: operation oneof must be set",
-            ));
-        }
-    };
+        let new_names: std::collections::BTreeSet<&String> =
+            parsed.decls.iter().map(|(n, _)| n).collect();
+        let removes: Vec<String> = base
+            .decls
+            .keys()
+            .filter(|n| !new_names.contains(n))
+            .cloned()
+            .collect();
 
-    Ok(Bytes::from(ProtoOperationEnvelope::encode_op(tag, payload)))
-}
-
-/// Translate a `FlatBuffersMutation` API proto into `FbsOperationEnvelope` bytes.
-fn fbs_to_envelope(m: &FlatBuffersMutation) -> Result<Bytes, Status> {
-    use schemahub_api::schemahub_v1::flat_buffers_mutation::Operation as ApiOp;
-
-    let (tag, payload) = match &m.operation {
-        Some(ApiOp::AddField(o)) => {
-            let inner = fbs_ops::OpAddField {
-                field_name: o.field_name.clone(),
-                field_type: o.field_type.clone(),
-                default_value: o.default_value.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (fbs_ops::op_tag::ADD_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::DeprecateField(o)) => {
-            let inner = fbs_ops::OpDeprecateField {
-                field_name: o.field_name.clone(),
-            };
-            (fbs_ops::op_tag::DEPRECATE_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameField(o)) => {
-            let inner = fbs_ops::OpRenameField {
-                old_field_name: o.old_field_name.clone(),
-                new_field_name: o.new_field_name.clone(),
-            };
-            (fbs_ops::op_tag::RENAME_FIELD, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddTable(o)) => {
-            let inner = fbs_ops::OpAddTable {
-                table_name: o.table_name.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (fbs_ops::op_tag::ADD_TABLE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveTable(o)) => {
-            let inner = fbs_ops::OpRemoveTable {
-                table_name: o.table_name.clone(),
-            };
-            (fbs_ops::op_tag::REMOVE_TABLE, inner.encode_to_vec())
-        }
-        Some(ApiOp::RenameTable(o)) => {
-            let inner = fbs_ops::OpRenameTable {
-                old_name: o.old_name.clone(),
-                new_name: o.new_name.clone(),
-            };
-            (fbs_ops::op_tag::RENAME_TABLE, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddEnum(o)) => {
-            let inner = fbs_ops::OpAddEnum {
-                enum_name: o.enum_name.clone(),
-                base_type: o.base_type.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (fbs_ops::op_tag::ADD_ENUM, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddEnumValue(o)) => {
-            let inner = fbs_ops::OpAddEnumValue {
-                enum_name: o.enum_name.clone(),
-                value_name: o.value_name.clone(),
-                value: o.value,
-                doc_comment: o.doc_comment.clone(),
-            };
-            (fbs_ops::op_tag::ADD_ENUM_VALUE, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddUnion(o)) => {
-            let inner = fbs_ops::OpAddUnion {
-                union_name: o.union_name.clone(),
-                members: o.member_types.clone(),
-                doc_comment: o.doc_comment.clone(),
-            };
-            (fbs_ops::op_tag::ADD_UNION, inner.encode_to_vec())
-        }
-        Some(ApiOp::AddUnionMember(o)) => {
-            let inner = fbs_ops::OpAddUnionMember {
-                union_name: o.union_name.clone(),
-                member_type: o.member_type.clone(),
-            };
-            (fbs_ops::op_tag::ADD_UNION_MEMBER, inner.encode_to_vec())
-        }
-        Some(ApiOp::RemoveUnionMember(o)) => {
-            let inner = fbs_ops::OpRemoveUnionMember {
-                union_name: o.union_name.clone(),
-                member_type: o.member_type.clone(),
-            };
-            (fbs_ops::op_tag::REMOVE_UNION_MEMBER, inner.encode_to_vec())
-        }
-        Some(ApiOp::UpdateImport(o)) => {
-            // to_commit / to_tag are pinning hints not yet modelled in the plugin;
-            // forward the import path with remove=false (add/update semantics).
-            let inner = fbs_ops::OpUpdateImport {
-                import_path: o.import_path.clone(),
-                remove: false,
-            };
-            (fbs_ops::op_tag::UPDATE_IMPORT, inner.encode_to_vec())
-        }
-        None => {
-            return Err(Status::invalid_argument(
-                "FlatBuffersMutation: operation oneof must be set",
-            ));
-        }
-    };
-
-    Ok(Bytes::from(FbsOperationEnvelope::encode_op(tag, payload)))
-}
-
-/// Translate an `OpenApiMutation` API proto into `OpenApiOperationEnvelope` bytes.
-fn openapi_to_envelope(m: &OpenApiMutation) -> Result<Bytes, Status> {
-    use schemahub_api::schemahub_v1::open_api_mutation::Operation as ApiOp;
-
-    let (tag, payload) = match &m.operation {
-        Some(ApiOp::PushDocument(o)) => {
-            let inner = openapi_ops::OpPushDocument {
-                source: o.source.as_bytes().to_vec(),
-            };
-            (openapi_ops::op_tag::PUSH_DOCUMENT, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::AddPath(o)) => {
-            let inner = openapi_ops::OpAddPath {
-                path_pattern: o.path_pattern.clone(),
-                summary: o.summary.clone(),
-                description: o.description.clone(),
-            };
-            (openapi_ops::op_tag::ADD_PATH, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::RemovePath(o)) => {
-            let inner = openapi_ops::OpRemovePath {
-                path_pattern: o.path_pattern.clone(),
-            };
-            (openapi_ops::op_tag::REMOVE_PATH, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::AddOperation(o)) => {
-            let inner = openapi_ops::OpAddOperation {
-                path_pattern: o.path_pattern.clone(),
-                method: o.method.clone(),
-                operation_id: o.operation_id.clone(),
-                summary: o.summary.clone(),
-                description: o.description.clone(),
-            };
-            (openapi_ops::op_tag::ADD_OPERATION, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::RemoveOperation(o)) => {
-            let inner = openapi_ops::OpRemoveOperation {
-                path_pattern: o.path_pattern.clone(),
-                method: o.method.clone(),
-            };
-            (openapi_ops::op_tag::REMOVE_OPERATION, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::AddComponentSchema(o)) => {
-            let inner = openapi_ops::OpAddComponentSchema {
-                schema_name: o.schema_name.clone(),
-                schema_type: o.schema_type.clone(),
-                description: o.description.clone(),
-            };
-            (openapi_ops::op_tag::ADD_COMPONENT_SCHEMA, prost::Message::encode_to_vec(&inner))
-        }
-        Some(ApiOp::RemoveComponentSchema(o)) => {
-            let inner = openapi_ops::OpRemoveComponentSchema {
-                schema_name: o.schema_name.clone(),
-            };
-            (openapi_ops::op_tag::REMOVE_COMPONENT_SCHEMA, prost::Message::encode_to_vec(&inner))
-        }
-        None => {
-            return Err(Status::invalid_argument(
-                "OpenApiMutation: operation oneof must be set",
-            ));
-        }
-    };
-
-    Ok(Bytes::from(OpenApiOperationEnvelope::encode_op(tag, payload)))
-}
-
-/// Build a MutateRequest from its constituent parts.
-fn make_mutate_request(
-    project: String,
-    repo: String,
-    branch: String,
-    base_revision: String,
-    idempotency_key: String,
-    force: bool,
-    mutation: Mutation,
-) -> MutateRequest {
-    MutateRequest {
-        project,
-        repo,
-        branch,
-        base_revision,
-        idempotency_key,
-        force,
-        mutation,
-        token: None,
-        author: "schemahub-server".to_string(),
+        Ok(MutationEffect {
+            meta: Some(parsed.meta),
+            upserts: parsed.decls,
+            removes,
+        })
     }
 }
 
 #[tonic::async_trait]
-impl SchemaService for SchemaServiceImpl {
+impl SchemaService for SchemaHandler {
     async fn create_schema(
         &self,
-        request: Request<CreateSchemaRequest>,
-    ) -> Result<Response<CreateSchemaResponse>, Status> {
-        let req = request.into_inner();
-
-        // Map SchemaFormat to format_id string.
-        let format_id = schema_format_to_id(req.format)?;
-
-        let new_commit = self.core
-            .create_schema(
-                &req.project,
-                &req.repo,
-                &req.branch,
-                &req.schema_name,
-                req.source.as_bytes(),
-                &format_id,
-                &req.base_revision,
-                &req.idempotency_key,
-                "schemahub-server",
-                None,
+        request: Request<pb::CreateSchemaRequest>,
+    ) -> Result<Response<pb::CreateSchemaResponse>, Status> {
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let base_ref = RefSpec::bookmark(r.branch.clone());
+        // First write may target a fresh bookmark; tolerate a missing base.
+        let base = self
+            .core
+            .vcs()
+            .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
+            .unwrap_or_default();
+        let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
+        let write = self
+            .core
+            .vcs()
+            .commit_write(
+                &r.project,
+                &r.repo,
+                &r.branch,
+                &r.schema_name,
+                &base_ref,
+                effect,
+                DEFAULT_AUTHOR,
+                &format!("create schema {}", r.schema_name),
             )
-            .map_err(core_to_status)?;
-
-        Ok(Response::new(CreateSchemaResponse { new_commit }))
+            .map_err(|e| to_status(e.into()))?;
+        let _ = token; // auth is a no-op in the getting-started default
+        Ok(Response::new(pb::CreateSchemaResponse {
+            new_commit: write.commit_id,
+            change_id: write.change_id,
+            conflicted_decls: write.conflicted_decls,
+        }))
     }
 
     async fn update_schema(
         &self,
-        request: Request<UpdateSchemaRequest>,
-    ) -> Result<Response<UpdateSchemaResponse>, Status> {
-        let req = request.into_inner();
-
-        let new_commit = self.core
-            .update_schema(
-                &req.project,
-                &req.repo,
-                &req.branch,
-                &req.schema_name,
-                req.source.as_bytes(),
-                &req.base_revision,
-                &req.idempotency_key,
-                req.force,
-                "schemahub-server",
-                None,
+        request: Request<pb::UpdateSchemaRequest>,
+    ) -> Result<Response<pb::UpdateSchemaResponse>, Status> {
+        let r = request.into_inner();
+        let base_ref = RefSpec::bookmark(r.branch.clone());
+        let base = self
+            .core
+            .vcs()
+            .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
+            .unwrap_or_default();
+        let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
+        let write = self
+            .core
+            .vcs()
+            .commit_write(
+                &r.project,
+                &r.repo,
+                &r.branch,
+                &r.schema_name,
+                &base_ref,
+                effect,
+                DEFAULT_AUTHOR,
+                &format!("update schema {}", r.schema_name),
             )
-            .map_err(core_to_status)?;
-
-        Ok(Response::new(UpdateSchemaResponse { new_commit }))
+            .map_err(|e| to_status(e.into()))?;
+        Ok(Response::new(pb::UpdateSchemaResponse {
+            new_commit: write.commit_id,
+            change_id: write.change_id,
+            conflicted_decls: write.conflicted_decls,
+        }))
     }
 
     async fn delete_schema(
         &self,
-        request: Request<DeleteSchemaRequest>,
-    ) -> Result<Response<DeleteSchemaResponse>, Status> {
-        let req = request.into_inner();
-
-        let new_commit = self.core
-            .delete_schema(
-                &req.project,
-                &req.repo,
-                &req.branch,
-                &req.schema_name,
-                &req.base_revision,
-                &req.idempotency_key,
-                req.force,
-                "schemahub-server",
-                None,
+        request: Request<pb::DeleteSchemaRequest>,
+    ) -> Result<Response<pb::DeleteSchemaResponse>, Status> {
+        let r = request.into_inner();
+        let base_ref = RefSpec::bookmark(r.branch.clone());
+        let base = self
+            .core
+            .vcs()
+            .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
+            .map_err(|e| to_status(e.into()))?;
+        // Remove every declaration in the file (empties the subtree).
+        let effect = MutationEffect {
+            meta: None,
+            upserts: vec![],
+            removes: base.decls.keys().cloned().collect(),
+        };
+        let write = self
+            .core
+            .vcs()
+            .commit_write(
+                &r.project,
+                &r.repo,
+                &r.branch,
+                &r.schema_name,
+                &base_ref,
+                effect,
+                DEFAULT_AUTHOR,
+                &format!("delete schema {}", r.schema_name),
             )
-            .map_err(core_to_status)?;
-
-        Ok(Response::new(DeleteSchemaResponse { new_commit }))
+            .map_err(|e| to_status(e.into()))?;
+        Ok(Response::new(pb::DeleteSchemaResponse {
+            new_commit: write.commit_id,
+            change_id: write.change_id,
+        }))
     }
 
     async fn apply_mutation(
         &self,
-        request: Request<ApplyMutationRequest>,
-    ) -> Result<Response<ApplyMutationResponse>, Status> {
-        let req = request.into_inner();
-
-        // Determine format_id and translate the API-level operation to internal envelope bytes.
-        let (format_id, schema_path_str, operation_bytes) = match req.operation {
-            Some(MutationOperation::ProtobufOp(ref proto_mut)) => {
-                let schema_path = proto_mut.schema_path.clone();
-                let bytes = proto_to_envelope(proto_mut)?;
-                ("protobuf".to_string(), schema_path, bytes)
-            }
-            Some(MutationOperation::FbsOp(ref fbs_mut)) => {
-                let schema_path = fbs_mut.schema_path.clone();
-                let bytes = fbs_to_envelope(fbs_mut)?;
-                ("flatbuffers".to_string(), schema_path, bytes)
-            }
-            Some(MutationOperation::OpenapiOp(ref openapi_mut)) => {
-                let schema_path = openapi_mut.schema_path.clone();
-                let bytes = openapi_to_envelope(openapi_mut)?;
-                ("openapi".to_string(), schema_path, bytes)
-            }
-            None => {
-                return Err(Status::invalid_argument(
-                    "ApplyMutationRequest: operation oneof must be set",
-                ));
-            }
-        };
-
-        // Extract the declaration name from the inner operation.
-        let declaration_name = extract_declaration_name(&req.operation);
-
-        let mutation = Mutation {
-            schema_path: SchemaPath::new(req.project.clone(), req.repo.clone(), schema_path_str),
-            format_id,
-            declaration_name,
-            operation: operation_bytes,
-        };
-
-        let mutate_req = make_mutate_request(
-            req.project,
-            req.repo,
-            req.branch,
-            req.base_revision,
-            req.idempotency_key,
-            req.force,
+        request: Request<pb::ApplyMutationRequest>,
+    ) -> Result<Response<pb::ApplyMutationResponse>, Status> {
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let op = r
+            .operation
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("apply_mutation: operation oneof not set"))?;
+        let mutation = wire::apply_mutation_op_to_core(&r.project, &r.repo, op)?;
+        let req = MutationRequest {
+            bookmark: r.branch.clone(),
             mutation,
-        );
-
-        let new_commit = self.core.apply_mutation(mutate_req).map_err(core_to_status)?;
-        Ok(Response::new(ApplyMutationResponse { new_commit }))
+            author: DEFAULT_AUTHOR.to_string(),
+            message: format!("mutation on {}", r.branch),
+            force: r.force,
+            idempotency_key: (!r.idempotency_key.is_empty()).then(|| r.idempotency_key.clone()),
+            token,
+        };
+        let resp = self.core.apply_mutation(req).map_err(to_status)?;
+        Ok(Response::new(pb::ApplyMutationResponse {
+            new_commit: resp.commit_id,
+            change_id: resp.change_id,
+            conflicted_decls: resp.conflicted_decls,
+        }))
     }
 
     async fn apply_transaction(
         &self,
-        request: Request<ApplyTransactionRequest>,
-    ) -> Result<Response<ApplyTransactionResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.operations.is_empty() {
-            return Err(Status::invalid_argument(
-                "ApplyTransactionRequest: operations must not be empty",
-            ));
+        request: Request<pb::ApplyTransactionRequest>,
+    ) -> Result<Response<pb::ApplyTransactionResponse>, Status> {
+        let token = token_from(&request);
+        let r = request.into_inner();
+        if r.operations.is_empty() {
+            return Err(Status::invalid_argument("transaction has no operations"));
         }
-
-        let mut mutations: Vec<Mutation> = Vec::new();
-
-        for tx_op in req.operations {
-            let mutation = match tx_op.operation {
-                Some(TxOp::ProtobufOp(ref proto_mut)) => {
-                    let schema_path_str = proto_mut.schema_path.clone();
-                    let decl_name = extract_proto_decl_name(proto_mut);
-                    let bytes = proto_to_envelope(proto_mut)?;
-                    Mutation {
-                        schema_path: SchemaPath::new(
-                            req.project.clone(),
-                            req.repo.clone(),
-                            schema_path_str,
-                        ),
-                        format_id: "protobuf".to_string(),
-                        declaration_name: decl_name,
-                        operation: bytes,
-                    }
-                }
-                Some(TxOp::FbsOp(ref fbs_mut)) => {
-                    let schema_path_str = fbs_mut.schema_path.clone();
-                    let decl_name = extract_fbs_decl_name(fbs_mut);
-                    let bytes = fbs_to_envelope(fbs_mut)?;
-                    Mutation {
-                        schema_path: SchemaPath::new(
-                            req.project.clone(),
-                            req.repo.clone(),
-                            schema_path_str,
-                        ),
-                        format_id: "flatbuffers".to_string(),
-                        declaration_name: decl_name,
-                        operation: bytes,
-                    }
-                }
-                None => {
-                    return Err(Status::invalid_argument(
-                        "TransactionOp: operation oneof must be set",
-                    ));
-                }
-            };
-            mutations.push(mutation);
+        let mut mutations = Vec::with_capacity(r.operations.len());
+        for tx_op in &r.operations {
+            let op = tx_op
+                .operation
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("transaction op oneof not set"))?;
+            mutations.push(wire::transaction_op_to_core(&r.project, &r.repo, op)?);
         }
-
-        let batch_req = BatchMutateRequest {
-            project: req.project,
-            repo: req.repo,
-            branch: req.branch,
-            base_revision: req.base_revision,
-            idempotency_key: req.idempotency_key,
-            force: req.force,
+        let req = TransactionRequest {
+            bookmark: r.branch.clone(),
             mutations,
-            token: None,
-            author: "schemahub-server".to_string(),
+            author: DEFAULT_AUTHOR.to_string(),
+            message: format!("transaction on {}", r.branch),
+            force: r.force,
+            idempotency_key: (!r.idempotency_key.is_empty()).then(|| r.idempotency_key.clone()),
+            token,
         };
-
-        let new_commit = self.core.apply_mutations(batch_req).map_err(core_to_status)?;
-        Ok(Response::new(ApplyTransactionResponse { new_commit }))
-    }
-}
-
-/// Map a SchemaFormat integer to a format_id string.
-fn schema_format_to_id(format: i32) -> Result<String, Status> {
-    // SchemaFormat enum values from common.proto:
-    // 0 = UNSPECIFIED, 1 = PROTOBUF, 2 = FLATBUFFERS, 3 = OPENAPI
-    match format {
-        1 => Ok("protobuf".to_string()),
-        2 => Ok("flatbuffers".to_string()),
-        3 => Ok("openapi".to_string()),
-        _ => Err(Status::invalid_argument(format!(
-            "unknown or unspecified SchemaFormat: {format}"
-        ))),
-    }
-}
-
-/// Extract the primary declaration name from the mutation operation oneof.
-/// For message mutations, this is the message/enum/service/table name.
-/// Falls back to "__root__" when the mutation targets the whole document.
-fn extract_declaration_name(
-    operation: &Option<schemahub_api::schemahub_v1::apply_mutation_request::Operation>,
-) -> String {
-    match operation {
-        Some(MutationOperation::ProtobufOp(proto_mut)) => {
-            extract_proto_decl_name(proto_mut)
-        }
-        Some(MutationOperation::FbsOp(fbs_mut)) => {
-            extract_fbs_decl_name(fbs_mut)
-        }
-        Some(MutationOperation::OpenapiOp(openapi_mut)) => {
-            extract_openapi_decl_name(openapi_mut)
-        }
-        None => "__root__".to_string(),
-    }
-}
-
-fn extract_proto_decl_name(m: &ProtobufMutation) -> String {
-    use schemahub_api::schemahub_v1::protobuf_mutation::Operation as ProtoOp;
-    match &m.operation {
-        Some(ProtoOp::AddField(o)) => o.message_name.clone(),
-        Some(ProtoOp::RemoveField(o)) => o.message_name.clone(),
-        Some(ProtoOp::RenameField(o)) => o.message_name.clone(),
-        Some(ProtoOp::ChangeFieldType(o)) => o.message_name.clone(),
-        Some(ProtoOp::ChangeFieldLabel(o)) => o.message_name.clone(),
-        Some(ProtoOp::ReorderFields(o)) => o.message_name.clone(),
-        Some(ProtoOp::AddMessage(o)) => o.message_name.clone(),
-        Some(ProtoOp::RemoveMessage(o)) => o.message_name.clone(),
-        Some(ProtoOp::RenameMessage(o)) => o.old_name.clone(),
-        Some(ProtoOp::AddEnum(o)) => o.enum_name.clone(),
-        Some(ProtoOp::RemoveEnum(o)) => o.enum_name.clone(),
-        Some(ProtoOp::AddEnumValue(o)) => o.enum_name.clone(),
-        Some(ProtoOp::RemoveEnumValue(o)) => o.enum_name.clone(),
-        Some(ProtoOp::RenameEnumValue(o)) => o.enum_name.clone(),
-        Some(ProtoOp::AddService(o)) => o.service_name.clone(),
-        Some(ProtoOp::RemoveService(o)) => o.service_name.clone(),
-        Some(ProtoOp::AddRpc(o)) => o.service_name.clone(),
-        Some(ProtoOp::RemoveRpc(o)) => o.service_name.clone(),
-        Some(ProtoOp::RenameRpc(o)) => o.service_name.clone(),
-        Some(ProtoOp::UpdateImport(_)) => "__metadata__".to_string(),
-        None => "__root__".to_string(),
-    }
-}
-
-fn extract_fbs_decl_name(m: &FlatBuffersMutation) -> String {
-    use schemahub_api::schemahub_v1::flat_buffers_mutation::Operation as FbsOp;
-    match &m.operation {
-        Some(FbsOp::AddField(o)) => o.table_name.clone(),
-        Some(FbsOp::DeprecateField(o)) => o.table_name.clone(),
-        Some(FbsOp::RenameField(o)) => o.table_name.clone(),
-        Some(FbsOp::AddTable(o)) => o.table_name.clone(),
-        Some(FbsOp::RemoveTable(o)) => o.table_name.clone(),
-        Some(FbsOp::RenameTable(o)) => o.old_name.clone(),
-        Some(FbsOp::AddEnum(o)) => o.enum_name.clone(),
-        Some(FbsOp::AddEnumValue(o)) => o.enum_name.clone(),
-        Some(FbsOp::AddUnion(o)) => o.union_name.clone(),
-        Some(FbsOp::AddUnionMember(o)) => o.union_name.clone(),
-        Some(FbsOp::RemoveUnionMember(o)) => o.union_name.clone(),
-        Some(FbsOp::UpdateImport(_)) => "__metadata__".to_string(),
-        None => "__root__".to_string(),
-    }
-}
-
-fn extract_openapi_decl_name(m: &OpenApiMutation) -> String {
-    use schemahub_api::schemahub_v1::open_api_mutation::Operation as ApiOp;
-    match &m.operation {
-        Some(ApiOp::PushDocument(_)) => "__document__".to_string(),
-        Some(ApiOp::AddPath(o)) => format!("path:{}", o.path_pattern),
-        Some(ApiOp::RemovePath(o)) => format!("path:{}", o.path_pattern),
-        Some(ApiOp::AddOperation(o)) => format!("path:{}", o.path_pattern),
-        Some(ApiOp::RemoveOperation(o)) => format!("path:{}", o.path_pattern),
-        Some(ApiOp::AddComponentSchema(o)) => format!("schema:{}", o.schema_name),
-        Some(ApiOp::RemoveComponentSchema(o)) => format!("schema:{}", o.schema_name),
-        None => "__document__".to_string(),
+        let resp = self.core.apply_mutations(req).map_err(to_status)?;
+        Ok(Response::new(pb::ApplyTransactionResponse {
+            new_commit: resp.commit_id,
+            change_id: resp.change_id,
+            conflicted_decls: resp.conflicted_decls,
+        }))
     }
 }

@@ -1,19 +1,30 @@
-use crate::SchemaPath;
+//! Typed-op mutation envelope and its effect (design.md §2, §5).
+
 use bytes::Bytes;
 
-/// An opaque mutation envelope passed from the gRPC handler to the core,
-/// and from the core to the FormatPlugin. The core never inspects `operation`
-/// — it only uses `format_id` to select the right plugin.
+use crate::blob::{DeclBlob, MetaBlob};
+use crate::schema_path::SchemaPath;
+
+/// An opaque mutation envelope passed from the gRPC handler to the core, and
+/// from the core to the `Compiler`. The core never inspects `operation` — it
+/// only uses `format_id` to select the right compiler.
 #[derive(Clone, Debug)]
 pub struct Mutation {
     /// Which schema file to mutate.
     pub schema_path: SchemaPath,
-    /// Which plugin handles this mutation, e.g. "protobuf", "flatbuffers", "openapi".
+    /// Which compiler handles this mutation: "protobuf" | "flatbuffers" | "openapi".
     pub format_id: String,
-    /// The name of the declaration to load from the schema tree before calling
-    /// apply_mutation. For new declarations (e.g. ProtoAddMessage), this is the
-    /// name to create. For existing ones it's the lookup key.
-    pub declaration_name: String,
-    /// Format-specific operation bytes. Deserialized only by the plugin.
+    /// Format-specific operation bytes. Deserialized only by the compiler.
     pub operation: Bytes,
+}
+
+/// What a mutation produced: changed/added/removed decls + possibly new meta.
+#[derive(Clone, Debug, Default)]
+pub struct MutationEffect {
+    /// New file-level metadata, if the mutation changed it (e.g. added an import).
+    pub meta: Option<MetaBlob>,
+    /// Declarations to create or replace, by name.
+    pub upserts: Vec<(String, DeclBlob)>,
+    /// Declaration names to remove.
+    pub removes: Vec<String>,
 }

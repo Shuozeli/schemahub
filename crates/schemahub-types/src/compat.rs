@@ -8,13 +8,25 @@ pub enum CompatibilityDirection {
     Disabled,
 }
 
-/// The compatibility configuration applied to a branch mutation.
+/// The compatibility configuration applied to a bookmark mutation (design.md §7).
 #[derive(Clone, Debug)]
 pub struct CompatibilityRules {
     pub direction: CompatibilityDirection,
+    /// When true, all compatibility checks are skipped.
+    pub disabled: bool,
 }
 
-/// A single compatibility violation found by FormatPlugin::check_compatibility.
+impl CompatibilityRules {
+    /// Default rules: FULL compatibility, enabled.
+    pub fn full() -> Self {
+        Self {
+            direction: CompatibilityDirection::Full,
+            disabled: false,
+        }
+    }
+}
+
+/// A single compatibility violation found by `Compiler::check_compatibility`.
 #[derive(Clone, Debug)]
 pub struct CompatibilityViolation {
     pub declaration_name: String,

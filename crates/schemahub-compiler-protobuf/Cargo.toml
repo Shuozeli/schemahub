@@ -1,0 +1,15 @@
+[package]
+name    = "schemahub-compiler-protobuf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+schemahub-types = { path = "../schemahub-types" }
+bytes           = { workspace = true }
+# Sibling protobuf compiler (wraps parser/schema/codegen). Declared per
+# crate-structure.md §3.5.
+protoc-rs-parser  = { workspace = true }
+protoc-rs-schema  = { workspace = true }
+protoc-rs-codegen = { workspace = true }
+prost             = { workspace = true }
+thiserror         = { workspace = true }

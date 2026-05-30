@@ -47,6 +47,8 @@ message CreateSchemaRequest {
 
 message CreateSchemaResponse {
   string new_commit = 1;  // hash of the commit created
+  string change_id  = 2;  // stable jj change-id (durable identity, design.md §5.1)
+  repeated string conflicted_decls = 3;  // decls that landed conflicted (concurrency)
 }
 
 // ── UpdateSchema ──────────────────────────────────────────────────────────────
@@ -64,6 +66,8 @@ message UpdateSchemaRequest {
 
 message UpdateSchemaResponse {
   string new_commit = 1;
+  string change_id  = 2;
+  repeated string conflicted_decls = 3;
 }
 
 // ── DeleteSchema ──────────────────────────────────────────────────────────────
@@ -80,6 +84,7 @@ message DeleteSchemaRequest {
 
 message DeleteSchemaResponse {
   string new_commit = 1;
+  string change_id  = 2;
 }
 
 // ── ApplyMutation ─────────────────────────────────────────────────────────────
@@ -100,6 +105,8 @@ message ApplyMutationRequest {
 
 message ApplyMutationResponse {
   string new_commit = 1;
+  string change_id  = 2;
+  repeated string conflicted_decls = 3;
 }
 
 // ── ApplyTransaction ──────────────────────────────────────────────────────────
@@ -128,4 +135,6 @@ message TransactionOp {
 
 message ApplyTransactionResponse {
   string new_commit = 1;
+  string change_id  = 2;
+  repeated string conflicted_decls = 3;
 }

@@ -22,7 +22,7 @@ pub enum DeclKind {
 }
 
 /// A lightweight summary of one top-level declaration.
-/// Returned by FormatPlugin::list_declarations and the ListDeclarations RPC.
+/// Returned by `Compiler::summarize_decl` and the ListDeclarations RPC.
 #[derive(Clone, Debug)]
 pub struct DeclSummary {
     /// The declaration's name as it appears in the schema tree key.
@@ -35,7 +35,7 @@ pub struct DeclSummary {
 
 /// Full detail for one named declaration, as format-specific bytes.
 /// The core forwards this to the client without interpretation.
-/// The client-side plugin library deserializes it for display.
+/// The client-side library deserializes it for display.
 #[derive(Clone, Debug)]
 pub struct DeclDetail(pub Bytes);
 
@@ -46,5 +46,17 @@ impl DeclDetail {
 
     pub fn as_bytes(&self) -> &Bytes {
         &self.0
+    }
+}
+
+/// A type name a declaration references (for FollowType / rename propagation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeRef {
+    pub name: String,
+}
+
+impl TypeRef {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 }
