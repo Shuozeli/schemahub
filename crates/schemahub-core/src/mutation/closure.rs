@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use schemahub_types::{Compiler, SchemaClosure, SchemaPath};
 use schemahub_vcs::{RefSpec, Vcs};
 
-use crate::error::{CoreError, CoreResult};
+use crate::error::CoreResult;
 
 /// Build the transitive closure rooted at `root` resolved at `root_ref`.
 pub(crate) fn build(
@@ -72,10 +72,3 @@ fn parse_import_path(path: &str) -> Option<SchemaPath> {
     Some(SchemaPath::new(project, repo, schema))
 }
 
-/// Helper for converting a malformed closure into a core error (kept for symmetry
-/// / future use by callers needing strict resolution).
-#[allow(dead_code)]
-pub(crate) fn require_resolved(path: &str) -> CoreResult<SchemaPath> {
-    parse_import_path(path)
-        .ok_or_else(|| CoreError::Other(format!("unresolvable import path: {path}")))
-}

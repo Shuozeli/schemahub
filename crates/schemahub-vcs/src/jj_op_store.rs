@@ -12,7 +12,7 @@
 //! tags, and workspace working-copy pointers (kept for fidelity even though we
 //! never create a working copy). Remote/git fields are always empty.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -331,6 +331,3 @@ impl StoredOperation {
     }
 }
 
-/// Marker used by `HashSet`-based reachability in case it's needed later.
-#[allow(dead_code)]
-type _ReachableViews = HashSet<ViewId>;

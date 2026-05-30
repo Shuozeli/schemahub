@@ -111,7 +111,7 @@ pub fn print_file(file: &FileDescriptorProto) -> String {
         tops.push((start_line(&[FILE_SERVICE, i as i32]), FILE_SERVICE, i, Top::Svc(i)));
     }
     // Sort by source line, then (kind, index) as a stable tiebreaker.
-    tops.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    tops.sort_by_key(|t| (t.0, t.1, t.2));
 
     for (_, _, _, top) in &tops {
         match *top {

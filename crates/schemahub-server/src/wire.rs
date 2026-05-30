@@ -14,7 +14,7 @@ use schemahub_api::schemahub_v1 as pb;
 use schemahub_compiler_flatbuffers::FbsOp;
 use schemahub_compiler_openapi::operations::OpenApiOp;
 use schemahub_compiler_protobuf::{
-    tag, OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality,
+    OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality,
     OpChangeFieldType, OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage,
     OpRemoveEnumValue, OpRemoveField, OpRemoveRpc, OpRemoveService, OpRenameEnumValue,
     OpRenameField, OpRenameMessage, OpRenameRpc, OpUpdateImport, ProtoOp,
@@ -204,9 +204,6 @@ pub fn protobuf_mutation_to_core(
             remove: false,
         }),
     };
-
-    // Sanity: every op tag is known (defensive; `encode` never produces unknown).
-    debug_assert!(tag::ADD_FIELD > 0);
 
     Ok(Mutation {
         schema_path: SchemaPath::new(project, repo, m.schema_path.clone()),

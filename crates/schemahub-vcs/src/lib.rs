@@ -928,11 +928,9 @@ impl Vcs {
             .and_then(|v| self.tree_value_blob(&jj_repo, v).transpose())
             .transpose()?;
         let mut sides = Vec::new();
-        for add in value.adds() {
-            if let Some(v) = add {
-                if let Some(blob) = self.tree_value_blob(&jj_repo, v)? {
-                    sides.push(blob);
-                }
+        for v in value.adds().flatten() {
+            if let Some(blob) = self.tree_value_blob(&jj_repo, v)? {
+                sides.push(blob);
             }
         }
         Ok(ConflictSides { base, sides })

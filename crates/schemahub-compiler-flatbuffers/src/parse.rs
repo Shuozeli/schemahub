@@ -59,7 +59,7 @@ pub fn parse(source: &str) -> Result<ParsedSchema, ParseError> {
             order_entries.push((s.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX), 2, n.clone()));
         }
     }
-    order_entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    order_entries.sort_by_key(|e| (e.0, e.1));
     let decl_order: Vec<String> = order_entries.into_iter().map(|(_, _, n)| n).collect();
 
     let meta = FbsMeta {
