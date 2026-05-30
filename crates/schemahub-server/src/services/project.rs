@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use schemahub_core::Core;
-use schemahub_types::{Role, Visibility};
+use schemahub_types::{Action, Role, Visibility};
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
@@ -107,7 +107,16 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::CreateRepoRequest>,
     ) -> Result<Response<pb::CreateRepoResponse>, Status> {
+        let token = token_from(&request)?;
         let r = request.into_inner();
+        // \"Create repo\" in the jj model is implicit (the first write to a
+        // `(project, repo)` materialises it), so this RPC just echoes the
+        // requested config. Even so, it must (a) authorize the caller and
+        // (b) validate the project exists — without those, anonymous
+        // callers could probe for project names and the call would lie.
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::ManageRepo, &r.project, &r.name)
+            .map_err(to_status)?;
         Ok(Response::new(pb::CreateRepoResponse {
             repo: Some(pb::RepoConfig {
                 project: r.project,
@@ -131,7 +140,13 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::GetRepoRequest>,
     ) -> Result<Response<pb::GetRepoResponse>, Status> {
+        let token = token_from(&request)?;
         let r = request.into_inner();
+        // Reads on a (project, repo) must still pass the read gate so
+        // private projects don't leak repo existence to anonymous callers.
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::Read, &r.project, &r.repo)
+            .map_err(to_status)?;
         Ok(Response::new(pb::GetRepoResponse {
             repo: Some(pb::RepoConfig {
                 project: r.project,
@@ -147,7 +162,11 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::UpdateRepoRequest>,
     ) -> Result<Response<pb::UpdateRepoResponse>, Status> {
+        let token = token_from(&request)?;
         let r = request.into_inner();
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::ManageRepo, &r.project, &r.repo)
+            .map_err(to_status)?;
         Ok(Response::new(pb::UpdateRepoResponse {
             repo: Some(pb::RepoConfig {
                 project: r.project,
@@ -165,9 +184,17 @@ impl ProjectService for ProjectHandler {
 
     async fn list_repos(
         &self,
-        _request: Request<pb::ListReposRequest>,
+        request: Request<pb::ListReposRequest>,
     ) -> Result<Response<pb::ListReposResponse>, Status> {
-        Ok(Response::new(pb::ListReposResponse { repos: vec![] }))
+        // Enumerating repos requires a persisted repo registry, which the
+        // VCS layer doesn't keep — implicit-on-first-write means we can't
+        // distinguish \"empty project\" from \"project with no writes yet\".
+        // Returning \`vec![]\` would lie to clients; surface the gap.
+        let _ = token_from(&request)?;
+        Err(Status::unimplemented(
+            "ListRepos is not supported by the implicit jj repo model in v1; \
+             use ListBranches on a known (project, repo) instead",
+        ))
     }
 
     async fn delete_repo(
