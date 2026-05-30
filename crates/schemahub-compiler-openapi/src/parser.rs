@@ -7,6 +7,8 @@
 //! pair where the tree key is the stable path-model key
 //! (`path:…`, `schema:…`, `param:…`, `response:…`, `requestBody:…`).
 
+use std::str::FromStr as _;
+
 use schemahub_types::errors::ParseError;
 use schemahub_types::parsed::ParsedSchema;
 use serde_yaml::Value;
@@ -198,7 +200,11 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
     let http_methods = ["get", "post", "put", "delete", "patch", "head", "options", "trace"];
     for method_str in &http_methods {
         if let Some(op_val) = map.get(*method_str) {
-            let method = HttpMethod::from_str(method_str).unwrap();
+            // The input is a string literal from `http_methods`, so this
+            // never errors — but use `expect` rather than `unwrap` for
+            // clarity in case the literal list ever drifts.
+            let method = HttpMethod::from_str(method_str)
+                .expect("http_methods literal must be a valid HttpMethod");
             operations.push(parse_operation_def(method, op_val));
         }
     }
@@ -286,6 +292,9 @@ fn parse_parameter_def(val: &Value) -> ParameterDef {
     let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned();
     let location_str = map.get("in").and_then(|v| v.as_str()).unwrap_or("query");
     let location = ParameterLocation::from_str(location_str).unwrap_or(ParameterLocation::Query);
+    // NOTE: an unknown `in` value falls back to Query for v1 leniency; a
+    // stricter pass would surface ParseError. Tracked in
+    // docs/code-quality-findings.md §8.
     let description = map.get("description").and_then(|v| v.as_str()).map(str::to_owned);
     let required = map.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
@@ -417,7 +426,7 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
             JsonSchemaType::from_str(s).map(|t| vec![t]).unwrap_or_default()
         } else if let Some(seq) = type_val.as_sequence() {
             seq.iter()
-                .filter_map(|t| t.as_str().and_then(JsonSchemaType::from_str))
+                .filter_map(|t| t.as_str().and_then(|s| JsonSchemaType::from_str(s).ok()))
                 .collect()
         } else {
             vec![]

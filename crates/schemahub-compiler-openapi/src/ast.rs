@@ -7,10 +7,28 @@
 //!
 //! Every blob carries `blob_version` for migration (see `openapi-ast.md` §8).
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 /// The current blob format version for every OpenAPI decl/meta blob.
 pub const BLOB_VERSION: u32 = 1;
+
+/// Error returned by the `FromStr` impls on this module's enums when the
+/// input string is not a recognised variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownVariant {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+impl std::fmt::Display for UnknownVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown {} variant: {:?}", self.kind, self.value)
+    }
+}
+
+impl std::error::Error for UnknownVariant {}
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -28,20 +46,6 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "get" => Some(Self::Get),
-            "post" => Some(Self::Post),
-            "put" => Some(Self::Put),
-            "delete" => Some(Self::Delete),
-            "patch" => Some(Self::Patch),
-            "head" => Some(Self::Head),
-            "options" => Some(Self::Options),
-            "trace" => Some(Self::Trace),
-            _ => None,
-        }
-    }
-
     pub fn to_str(self) -> &'static str {
         match self {
             Self::Get => "get",
@@ -56,6 +60,27 @@ impl HttpMethod {
     }
 }
 
+impl FromStr for HttpMethod {
+    type Err = UnknownVariant;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "get" => Ok(Self::Get),
+            "post" => Ok(Self::Post),
+            "put" => Ok(Self::Put),
+            "delete" => Ok(Self::Delete),
+            "patch" => Ok(Self::Patch),
+            "head" => Ok(Self::Head),
+            "options" => Ok(Self::Options),
+            "trace" => Ok(Self::Trace),
+            _ => Err(UnknownVariant {
+                kind: "HttpMethod",
+                value: s.to_string(),
+            }),
+        }
+    }
+}
+
 /// Where a parameter appears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParameterLocation {
@@ -66,22 +91,29 @@ pub enum ParameterLocation {
 }
 
 impl ParameterLocation {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "query" => Some(Self::Query),
-            "header" => Some(Self::Header),
-            "path" => Some(Self::Path),
-            "cookie" => Some(Self::Cookie),
-            _ => None,
-        }
-    }
-
     pub fn to_str(self) -> &'static str {
         match self {
             Self::Query => "query",
             Self::Header => "header",
             Self::Path => "path",
             Self::Cookie => "cookie",
+        }
+    }
+}
+
+impl FromStr for ParameterLocation {
+    type Err = UnknownVariant;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "query" => Ok(Self::Query),
+            "header" => Ok(Self::Header),
+            "path" => Ok(Self::Path),
+            "cookie" => Ok(Self::Cookie),
+            _ => Err(UnknownVariant {
+                kind: "ParameterLocation",
+                value: s.to_string(),
+            }),
         }
     }
 }
@@ -99,19 +131,6 @@ pub enum JsonSchemaType {
 }
 
 impl JsonSchemaType {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "string" => Some(Self::String),
-            "integer" => Some(Self::Integer),
-            "number" => Some(Self::Number),
-            "boolean" => Some(Self::Boolean),
-            "array" => Some(Self::Array),
-            "object" => Some(Self::Object),
-            "null" => Some(Self::Null),
-            _ => None,
-        }
-    }
-
     pub fn to_str(self) -> &'static str {
         match self {
             Self::String => "string",
@@ -121,6 +140,26 @@ impl JsonSchemaType {
             Self::Array => "array",
             Self::Object => "object",
             Self::Null => "null",
+        }
+    }
+}
+
+impl FromStr for JsonSchemaType {
+    type Err = UnknownVariant;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "string" => Ok(Self::String),
+            "integer" => Ok(Self::Integer),
+            "number" => Ok(Self::Number),
+            "boolean" => Ok(Self::Boolean),
+            "array" => Ok(Self::Array),
+            "object" => Ok(Self::Object),
+            "null" => Ok(Self::Null),
+            _ => Err(UnknownVariant {
+                kind: "JsonSchemaType",
+                value: s.to_string(),
+            }),
         }
     }
 }

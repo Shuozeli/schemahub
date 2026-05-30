@@ -329,7 +329,7 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
         } => {
             let key = format!("path:{path_pattern}");
             let mut path_blob = load_path_item(schema, &key)?;
-            let method_enum = ast::HttpMethod::from_str(method).ok_or_else(|| {
+            let method_enum: ast::HttpMethod = method.parse().map_err(|_| {
                 MutationError::InvalidOperation(format!("unknown HTTP method: '{method}'"))
             })?;
             if path_blob.operations.iter().any(|o| o.method == method_enum) {
@@ -348,7 +348,7 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
         OpenApiOp::RemoveOperation { path_pattern, method } => {
             let key = format!("path:{path_pattern}");
             let mut path_blob = load_path_item(schema, &key)?;
-            let method_enum = ast::HttpMethod::from_str(method).ok_or_else(|| {
+            let method_enum: ast::HttpMethod = method.parse().map_err(|_| {
                 MutationError::InvalidOperation(format!("unknown HTTP method: '{method}'"))
             })?;
             let before = path_blob.operations.len();
@@ -371,9 +371,9 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
             let types = if schema_type.is_empty() {
                 vec![]
             } else {
-                match JsonSchemaType::from_str(schema_type) {
-                    Some(t) => vec![t],
-                    None => {
+                match schema_type.parse::<JsonSchemaType>() {
+                    Ok(t) => vec![t],
+                    Err(_) => {
                         return Err(MutationError::InvalidOperation(format!(
                             "unknown JSON schema type: '{schema_type}'"
                         )))
