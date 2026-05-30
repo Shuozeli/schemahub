@@ -113,8 +113,9 @@ impl Core {
         Ok(self.vcs.create_tag(project, repo, name, at, author)?)
     }
 
-    /// Delete a tag. Requires `Write` (the server additionally gates this behind
-    /// a `force` flag because tags are immutable pins — design.md §12).
+    /// Delete a tag. Requires `Force` (Maintainer+) — tags are immutable pins
+    /// (design.md §6.3, §12), so retracting one is a privileged "force"-class
+    /// action even though it touches no commits.
     pub fn delete_tag(
         &self,
         project: &str,
@@ -127,7 +128,7 @@ impl Core {
             self.authn.as_ref(),
             self.authz.as_ref(),
             token,
-            Action::Write,
+            Action::Force,
             project,
             repo,
         )?;

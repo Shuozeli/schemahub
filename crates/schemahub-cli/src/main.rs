@@ -4,7 +4,7 @@ mod config;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
-use cmd::{branch, codegen, field, history, log, repo, schema, tag};
+use cmd::{branch, codegen, field, history, log, project, repo, schema, tag};
 
 #[derive(Parser)]
 #[command(name = "schemahub", about = "schemahub schema registry CLI", version)]
@@ -29,6 +29,8 @@ struct Cli {
 enum Commands {
     /// Initialize a project and repo on the server
     Repo(repo::RepoArgs),
+    /// Project + member management (design.md §6 RBAC)
+    Project(project::ProjectArgs),
     /// Schema file lifecycle operations
     Schema(schema::SchemaArgs),
     /// Field mutations on Protobuf schemas
@@ -74,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Repo(args) => {
             let ch = client::build_channel(&cfg.server).await?;
             repo::run(args, ch).await
+        }
+        Commands::Project(args) => {
+            let ch = client::build_channel(&cfg.server).await?;
+            project::run(args, ch, &cfg.token).await
         }
         Commands::Schema(args) => {
             let ch = client::build_channel(&cfg.server).await?;

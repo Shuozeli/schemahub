@@ -1,11 +1,13 @@
 //! Server configuration (crate-structure.md §3.6): db backend + path, listen
-//! address, and bootstrap per-repo compatibility config. Loaded from
-//! `schemahub.toml` (optional) and overridable by CLI flags.
+//! address, bootstrap per-repo compatibility config, and (new in P0)
+//! `[auth]` + `[projects.<name>]` sections that drive the RBAC layer
+//! (design.md §6). Loaded from `schemahub.toml` (optional) and overridable
+//! by CLI flags.
 
 use std::collections::HashMap;
 
 use schemahub_core::{RepoConfig, RepoConfigStore};
-use schemahub_types::CompatibilityDirection;
+use schemahub_types::{CompatibilityDirection, Identity, Role, Visibility};
 use serde::Deserialize;
 
 /// Top-level server config, deserialized from `schemahub.toml`.
@@ -18,6 +20,16 @@ pub struct Config {
     /// Per-repo compatibility/protection config, keyed by "project/repo".
     #[serde(default)]
     pub repos: HashMap<String, RepoSection>,
+    /// AuthN/AuthZ configuration. When absent or empty, the server installs
+    /// the Noop providers and the RBAC layer is effectively off (today's
+    /// behavior — every request is anonymous, every action allowed).
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// Project bootstrap, keyed by project name. Seeds the project + role
+    /// registries on startup (idempotent: if the registries already hold an
+    /// entry, the bootstrap does not overwrite it).
+    #[serde(default)]
+    pub projects: HashMap<String, ProjectSection>,
 }
 
 /// Storage backend config. `backend` selects between the embedded redb default
@@ -75,6 +87,88 @@ pub struct RepoSection {
     pub protected_bookmarks: Option<Vec<String>>,
 }
 
+/// `[auth]` section — wires the real `BearerTokenAuthn` + `RoleBasedAuthz`
+/// when populated. Empty / absent ⇒ Noop providers (today's behavior).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AuthConfig {
+    /// Directory for the file-backed role + project stores (created on first
+    /// write). Defaults to "schemahub-data". Honored only when at least one
+    /// auth-related field is present.
+    #[serde(default = "default_auth_data_dir")]
+    pub data_dir: String,
+    /// Static bearer-token table: token → identity. When absent or empty, the
+    /// server installs `NoopAuthn` + `NoopAuthz` (anonymous everything).
+    #[serde(default)]
+    pub tokens: HashMap<String, TokenIdentity>,
+}
+
+/// Identity associated with a bearer token in `[auth].tokens`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub display: Option<String>,
+}
+
+impl TokenIdentity {
+    pub fn to_identity(&self) -> Identity {
+        match &self.display {
+            Some(d) => Identity::user_with_display(&self.id, d),
+            None => Identity::user(&self.id),
+        }
+    }
+}
+
+/// `[projects.<name>]` bootstrap. Seeds the project + role registries at
+/// startup so an admin doesn't have to call `CreateProject` / `AddMember` by
+/// hand for every project the server should know about on day one.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProjectSection {
+    /// "public" | "private". Defaults to "private".
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// Identity ids to install as Owners on first boot. Each id is set to
+    /// `Role::Owner` in the role store.
+    #[serde(default)]
+    pub owners: Vec<String>,
+    /// Optional starter members keyed `identity_id = "<role>"`.
+    #[serde(default)]
+    pub members: HashMap<String, String>,
+}
+
+impl ProjectSection {
+    /// Resolve the configured visibility string. Unknown / missing values
+    /// fall back to Private (fail-closed).
+    pub fn parsed_visibility(&self) -> Visibility {
+        match self.visibility.as_deref().unwrap_or("private").to_ascii_lowercase().as_str() {
+            "public" => Visibility::Public,
+            _ => Visibility::Private,
+        }
+    }
+
+    /// Parse the `members = { id = "Reader" }` map into typed `(id, role)`
+    /// pairs. Returns an error listing every invalid role string so a typo
+    /// fails fast at startup rather than silently dropping a member.
+    pub fn parsed_members(&self) -> anyhow::Result<Vec<(String, Role)>> {
+        let mut out = Vec::with_capacity(self.members.len());
+        let mut bad = Vec::new();
+        for (id, role_str) in &self.members {
+            match Role::parse(role_str) {
+                Some(r) => out.push((id.clone(), r)),
+                None => bad.push(format!("{id} = {role_str:?}")),
+            }
+        }
+        if !bad.is_empty() {
+            anyhow::bail!(
+                "unknown role in [projects.*].members: {}; expected one of \
+                 Reader / Writer / Maintainer / Owner",
+                bad.join(", ")
+            );
+        }
+        Ok(out)
+    }
+}
+
 fn default_backend() -> String {
     "redb".to_string()
 }
@@ -83,6 +177,9 @@ fn default_db_path() -> String {
 }
 fn default_addr() -> String {
     "0.0.0.0:50051".to_string()
+}
+fn default_auth_data_dir() -> String {
+    "schemahub-data".to_string()
 }
 
 impl Config {
@@ -96,7 +193,42 @@ impl Config {
             Err(_) => Self::default(),
         };
         cfg.validate_storage()?;
+        cfg.validate_auth()?;
         Ok(cfg)
+    }
+
+    /// Validate the `[auth]` + `[projects.*]` sections. Fails fast on:
+    /// - an unknown project visibility string,
+    /// - an unknown role in `[projects.*].members`,
+    /// - a missing `id` in a `[auth].tokens` entry (deserialization would
+    ///   catch this, but we re-check so the error mentions which token).
+    fn validate_auth(&self) -> anyhow::Result<()> {
+        for (token, identity) in &self.auth.tokens {
+            if identity.id.is_empty() {
+                anyhow::bail!("[auth].tokens.{token:?}: identity 'id' must not be empty");
+            }
+        }
+        for (name, section) in &self.projects {
+            if let Some(v) = &section.visibility {
+                match v.to_ascii_lowercase().as_str() {
+                    "public" | "private" => {}
+                    other => anyhow::bail!(
+                        "[projects.{name}].visibility = {other:?}; expected \"public\" or \"private\""
+                    ),
+                }
+            }
+            section
+                .parsed_members()
+                .map_err(|e| anyhow::anyhow!("[projects.{name}]: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// True when the `[auth]` section has any tokens configured. The server
+    /// uses this to decide whether to install the real Bearer/RBAC providers
+    /// or fall back to the Noop default.
+    pub fn auth_enabled(&self) -> bool {
+        !self.auth.tokens.is_empty() || !self.projects.is_empty()
     }
 
     /// Validate the `[storage]` selection. Fail-fast errors:

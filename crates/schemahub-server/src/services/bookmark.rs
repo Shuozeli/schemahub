@@ -87,6 +87,16 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::DiffResponse>, Status> {
         let token = token_from(&request);
         let r = request.into_inner();
+        // Diff is a read; authorize before touching the VCS so anonymous
+        // reads on private projects are refused (design.md §6).
+        self.core
+            .authorize_repo_action(
+                token.as_deref(),
+                schemahub_types::Action::Read,
+                &r.project,
+                &r.repo,
+            )
+            .map_err(to_status)?;
         let base = wire::version_ref_to_refspec(&r.base, DEFAULT_BOOKMARK);
         let head = wire::version_ref_to_refspec(&r.head, DEFAULT_BOOKMARK);
 

@@ -2073,6 +2073,9 @@ dependencies = [
  "schemahub-compiler-protobuf",
  "schemahub-types",
  "schemahub-vcs",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
@@ -2105,6 +2108,7 @@ name = "schemahub-types"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "serde",
  "thiserror 1.0.69",
 ]
 

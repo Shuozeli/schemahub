@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use schemahub_core::{detect_format_from_name, Core, MutationRequest, TransactionRequest};
-use schemahub_types::{MutationEffect, SchemaObjects};
+use schemahub_types::{Action, MutationEffect, SchemaObjects};
 use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};
 
@@ -79,6 +79,10 @@ impl SchemaService for SchemaHandler {
     ) -> Result<Response<pb::CreateSchemaResponse>, Status> {
         let token = token_from(&request);
         let r = request.into_inner();
+        // Auth gate: schema lifecycle is a Write on (project, repo).
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
+            .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         // First write may target a fresh bookmark; tolerate a missing base.
         let base = self
@@ -101,7 +105,6 @@ impl SchemaService for SchemaHandler {
                 &format!("create schema {}", r.schema_name),
             )
             .map_err(|e| to_status(e.into()))?;
-        let _ = token; // auth is a no-op in the getting-started default
         Ok(Response::new(pb::CreateSchemaResponse {
             new_commit: write.commit_id,
             change_id: write.change_id,
@@ -113,7 +116,11 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::UpdateSchemaRequest>,
     ) -> Result<Response<pb::UpdateSchemaResponse>, Status> {
+        let token = token_from(&request);
         let r = request.into_inner();
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
+            .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         let base = self
             .core
@@ -146,7 +153,13 @@ impl SchemaService for SchemaHandler {
         &self,
         request: Request<pb::DeleteSchemaRequest>,
     ) -> Result<Response<pb::DeleteSchemaResponse>, Status> {
+        let token = token_from(&request);
         let r = request.into_inner();
+        // Deleting a schema file is a Write — design.md §6 protected-bookmark
+        // policy is enforced by the VCS layer; auth gates the repo overall.
+        self.core
+            .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
+            .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         let base = self
             .core

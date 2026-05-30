@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 bytes     = { workspace = true }
 thiserror = { workspace = true }
+# `Role` and `Visibility` derive Serialize/Deserialize so the file-backed role/
+# project stores in `schemahub-core` (FileRoleStore / FileProjectStore) can
+# round-trip them through JSON without re-declaring a mirror enum.
+serde     = { workspace = true }

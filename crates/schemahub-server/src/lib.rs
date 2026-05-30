@@ -7,13 +7,17 @@ pub mod error;
 pub mod services;
 pub mod wire;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use schemahub_compiler_flatbuffers::FlatBuffersCompiler;
 use schemahub_compiler_openapi::OpenApiCompiler;
 use schemahub_compiler_protobuf::ProtobufCompiler;
-use schemahub_core::{CompilerRegistry, Core};
-use schemahub_types::{NoopAuthn, NoopAuthz};
+use schemahub_core::{
+    BearerTokenAuthn, CompilerRegistry, Core, FileProjectStore, FileRoleStore, ProjectMeta,
+    ProjectStore, RoleBasedAuthz, RoleStore,
+};
+use schemahub_types::{AuthnProvider, AuthzPolicy, Identity, NoopAuthn, NoopAuthz, Role};
 use schemahub_vcs::{ObjectDb, Vcs};
 
 use tonic::transport::server::Router;
@@ -37,7 +41,19 @@ use crate::services::project::ProjectHandler;
 use crate::services::schema::SchemaHandler;
 
 /// Build the [`Core`] over a concrete object store, registering all three
-/// compilers and seeding the per-repo config from `config`.
+/// compilers and seeding the per-repo config + project/role registries from
+/// `config`.
+///
+/// Auth wiring (design.md §6):
+/// - **No `[auth]` section** → `NoopAuthn` + `NoopAuthz` + empty in-memory
+///   stores. Today's behavior, every request is anonymous.
+/// - **`[auth].tokens` set** → `BearerTokenAuthn` + `RoleBasedAuthz` backed
+///   by `FileRoleStore` + `FileProjectStore` under `[auth].data_dir`. The
+///   `[projects.<name>]` bootstrap seeds the registries (idempotent: skips
+///   any project already present in the file).
+///
+/// Panics on store-file IO errors at startup — fail-fast (design.md §6 +
+/// user infra-defaults: surface config errors at startup, not at first RPC).
 pub fn build_core(db: Arc<dyn ObjectDb>, config: &Config) -> Arc<Core> {
     let mut registry = CompilerRegistry::new();
     registry.register(Arc::new(ProtobufCompiler::new()));
@@ -45,13 +61,90 @@ pub fn build_core(db: Arc<dyn ObjectDb>, config: &Config) -> Arc<Core> {
     registry.register(Arc::new(OpenApiCompiler::new()));
 
     let vcs = Arc::new(Vcs::new(db));
-    Arc::new(Core::with_config(
+    let repo_configs = config.repo_config_store();
+
+    if !config.auth_enabled() {
+        return Arc::new(Core::with_config(
+            vcs,
+            registry,
+            Arc::new(NoopAuthn),
+            Arc::new(NoopAuthz),
+            repo_configs,
+        ));
+    }
+
+    let data_dir = std::path::PathBuf::from(&config.auth.data_dir);
+    let role_store = Arc::new(
+        FileRoleStore::open(data_dir.join("roles.json"))
+            .expect("opening file role store at [auth].data_dir/roles.json"),
+    );
+    let project_store = Arc::new(
+        FileProjectStore::open(data_dir.join("projects.json"))
+            .expect("opening file project store at [auth].data_dir/projects.json"),
+    );
+    bootstrap_projects(role_store.as_ref(), project_store.as_ref(), config)
+        .expect("bootstrapping [projects.*] into the role/project registries");
+
+    let tokens: HashMap<String, Identity> = config
+        .auth
+        .tokens
+        .iter()
+        .map(|(t, id)| (t.clone(), id.to_identity()))
+        .collect();
+
+    let authn: Arc<dyn AuthnProvider> = Arc::new(BearerTokenAuthn::new(tokens));
+    let authz: Arc<dyn AuthzPolicy> = Arc::new(RoleBasedAuthz::new(
+        role_store.clone() as Arc<dyn RoleStore>,
+        project_store.clone() as Arc<dyn ProjectStore>,
+    ));
+
+    Arc::new(Core::with_stores(
         vcs,
         registry,
-        Arc::new(NoopAuthn),
-        Arc::new(NoopAuthz),
-        config.repo_config_store(),
+        authn,
+        authz,
+        repo_configs,
+        role_store,
+        project_store,
     ))
+}
+
+/// Seed the file-backed role + project registries from `[projects.<name>]`.
+/// Idempotent — entries that already exist on disk are left untouched (so a
+/// production deployment can hand-edit `roles.json` without the config
+/// resetting it on every restart).
+fn bootstrap_projects(
+    roles: &dyn RoleStore,
+    projects: &dyn ProjectStore,
+    config: &Config,
+) -> anyhow::Result<()> {
+    for (name, section) in &config.projects {
+        let visibility = section.parsed_visibility();
+        if projects.get(name).is_none() {
+            // First-time: register the project. The creator field is just an
+            // audit hint here — we set it to the first owner if any.
+            let creator = section.owners.first().cloned().unwrap_or_default();
+            projects.set(ProjectMeta {
+                name: name.clone(),
+                visibility,
+                creator,
+            })?;
+        }
+        for owner_id in &section.owners {
+            // Always set Owner — bootstrap fixes drift from the toml.
+            roles.set(name, owner_id, Role::Owner)?;
+        }
+        for (id, role) in section.parsed_members()? {
+            // Don't downgrade a configured Owner.
+            if matches!(roles.get(name, &Identity::user(id.clone())), Some(Role::Owner))
+                && role != Role::Owner
+            {
+                continue;
+            }
+            roles.set(name, &id, role)?;
+        }
+    }
+    Ok(())
 }
 
 /// Assemble the full tonic [`Router`] with every service registered over `core`.

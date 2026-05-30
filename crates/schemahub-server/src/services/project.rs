@@ -1,22 +1,30 @@
-//! `ProjectService` — projects, repos, members (design.md §11).
+//! `ProjectService` — projects, repos, members (design.md §6, §11).
 //!
-//! In the jj model a `(project, repo)` is implicit: it springs into existence on
-//! the first write (the op-log/bookmark set is created lazily). There is no
-//! separate project/repo registry in `Core`/`Vcs` yet, so these handlers are
-//! thin: Create/Get/Update echo back the requested config; List returns what is
-//! observable; member/ACL management maps to the deferred RBAC layer
-//! (design.md §11 ships Noop auth) and is reported UNIMPLEMENTED.
+//! Project + member management is wired to the [`Core`] project/role
+//! orchestration (see `crates/schemahub-core/src/projects.rs`):
+//! `CreateProject`, `GetProject`, `ListProjects`, `AddMember`,
+//! `RemoveMember`, `UpdateMemberRole`, `ListMembers` all flow through Core
+//! which runs the configured `AuthnProvider` + `AuthzPolicy` before touching
+//! the role / project stores.
+//!
+//! Repo lifecycle is still implicit in the jj VCS model (a `(project, repo)`
+//! springs into existence on the first write); `CreateRepo` / `GetRepo` /
+//! `UpdateRepo` echo back the requested config until a persisted repo
+//! registry lands.
 
 use std::sync::Arc;
 
 use schemahub_core::Core;
+use schemahub_types::{Role, Visibility};
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::project_service_server::ProjectService;
 
+use crate::error::to_status;
+use crate::services::token_from;
+
 pub struct ProjectHandler {
-    #[allow(dead_code)]
     core: Arc<Core>,
 }
 
@@ -32,13 +40,22 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::CreateProjectRequest>,
     ) -> Result<Response<pb::CreateProjectResponse>, Status> {
+        let token = token_from(&request);
         let r = request.into_inner();
+        if r.name.is_empty() {
+            return Err(Status::invalid_argument("name must not be empty"));
+        }
+        let visibility = if r.is_public {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        let meta = self
+            .core
+            .create_project(&r.name, visibility, token.as_deref())
+            .map_err(to_status)?;
         Ok(Response::new(pb::CreateProjectResponse {
-            project: Some(pb::ProjectInfo {
-                name: r.name,
-                is_public: r.is_public,
-                owner: String::new(),
-            }),
+            project: Some(meta_to_proto(&meta)),
         }))
     }
 
@@ -46,22 +63,35 @@ impl ProjectService for ProjectHandler {
         &self,
         request: Request<pb::GetProjectRequest>,
     ) -> Result<Response<pb::GetProjectResponse>, Status> {
+        let token = token_from(&request);
         let r = request.into_inner();
+        let meta = self
+            .core
+            .get_project(&r.name, token.as_deref())
+            .map_err(to_status)?
+            .ok_or_else(|| Status::not_found(format!("project '{}' not found", r.name)))?;
         Ok(Response::new(pb::GetProjectResponse {
-            project: Some(pb::ProjectInfo {
-                name: r.name,
-                is_public: true,
-                owner: String::new(),
-            }),
+            project: Some(meta_to_proto(&meta)),
         }))
     }
 
     async fn list_projects(
         &self,
-        _request: Request<pb::ListProjectsRequest>,
+        request: Request<pb::ListProjectsRequest>,
     ) -> Result<Response<pb::ListProjectsResponse>, Status> {
-        // No persisted project registry in v1; projects are implicit.
-        Ok(Response::new(pb::ListProjectsResponse { projects: vec![] }))
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let prefix = r.name_prefix;
+        let visible = self
+            .core
+            .list_projects(token.as_deref())
+            .map_err(to_status)?;
+        let projects = visible
+            .into_iter()
+            .filter(|m| prefix.is_empty() || m.name.starts_with(&prefix))
+            .map(|m| meta_to_proto(&m))
+            .collect();
+        Ok(Response::new(pb::ListProjectsResponse { projects }))
     }
 
     async fn delete_project(
@@ -151,31 +181,110 @@ impl ProjectService for ProjectHandler {
 
     async fn add_member(
         &self,
-        _request: Request<pb::AddMemberRequest>,
+        request: Request<pb::AddMemberRequest>,
     ) -> Result<Response<pb::AddMemberResponse>, Status> {
-        Err(Status::unimplemented(
-            "member management requires the RBAC layer (deferred; Noop auth ships by default)",
-        ))
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let role = role_from_proto(r.role)?;
+        if r.identity.is_empty() {
+            return Err(Status::invalid_argument("identity must not be empty"));
+        }
+        self.core
+            .add_member(&r.project, &r.identity, role, token.as_deref())
+            .map_err(to_status)?;
+        Ok(Response::new(pb::AddMemberResponse {
+            member: Some(pb::MemberEntry {
+                identity: r.identity,
+                role: r.role,
+            }),
+        }))
     }
 
     async fn remove_member(
         &self,
-        _request: Request<pb::RemoveMemberRequest>,
+        request: Request<pb::RemoveMemberRequest>,
     ) -> Result<Response<pb::RemoveMemberResponse>, Status> {
-        Err(Status::unimplemented("member management is deferred"))
+        let token = token_from(&request);
+        let r = request.into_inner();
+        if r.identity.is_empty() {
+            return Err(Status::invalid_argument("identity must not be empty"));
+        }
+        self.core
+            .remove_member(&r.project, &r.identity, token.as_deref())
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RemoveMemberResponse {}))
     }
 
     async fn update_member_role(
         &self,
-        _request: Request<pb::UpdateMemberRoleRequest>,
+        request: Request<pb::UpdateMemberRoleRequest>,
     ) -> Result<Response<pb::UpdateMemberRoleResponse>, Status> {
-        Err(Status::unimplemented("member management is deferred"))
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let new_role = role_from_proto(r.new_role)?;
+        if r.identity.is_empty() {
+            return Err(Status::invalid_argument("identity must not be empty"));
+        }
+        self.core
+            .update_member_role(&r.project, &r.identity, new_role, token.as_deref())
+            .map_err(to_status)?;
+        Ok(Response::new(pb::UpdateMemberRoleResponse {
+            member: Some(pb::MemberEntry {
+                identity: r.identity,
+                role: r.new_role,
+            }),
+        }))
     }
 
     async fn list_members(
         &self,
-        _request: Request<pb::ListMembersRequest>,
+        request: Request<pb::ListMembersRequest>,
     ) -> Result<Response<pb::ListMembersResponse>, Status> {
-        Ok(Response::new(pb::ListMembersResponse { members: vec![] }))
+        let token = token_from(&request);
+        let r = request.into_inner();
+        let members = self
+            .core
+            .list_members(&r.project, token.as_deref())
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListMembersResponse {
+            members: members
+                .into_iter()
+                .map(|(id, role)| pb::MemberEntry {
+                    identity: id,
+                    role: role_to_proto(role) as i32,
+                })
+                .collect(),
+        }))
+    }
+}
+
+// ── wire conversions ────────────────────────────────────────────────────────
+
+fn meta_to_proto(meta: &schemahub_core::ProjectMeta) -> pb::ProjectInfo {
+    pb::ProjectInfo {
+        name: meta.name.clone(),
+        is_public: matches!(meta.visibility, Visibility::Public),
+        owner: meta.creator.clone(),
+    }
+}
+
+fn role_from_proto(r: i32) -> Result<Role, Status> {
+    match pb::Role::try_from(r) {
+        Ok(pb::Role::Reader) => Ok(Role::Reader),
+        Ok(pb::Role::Writer) => Ok(Role::Writer),
+        Ok(pb::Role::Maintainer) => Ok(Role::Maintainer),
+        Ok(pb::Role::Owner) => Ok(Role::Owner),
+        Ok(pb::Role::Unspecified) | Err(_) => Err(Status::invalid_argument(
+            "role must be Reader, Writer, Maintainer, or Owner",
+        )),
+    }
+}
+
+fn role_to_proto(r: Role) -> pb::Role {
+    match r {
+        Role::Reader => pb::Role::Reader,
+        Role::Writer => pb::Role::Writer,
+        Role::Maintainer => pb::Role::Maintainer,
+        Role::Owner => pb::Role::Owner,
     }
 }

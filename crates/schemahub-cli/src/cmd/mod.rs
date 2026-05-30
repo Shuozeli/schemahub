@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod field;
 pub mod history;
 pub mod log;
+pub mod project;
 pub mod repo;
 pub mod schema;
 pub mod tag;
