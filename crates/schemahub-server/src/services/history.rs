@@ -11,10 +11,9 @@ use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::history_service_server::HistoryService;
 
 use crate::error::to_status;
-use crate::services::token_from;
+use crate::services::{resolve_author, token_from};
 use crate::wire;
 
-const DEFAULT_AUTHOR: &str = "schemahub";
 const DEFAULT_BOOKMARK: &str = "main";
 
 pub struct HistoryHandler {
@@ -98,14 +97,14 @@ impl HistoryService for HistoryHandler {
     ) -> Result<Response<pb::UndoResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let author = if r.author.is_empty() {
-            DEFAULT_AUTHOR
-        } else {
-            &r.author
-        };
+        // Audit author comes from the authenticated identity, NOT from
+        // \`r.author\` — a client-supplied string would let any caller forge
+        // the op-log entry. \`r.author\` in the proto is now informational
+        // only (kept for backward wire compat) and intentionally ignored.
+        let author = resolve_author(&self.core, token.as_deref())?;
         let undone = self
             .core
-            .undo(&r.project, &r.repo, author, token.as_deref())
+            .undo(&r.project, &r.repo, &author, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::UndoResponse {
             undone_op_id: undone,
@@ -163,11 +162,9 @@ impl HistoryService for HistoryHandler {
         } else {
             r.message.clone()
         };
-        let author = if r.author.is_empty() {
-            DEFAULT_AUTHOR
-        } else {
-            &r.author
-        };
+        // Audit author comes from the authenticated identity. \`r.author\`
+        // is intentionally ignored (same reasoning as Undo above).
+        let author = resolve_author(&self.core, token.as_deref())?;
         let resp = self
             .core
             .resolve_conflict(
@@ -175,7 +172,7 @@ impl HistoryService for HistoryHandler {
                 &r.bookmark,
                 &r.declaration_name,
                 resolved,
-                author,
+                &author,
                 &message,
                 token.as_deref(),
             )

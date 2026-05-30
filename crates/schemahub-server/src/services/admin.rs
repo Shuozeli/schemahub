@@ -13,11 +13,19 @@ use crate::services::token_from;
 
 pub struct AdminHandler {
     core: Arc<Core>,
+    /// The configured storage backend id (`"redb"` or `"postgres"`), surfaced
+    /// by `GetServerConfig`. Threaded in from the composition root so the
+    /// response reflects what the binary actually opened, not a hard-coded
+    /// guess.
+    storage_backend: String,
 }
 
 impl AdminHandler {
-    pub fn new(core: Arc<Core>) -> Self {
-        Self { core }
+    pub fn new(core: Arc<Core>, storage_backend: impl Into<String>) -> Self {
+        Self {
+            core,
+            storage_backend: storage_backend.into(),
+        }
     }
 }
 
@@ -77,7 +85,7 @@ impl AdminService for AdminHandler {
             pending_cleanup_threshold_secs: 0,
             idempotency_ttl_hours: 0,
             gc_age_threshold_hours: 0,
-            storage_backend: "redb".to_string(),
+            storage_backend: self.storage_backend.clone(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }

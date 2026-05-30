@@ -148,7 +148,11 @@ fn bootstrap_projects(
 }
 
 /// Assemble the full tonic [`Router`] with every service registered over `core`.
-pub fn build_router(core: Arc<Core>) -> Router {
+///
+/// `storage_backend` is the resolved backend id (`"redb"` or `"postgres"`)
+/// surfaced by `AdminService.GetServerConfig` so clients see the real
+/// deployment, not a hard-coded guess.
+pub fn build_router(core: Arc<Core>, storage_backend: impl Into<String>) -> Router {
     Server::builder()
         .add_service(SchemaServiceServer::new(SchemaHandler::new(core.clone())))
         .add_service(ExplorationServiceServer::new(ExplorationHandler::new(
@@ -157,6 +161,9 @@ pub fn build_router(core: Arc<Core>) -> Router {
         .add_service(CodegenServiceServer::new(CodegenHandler::new(core.clone())))
         .add_service(RefServiceServer::new(BookmarkHandler::new(core.clone())))
         .add_service(HistoryServiceServer::new(HistoryHandler::new(core.clone())))
-        .add_service(AdminServiceServer::new(AdminHandler::new(core.clone())))
+        .add_service(AdminServiceServer::new(AdminHandler::new(
+            core.clone(),
+            storage_backend,
+        )))
         .add_service(ProjectServiceServer::new(ProjectHandler::new(core)))
 }

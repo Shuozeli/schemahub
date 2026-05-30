@@ -47,10 +47,11 @@ impl CodegenService for CodegenHandler {
                 _ => pb::SchemaFormat::Unspecified,
             })
             .unwrap_or(pb::SchemaFormat::Unspecified);
+        let at_commit = resolve_at_commit(&self.core, &r.project, &r.repo, &r.at, token.as_deref());
         Ok(Response::new(pb::GetDescriptorsResponse {
             descriptor_bytes: bytes.to_vec(),
             format: format as i32,
-            at_commit: String::new(),
+            at_commit,
         }))
     }
 
@@ -67,10 +68,30 @@ impl CodegenService for CodegenHandler {
             .core
             .preview_codegen(&schema, &bookmark, lang, token.as_deref())
             .map_err(to_status)?;
+        let at_commit = resolve_at_commit(&self.core, &r.project, &r.repo, &r.at, token.as_deref());
         Ok(Response::new(pb::PreviewCodegenResponse {
             content: code.into_bytes(),
             is_archive: false,
-            at_commit: String::new(),
+            at_commit,
         }))
     }
+}
+
+/// Resolve `at` (or the default bookmark) to a concrete commit id so codegen
+/// clients can cache by commit. Best-effort: if the resolve fails, returns
+/// empty string rather than failing the whole codegen call (descriptors are
+/// the primary payload).
+fn resolve_at_commit(
+    core: &Core,
+    project: &str,
+    repo: &str,
+    at: &Option<pb::VersionRef>,
+    token: Option<&str>,
+) -> String {
+    let refspec = wire::version_ref_to_refspec(at, DEFAULT_BOOKMARK);
+    core.log(project, repo, Some(&refspec), Some(1), token)
+        .ok()
+        .and_then(|entries| entries.into_iter().next())
+        .map(|e| e.commit_id)
+        .unwrap_or_default()
 }

@@ -18,11 +18,8 @@ use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::schema_service_server::SchemaService;
 
 use crate::error::to_status;
-use crate::services::token_from;
+use crate::services::{resolve_author, token_from};
 use crate::wire;
-
-/// The default commit author when no auth identity is resolved.
-const DEFAULT_AUTHOR: &str = "schemahub";
 
 pub struct SchemaHandler {
     core: Arc<Core>,
@@ -96,6 +93,7 @@ impl SchemaService for SchemaHandler {
         )
         .map_err(to_status)?;
         let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
+        let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
             .vcs()
@@ -106,7 +104,7 @@ impl SchemaService for SchemaHandler {
                 &r.schema_name,
                 &base_ref,
                 effect,
-                DEFAULT_AUTHOR,
+                &author,
                 &format!("create schema {}", r.schema_name),
             )
             .map_err(|e| to_status(e.into()))?;
@@ -138,6 +136,7 @@ impl SchemaService for SchemaHandler {
         )
         .map_err(to_status)?;
         let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
+        let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
             .vcs()
@@ -148,7 +147,7 @@ impl SchemaService for SchemaHandler {
                 &r.schema_name,
                 &base_ref,
                 effect,
-                DEFAULT_AUTHOR,
+                &author,
                 &format!("update schema {}", r.schema_name),
             )
             .map_err(|e| to_status(e.into()))?;
@@ -182,6 +181,7 @@ impl SchemaService for SchemaHandler {
             upserts: vec![],
             removes: base.decls.keys().cloned().collect(),
         };
+        let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
             .vcs()
@@ -192,7 +192,7 @@ impl SchemaService for SchemaHandler {
                 &r.schema_name,
                 &base_ref,
                 effect,
-                DEFAULT_AUTHOR,
+                &author,
                 &format!("delete schema {}", r.schema_name),
             )
             .map_err(|e| to_status(e.into()))?;
@@ -213,10 +213,11 @@ impl SchemaService for SchemaHandler {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("apply_mutation: operation oneof not set"))?;
         let mutation = wire::apply_mutation_op_to_core(&r.project, &r.repo, op)?;
+        let author = resolve_author(&self.core, token.as_deref())?;
         let req = MutationRequest {
             bookmark: r.branch.clone(),
             mutation,
-            author: DEFAULT_AUTHOR.to_string(),
+            author,
             message: format!("mutation on {}", r.branch),
             force: r.force,
             idempotency_key: (!r.idempotency_key.is_empty()).then(|| r.idempotency_key.clone()),
@@ -247,10 +248,11 @@ impl SchemaService for SchemaHandler {
                 .ok_or_else(|| Status::invalid_argument("transaction op oneof not set"))?;
             mutations.push(wire::transaction_op_to_core(&r.project, &r.repo, op)?);
         }
+        let author = resolve_author(&self.core, token.as_deref())?;
         let req = TransactionRequest {
             bookmark: r.branch.clone(),
             mutations,
-            author: DEFAULT_AUTHOR.to_string(),
+            author,
             message: format!("transaction on {}", r.branch),
             force: r.force,
             idempotency_key: (!r.idempotency_key.is_empty()).then(|| r.idempotency_key.clone()),

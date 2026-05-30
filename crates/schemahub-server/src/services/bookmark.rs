@@ -16,10 +16,9 @@ use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::ref_service_server::RefService;
 
 use crate::error::to_status;
-use crate::services::token_from;
+use crate::services::{resolve_author, token_from};
 use crate::wire;
 
-const DEFAULT_AUTHOR: &str = "schemahub";
 const DEFAULT_BOOKMARK: &str = "main";
 
 pub struct BookmarkHandler {
@@ -150,6 +149,7 @@ impl RefService for BookmarkHandler {
         let token = token_from(&request)?;
         let r = request.into_inner();
         let from = wire::version_ref_to_refspec(&r.from, DEFAULT_BOOKMARK);
+        let author = resolve_author(&self.core, token.as_deref())?;
         let head = self
             .core
             .create_bookmark(
@@ -157,7 +157,7 @@ impl RefService for BookmarkHandler {
                 &r.repo,
                 &r.name,
                 &from,
-                DEFAULT_AUTHOR,
+                &author,
                 token.as_deref(),
             )
             .map_err(to_status)?;
@@ -178,8 +178,9 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::DeleteBranchResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
+        let author = resolve_author(&self.core, token.as_deref())?;
         self.core
-            .delete_bookmark(&r.project, &r.repo, &r.name, DEFAULT_AUTHOR, token.as_deref())
+            .delete_bookmark(&r.project, &r.repo, &r.name, &author, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::DeleteBranchResponse {}))
     }
@@ -242,6 +243,7 @@ impl RefService for BookmarkHandler {
         let token = token_from(&request)?;
         let r = request.into_inner();
         let at = wire::version_ref_to_refspec(&r.target, DEFAULT_BOOKMARK);
+        let author = resolve_author(&self.core, token.as_deref())?;
         let commit = self
             .core
             .create_tag(
@@ -249,7 +251,7 @@ impl RefService for BookmarkHandler {
                 &r.repo,
                 &r.name,
                 &at,
-                DEFAULT_AUTHOR,
+                &author,
                 token.as_deref(),
             )
             .map_err(to_status)?;
@@ -263,7 +265,7 @@ impl RefService for BookmarkHandler {
                 tagger: if r.message.is_empty() {
                     String::new()
                 } else {
-                    DEFAULT_AUTHOR.to_string()
+                    author.clone()
                 },
                 message: r.message,
                 timestamp: None,
@@ -284,8 +286,9 @@ impl RefService for BookmarkHandler {
                 "deleting a tag requires force=true (tags are immutable)",
             ));
         }
+        let author = resolve_author(&self.core, token.as_deref())?;
         self.core
-            .delete_tag(&r.project, &r.repo, &r.name, DEFAULT_AUTHOR, token.as_deref())
+            .delete_tag(&r.project, &r.repo, &r.name, &author, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::DeleteTagResponse {}))
     }
@@ -325,6 +328,7 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::MergeResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
+        let author = resolve_author(&self.core, token.as_deref())?;
         let resp = self
             .core
             .merge(
@@ -332,7 +336,7 @@ impl RefService for BookmarkHandler {
                 &r.repo,
                 &r.source_branch,
                 &r.target_branch,
-                DEFAULT_AUTHOR,
+                &author,
                 token.as_deref(),
             )
             .map_err(to_status)?;

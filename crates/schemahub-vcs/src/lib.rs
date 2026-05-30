@@ -52,6 +52,12 @@ use crate::repo::Store;
 /// `__meta__` entry name within a schema-file subtree.
 const META_NAME: &str = "__meta__";
 
+/// Operation-metadata attribute key under which the schemahub-resolved audit
+/// author (the authenticated identity for the request, set by the server's
+/// `resolve_author`) is stored on every op-log entry. Read back by
+/// [`Vcs::list_operations`] and exposed in [`OpRecord::author`].
+pub(crate) const AUTHOR_ATTRIBUTE: &str = "schemahub.author";
+
 #[derive(Debug, Error)]
 pub enum VcsError {
     #[error("object store error: {0}")]
@@ -408,6 +414,7 @@ impl Vcs {
         // produces first-class conflicts at declaration granularity.
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
 
         let (final_tree, parents) = match &current_tip {
             Some(tip) if Some(tip) == base_id.as_ref() => (writer_tree, vec![tip.clone()]),
@@ -542,6 +549,17 @@ impl Vcs {
         Self::map_jj(self.store.block_on(tx.commit(description.to_string()))).map(|_| ())
     }
 
+    /// Stamp the schemahub-resolved audit author onto a transaction's op-log
+    /// metadata. jj's `UserSettings::operation_username` would otherwise
+    /// supply a stable but anonymous \"jj\" / hostname value; the
+    /// `AUTHOR_ATTRIBUTE` is preferred by [`Vcs::list_operations`] over
+    /// jj's default so the op-log records *who* drove the change.
+    fn record_author(tx: &mut jj_lib::transaction::Transaction, author: &str) {
+        if !author.is_empty() {
+            tx.set_attribute(AUTHOR_ATTRIBUTE.to_string(), author.to_string());
+        }
+    }
+
     // ── Bookmarks & tags ──────────────────────────────────────────────────────
 
     /// Create a new bookmark pointing at the commit `from` resolves to.
@@ -559,8 +577,8 @@ impl Vcs {
             return Err(VcsError::BookmarkExists(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, from)?;
-        let _ = author;
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         tx.repo_mut()
             .set_local_bookmark_target(RefName::new(name), RefTarget::normal(commit.clone()));
         self.commit_tx(tx, &format!("create_bookmark {name}"))?;
@@ -582,8 +600,8 @@ impl Vcs {
             return Err(VcsError::BookmarkNotFound(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, to)?;
-        let _ = author;
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         tx.repo_mut()
             .set_local_bookmark_target(RefName::new(name), RefTarget::normal(commit.clone()));
         self.commit_tx(tx, &format!("move_bookmark {name}"))?;
@@ -603,8 +621,8 @@ impl Vcs {
         if jj_repo.view().get_local_bookmark(RefName::new(name)).is_absent() {
             return Err(VcsError::BookmarkNotFound(name.to_string()));
         }
-        let _ = author;
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         tx.repo_mut()
             .set_local_bookmark_target(RefName::new(name), RefTarget::absent());
         self.commit_tx(tx, &format!("delete_bookmark {name}"))
@@ -638,8 +656,8 @@ impl Vcs {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit = self.resolve_ref(&jj_repo, at)?;
-        let _ = author;
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         tx.repo_mut()
             .set_local_tag_target(RefName::new(name), RefTarget::normal(commit.clone()));
         self.commit_tx(tx, &format!("create_tag {name}"))?;
@@ -659,8 +677,8 @@ impl Vcs {
         if jj_repo.view().get_local_tag(RefName::new(name)).is_absent() {
             return Err(VcsError::TagNotFound(name.to_string()));
         }
-        let _ = author;
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         tx.repo_mut()
             .set_local_tag_target(RefName::new(name), RefTarget::absent());
         self.commit_tx(tx, &format!("delete_tag {name}"))
@@ -701,11 +719,19 @@ impl Vcs {
                 continue;
             }
             let meta = op.metadata();
+            // Prefer the schemahub-stamped author attribute (the authenticated
+            // identity that drove the change) over jj's default
+            // `meta.username` (a stable but anonymous hostname/jj string).
+            let author = meta
+                .attributes
+                .get(AUTHOR_ATTRIBUTE)
+                .cloned()
+                .unwrap_or_else(|| meta.username.clone());
             chain.push(OpRecord {
                 op_id: op.id().hex(),
                 parents: op.parent_ids().iter().map(|p| p.hex()).collect(),
                 description: meta.description.clone(),
-                author: meta.username.clone(),
+                author,
                 timestamp: meta.time.end.timestamp.0.to_string(),
             });
             for parent_id in op.parent_ids() {
@@ -821,7 +847,7 @@ impl Vcs {
         // Record a new operation whose view equals the target state.
         let mut tx = jj_repo.start_transaction();
         tx.repo_mut().set_view(target_view.store_view().clone());
-        let _ = author;
+        Self::record_author(&mut tx, author);
         self.commit_tx(tx, &format!("undo {undone_op_id}"))?;
         Ok(undone_op_id)
     }
@@ -951,6 +977,7 @@ impl Vcs {
 
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         let commit = Self::map_jj(self.store.block_on(
             tx.repo_mut()
                 .new_commit(vec![tip.clone()], new_tree)
@@ -1005,6 +1032,7 @@ impl Vcs {
 
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
+        Self::record_author(&mut tx, author);
         let commit = Self::map_jj(self.store.block_on(
             tx.repo_mut()
                 .new_commit(vec![dst_id.clone(), src_id.clone()], merged_tree)

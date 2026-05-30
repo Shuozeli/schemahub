@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     // Surface a MagicDNS-friendly hint when bound to the Tailscale IP.
     println!("schemahub-server listening on {addr}");
 
-    build_router(core)
+    build_router(core, config.storage.backend.clone())
         .serve(addr)
         .await
         .context("serving gRPC")?;

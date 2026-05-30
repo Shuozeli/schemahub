@@ -27,7 +27,7 @@ async fn start_server() -> String {
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     tokio::spawn(async move {
-        build_router(core)
+        build_router(core, "memory")
             .serve_with_incoming(incoming)
             .await
             .unwrap();

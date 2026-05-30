@@ -10,7 +10,29 @@ pub mod history;
 pub mod project;
 pub mod schema;
 
+use schemahub_core::Core;
 use tonic::{Request, Status};
+
+use crate::error::to_status;
+
+/// The audit author recorded when the caller is anonymous (no token).
+pub(crate) const DEFAULT_AUTHOR: &str = "schemahub";
+
+/// Resolve the commit / op-log author from the bearer token.
+///
+/// Returns the authenticated identity's id (e.g. \"alice\") when present;
+/// falls back to [`DEFAULT_AUTHOR`] for anonymous callers (public-project
+/// reads, and writes that the authz layer has already rejected before we
+/// reach the commit path).
+///
+/// This is the single source of truth for \"who's committing\" — handlers
+/// must not accept a client-supplied author string and pass it to the VCS,
+/// since that would let any authenticated caller forge an arbitrary audit
+/// trail.
+pub(crate) fn resolve_author(core: &Core, token: Option<&str>) -> Result<String, Status> {
+    let identity = core.resolve_identity(token).map_err(to_status)?;
+    Ok(identity.id().unwrap_or(DEFAULT_AUTHOR).to_string())
+}
 
 /// Extract a bearer/auth token from request metadata (`authorization` header).
 ///
