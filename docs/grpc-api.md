@@ -51,7 +51,7 @@ In v1 a write carried a `base_revision` and the server **rejected** with `FAILED
 
 `base_revision` is therefore advisory in v2 (kept for wire compatibility and as an optimistic hint); the durable identity of a write is the returned **`change_id`**, and the durable record of concurrency is the **operation log** plus the **`conflicted_decls`** field.
 
-> **AS-BUILT — `ConflictDetail` / `MergeConflictDetail` are vestigial.** They remain defined in `errors.proto` for wire compatibility, but the implemented write path does not return `ConflictDetail` (no CAS reject) and `Merge` is fast-forward-only (see §5.6). Treat them as deprecated.
+> **AS-BUILT — `ConflictDetail` / `MergeConflictDetail` are vestigial.** They remain defined in `errors.proto` for wire compatibility, but the implemented write path does not return `ConflictDetail` (no CAS reject). `Merge` is a real jj-style merge that surfaces same-decl divergence as entries in `conflicted_decls` on the response (see §5.4), so `MergeConflictDetail` is never raised either. Treat them as deprecated.
 
 ### 2.2 Common write-response fields
 
@@ -177,15 +177,15 @@ service RefService {
   rpc Diff(DiffRequest)                 returns (DiffResponse);
 
   rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
-  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse); // UNIMPLEMENTED
+  rpc DeleteBranch(DeleteBranchRequest) returns (DeleteBranchResponse);
   rpc ListBranches(ListBranchesRequest) returns (ListBranchesResponse);
   rpc GetBranch(GetBranchRequest)       returns (GetBranchResponse);
 
   rpc CreateTag(CreateTagRequest)       returns (CreateTagResponse);
-  rpc DeleteTag(DeleteTagRequest)       returns (DeleteTagResponse);    // UNIMPLEMENTED
+  rpc DeleteTag(DeleteTagRequest)       returns (DeleteTagResponse);    // requires force=true
   rpc ListTags(ListTagsRequest)         returns (ListTagsResponse);
 
-  rpc Merge(MergeRequest)               returns (MergeResponse);        // fast-forward only
+  rpc Merge(MergeRequest)               returns (MergeResponse);        // real jj merge
 }
 ```
 
@@ -201,17 +201,17 @@ A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService
 
 - **`CreateBranch`** creates a bookmark from `from` (default `"main"`); returns `BranchInfo` (`protected` is always reported `false` — protection lives in repo config, §8).
 - **`ListBranches`** / **`GetBranch`** enumerate bookmarks (optional `name_prefix`), reporting each bookmark's first target as `head_commit`.
-- **`DeleteBranch`** → **UNIMPLEMENTED** (`Status::unimplemented`): "branch deletion is not exposed by the VCS layer in v1."
+- **`DeleteBranch`** removes the bookmark via `Core::delete_bookmark` (delegating to `Vcs::delete_bookmark`).
 
 ### 5.3 Tags
 
 - **`CreateTag`** points a tag at `target` (default `"main"`); `annotated` is set when `message` is non-empty.
 - **`ListTags`** enumerates tags (optional `name_prefix`).
-- **`DeleteTag`** → **UNIMPLEMENTED**: "tag deletion is not exposed by the VCS layer in v1."
+- **`DeleteTag`** requires `force=true` (else `FAILED_PRECONDITION` — tags are immutable pins by contract); when set, removes the tag via `Core::delete_tag`.
 
 ### 5.4 Merge
 
-`Merge(source_branch → target_branch)` returns the commit `target_branch` points to afterward. **AS-BUILT:** fast-forward style via `Core::merge`; `base_revision`/`idempotency_key`/`message` are accepted. Under the jj model, an unmergeable case surfaces as conflicts on the affected declarations rather than a `MergeConflictDetail` error.
+`Merge(source_branch → target_branch)` returns the commit `target_branch` points to afterward. **AS-BUILT:** a real jj merge via `Core::merge` → `Vcs::merge` (`jj_lib::rewrite::merge_commit_trees`), producing a two-parent merge commit whose tree is jj's 3-way merge over the merge base. Same-declaration divergence becomes a stored jj first-class conflict, surfaced to the caller in `WriteResult::conflicted_decls` (the `MergeResponse` does not currently carry that field — callers can re-read the resulting commit to see them). `base_revision`/`idempotency_key`/`message` are accepted.
 
 ---
 
@@ -231,29 +231,29 @@ service HistoryService {
 
 ### 6.1 `Log` — commit/change history
 
-`LogRequest { project, repo }` → `LogResponse { repeated LogEntry }`, where:
+`LogRequest { project, repo, VersionRef at, uint32 limit }` → `LogResponse { repeated LogEntry }`, where:
 
 ```proto
 message LogEntry { string commit_id=1; string change_id=2; repeated string parents=3;
                    string author=4; string message=5; string timestamp=6; }
 ```
 
-Each entry exposes both the **`commit_id`** and the stable **`change_id`**. Ordered oldest→newest along the parent chain.
+Each entry exposes both the **`commit_id`** and the stable **`change_id`**. The walk is over the real commit/change graph (`Vcs::commit_log`) newest→oldest from `at` (defaults to the repo's configured default bookmark when unset). `limit = 0` means "use Core's default", currently 100.
 
 ### 6.2 `OpLog` — the audit record
 
-`OpLogRequest { project, repo }` → `OpLogResponse { repeated OperationRecord }`:
+`OpLogRequest { project, repo, uint32 limit }` → `OpLogResponse { repeated OperationRecord }`:
 
 ```proto
 message OperationRecord { string op_id=1; repeated string parents=2;
                           string description=3; string author=4; string timestamp=5; }
 ```
 
-Every schemahub write (mutation, transaction, bookmark move, tag, undo, …) is one operation. Newest last.
+Every schemahub write (mutation, transaction, bookmark move, tag, undo, …) is one operation. The VCS returns the chain oldest→newest along the head's parent chain; `limit = 0` returns the full log, `limit = n` trims the front (oldest entries) and keeps the most recent `n` operations.
 
 ### 6.3 `Undo`
 
-`UndoRequest { project, repo, author }` → `UndoResponse { undone_op_id }`. Restores the repo to the parent operation's view. Undo is itself an append-only operation. `author` defaults to `"schemahub"` when empty.
+`UndoRequest { project, repo, author }` → `UndoResponse { undone_op_id }`. Restores the repo's view to one step further back through the content-op chain. **AS-BUILT:** undo is a **linear monotonic walk-back stack**, not jj's bare op-toggle — consecutive `undo` calls step further back (skipping leading `undo` ops at the head) rather than redoing the previous undo. Undo is itself an append-only operation. `author` defaults to `"schemahub"` when empty. `undone_op_id` is the id of the content operation whose effect was rolled past.
 
 ### 6.4 `RenderConflict` — inspect competing sides
 
@@ -306,9 +306,9 @@ All three are **format-agnostic, whole-document** and share one mechanism: the s
 
 ### 7.3 `ApplyTransaction` — atomic batch
 
-`ApplyTransactionRequest { …, repeated TransactionOp operations }` applies an ordered batch in **one** commit / one operation; compatibility + reference integrity are checked on the **final** state. `TransactionOp` carries only `protobuf_op` | `fbs_op` (OpenAPI granular ops are not transactionable — §4.3). Empty `operations` → `INVALID_ARGUMENT`.
+`ApplyTransactionRequest { …, repeated TransactionOp operations }` applies an ordered batch in **one** commit / one operation; compatibility + reference integrity are checked on the **final** state. `TransactionOp` carries only `protobuf_op` | `fbs_op` (OpenAPI granular ops are not transactionable — §4.3). Empty `operations` → `INVALID_ARGUMENT`. All ops in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`; ops may target several schema files within that repo, in which case the core groups them by `schema_path`, applies each file's ops through the compiler, and commits every effect atomically via `Vcs::commit_write_multi` (one commit, one operation across all touched files).
 
-> **AS-BUILT — limits.** The proto comment says ≤500 ops / ≤20 schemas / 30 s. `AdminService.GetServerConfig` actually reports `max_ops_per_transaction = 100`, `max_schemas_per_transaction = 1`, `transaction_timeout_secs = 30`. Treat the served config as authoritative.
+> **AS-BUILT — limits.** The proto comment says ≤500 ops / ≤20 schemas / 30 s. `AdminService.GetServerConfig` actually reports `max_ops_per_transaction = 100`, `max_schemas_per_transaction = 20`, `transaction_timeout_secs = 30`. The schema count now matches the proto's claim; the op count is still half. Treat the served config as authoritative.
 
 ---
 
@@ -330,7 +330,7 @@ Per-declaration storage makes each read a direct object lookup. Handler: `server
 
 - **`GetDeclaration`** returns `DeclSummary summary` + `bytes detail` (the compiler's `DeclDetail` rendering) + `at_commit`. `declaration_name` is the per-declaration key (`"UserRequest"`, `"path:/users"`, `"schema:User"`, …).
 - **`GetSchemaSource`** (`get_schema_source`) returns the schema file's source as bytes + `at_commit`. **AS-BUILT** — this RPC exists in the implemented proto and maps to `Core::get_schema_source`; it was not in the v1 doc's exploration service.
-- **`Search`** — **AS-BUILT:** repo-scoped. The server requires non-empty `project` and `repo` and searches at `"main"`; cross-repo search returns `INVALID_ARGUMENT` ("cross-repo search is v2").
+- **`Search`** — **AS-BUILT:** repo-scoped. The server requires non-empty `project` and `repo`; cross-repo search returns `INVALID_ARGUMENT` ("cross-repo search is v2"). `SearchRequest.at` is honored (defaults to the `"main"` bookmark when unset) — `at` was previously hard-coded; the request field now flows through to `Core::search_detailed`.
 - **`FollowType`** — **AS-BUILT, partial:** resolves a declaration's type refs against file imports and reports the first matching import's `resolved_schema_path` + `resolved_commit`, else echoes the request schema; `summary`/`detail` are currently left empty.
 - **`ListDependencies`** — **AS-BUILT:** for OpenAPI, document-level imports are empty (external `$ref` imports are v2-modeled), so dependency lists come from the compiler's `imports(meta)`.
 
@@ -360,17 +360,21 @@ service ProjectService {
 }
 ```
 
-> **AS-BUILT — projects/repos are implicit in the jj model.** A `(project, repo)` springs into existence on first write (its op-log/bookmark set is created lazily). There is no persisted project/repo registry yet, so the handlers (`server/src/services/project.rs`) are thin:
+**AS-BUILT — projects + member management are real; repo registry is still implicit.** Projects, members, and visibility are persisted (`schemahub-core/src/projects.rs` over `ProjectStore` + `RoleStore`; default file-backed JSON under `[auth].data_dir`). Repos still spring into existence on first write — a persisted repo registry has not landed yet.
 
 | RPC | Behavior |
 |-----|----------|
-| `CreateProject`, `GetProject` | echo back the requested `ProjectInfo` (`Get` reports `is_public = true`) |
-| `CreateRepo`, `GetRepo`, `UpdateRepo` | echo back a `RepoConfig` with defaults (`default_branch="main"`, `protected_branches=["main"]`, direction `FULL`) |
-| `ListProjects`, `ListRepos`, `ListMembers` | return empty lists (no registry) |
-| `DeleteProject`, `DeleteRepo` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1" |
-| `AddMember`, `RemoveMember`, `UpdateMemberRole` | **UNIMPLEMENTED** — "member management requires the RBAC layer (deferred; Noop auth ships by default)" |
+| `CreateProject` | **REAL** — wired to `Core::create_project`. Anonymous identities are rejected (`PERMISSION_DENIED`); the resolved caller becomes the project's Owner. |
+| `GetProject` | **REAL** — `Core::get_project`; `NOT_FOUND` if absent; `PERMISSION_DENIED` if the caller can't `Read` it. |
+| `ListProjects` | **REAL** — `Core::list_projects`; returns every project the caller can `Read` (public ∪ private-where-member), filtered by `name_prefix`. |
+| `DeleteProject` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1". |
+| `CreateRepo`, `GetRepo`, `UpdateRepo` | echo back a `RepoConfig` with defaults (`default_branch="main"`, `protected_branches=["main"]`, direction `FULL`). No persisted repo registry yet. |
+| `ListRepos` | returns an empty list (no registry). |
+| `DeleteRepo` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1". |
+| `AddMember`, `RemoveMember`, `UpdateMemberRole` | **REAL** — wired to `Core::add_member` / `remove_member` / `update_member_role`. Owner-only (`Action::ManageProject`). The "last Owner" invariant is enforced fail-fast — these calls refuse to leave a project with zero Owners. |
+| `ListMembers` | **REAL** — `Core::list_members`; gated by `Action::Read`. |
 
-`RepoConfig` (`compatibility_direction`, `protected_branches`) is the home of the compatibility-protection policy (`design.md` §7) — but is not yet persisted/enforced server-side beyond the echoed defaults.
+`RepoConfig` (`compatibility_direction`, `protected_branches`) is the home of the compatibility-protection policy (`design.md` §7) and IS honored at mutation time through `Config.repo_config_store()` + `config::RepoConfigStore` — but the values come from the `[repos.*]` section of `schemahub.toml`, not from `UpdateRepo` (which still only echoes).
 
 ---
 
@@ -387,13 +391,18 @@ service AdminService {
 > **AS-BUILT** (`server/src/services/admin.rs`):
 > - **`RunGC`** requires non-empty `project` + `repo` (global GC is v2 → `INVALID_ARGUMENT` otherwise). `dry_run` is honored by skipping the sweep. `RunGCResponse` reports `objects_scanned`/`objects_deleted` (both = swept count); `bytes_reclaimed` and the v1 `pending_*`/`idempotency_*` counters are `0` (those v1 GC roots no longer exist under the op-log model).
 > - **`RebuildIndex`** calls `Core::rebuild_index`; the response counters are currently `0`.
-> - **`GetServerConfig`** returns the live limits (see §7.3): `max_ops_per_transaction=100`, `max_schemas_per_transaction=1`, `transaction_timeout_secs=30`, `storage_backend="redb"`, `server_version` from `CARGO_PKG_VERSION`; the v1 `pending_*`/`idempotency_*`/`gc_age_*` fields report `0`.
+> - **`GetServerConfig`** returns the live limits (see §7.3): `max_ops_per_transaction=100`, `max_schemas_per_transaction=20`, `transaction_timeout_secs=30`, `storage_backend="redb"` (hard-coded; the field doesn't yet reflect a `"postgres"` build), `server_version` from `CARGO_PKG_VERSION`; the v1 `pending_*`/`idempotency_*`/`gc_age_*` fields report `0`.
 
 ---
 
 ## 12. Authentication
 
-Transport-level, not in the proto types. The server reads an `authorization` metadata header (`Bearer <token>`, lowercased key), strips the prefix, and passes the token to the `AuthnProvider`. The getting-started default ships **Noop** auth/authz (`Identity::Anonymous`, all operations allowed), so the token is accepted but effectively ignored. There are no auth RPCs.
+Transport-level, not in the proto types. The server reads an `authorization` metadata header (`Bearer <token>`, lowercased key), strips the prefix, and passes the token to the `AuthnProvider`. There are no auth RPCs.
+
+Two modes ship in-tree (`schemahub-server/src/lib.rs::build_core`):
+
+- **Noop (default).** When `schemahub.toml` has no `[auth].tokens` (and no `[projects.*]` bootstrap), the server installs `NoopAuthn` + `NoopAuthz`: every request is `Identity::Anonymous`, every action allowed. Tokens are accepted but ignored. This is the getting-started default.
+- **BearerToken + RBAC (configured).** When `[auth].tokens` is non-empty, the server installs `BearerTokenAuthn` (a static `token → Identity` table) + `RoleBasedAuthz` (project-scoped roles), both backed by `FileRoleStore` + `FileProjectStore` under `[auth].data_dir`. `[projects.<name>]` blocks seed the project + role registries at startup (idempotent — entries already in the on-disk stores are not overwritten). Four roles, descending: `Owner` / `Maintainer` / `Writer` / `Reader`. `--force` requires `Maintainer`+; `ManageProject` is `Owner`-only. The "last Owner" invariant is enforced fail-fast on member removal/role-change. See `design.md` §11 and `crates/schemahub-server/src/config.rs` for the toml shape.
 
 ---
 
@@ -405,8 +414,8 @@ Transport-level, not in the proto types. The server reads an `authorization` met
 | `NOT_FOUND` | project/repo/schema/branch/tag/commit/declaration absent |
 | `INVALID_ARGUMENT` | missing/empty required field; unknown file extension; no compiler for format; empty transaction; mutation validator reject (`MutationValidationError`); resolved source lacks the declaration; repo-scope-required (Search/GC) |
 | `FAILED_PRECONDITION` | compatibility violation (`CompatibilityError`); `RenderConflict` on a non-conflicted decl |
-| `PERMISSION_DENIED` / `UNAUTHENTICATED` | authz / authn failure (Noop default never raises these) |
-| `UNIMPLEMENTED` | `DeleteBranch`, `DeleteTag`, `DeleteProject`, `DeleteRepo`, `AddMember`/`RemoveMember`/`UpdateMemberRole`; unsupported `PreviewCodegen` language/format |
+| `PERMISSION_DENIED` / `UNAUTHENTICATED` | authz / authn failure (Noop default never raises these; BearerToken + RBAC mode raises them on missing/unknown token or insufficient role) |
+| `UNIMPLEMENTED` | `DeleteProject`, `DeleteRepo`; unsupported `PreviewCodegen` language/format (e.g. OpenAPI). `DeleteBranch`, `DeleteTag`, `AddMember`/`RemoveMember`/`UpdateMemberRole` are all implemented now. |
 | `INTERNAL` | server/VCS error |
 
 Structured `status.details` (as `google.protobuf.Any`) carry `CompatibilityError` and `MutationValidationError` for programmatic inspection; the CLI unpacks and renders them.
@@ -420,6 +429,11 @@ The CLI (`schemahub-cli`) is a pure gRPC client. Top-level commands (`main.rs`) 
 ```bash
 schemahub repo init <project/repo> [--public] [--default-branch main]     # ProjectService (create project+repo)
 
+schemahub project create <name> [--public]                                 # RBAC: caller becomes Owner
+schemahub project member add <project> <identity_id> [--role Reader]       # Owner-only
+schemahub project member remove <project> <identity_id>                    # Owner-only
+schemahub project member set-role <project> <identity_id> --role <role>    # Owner-only
+
 schemahub schema create <file> --project P --repo R [--branch main] [--name N] [--base-revision ""]
 schemahub schema update <file> --project P --repo R [--branch] [--name] [--base-revision] [--force]
 schemahub schema pull   <project/repo/schema> [--branch main]              # prints reconstructed source
@@ -430,17 +444,17 @@ schemahub field remove <project/repo/schema> <message> <field>            # auto
 schemahub field rename <project/repo/schema> <message> <old> <new>
 
 schemahub branch create <project/repo> <name> [--from main]
-schemahub branch delete <project/repo> <name>                              # server returns UNIMPLEMENTED
+schemahub branch delete <project/repo> <name>
 schemahub branch list   <project/repo> [--prefix ""]
 schemahub branch merge  <project/repo> <source> [--into main] [--base-revision] [--message]
 
 schemahub tag create <project/repo> <name> (--commit <id> | --branch <name>) [--message]
-schemahub tag delete <project/repo> <name> [--force]                       # server returns UNIMPLEMENTED
+schemahub tag delete <project/repo> <name> [--force]                       # --force required
 schemahub tag list   <project/repo> [--prefix ""]
 
-schemahub log  <project/repo> [...]                                        # commit/change history
-schemahub op log <project/repo>                                            # operation log (audit)
-schemahub undo <project/repo> [--author]
+schemahub log  <project/repo> [--branch main] [--limit 20]                 # commit/change history
+schemahub op log <project/repo> [--limit 0]                                # operation log (audit; 0 = no limit)
+schemahub undo <project/repo> [--author schemahub-cli]
 schemahub resolve <project/repo/schema> <declaration> [--branch main] [--from <file>] [--author] [--message]
                                                                            # --from omitted → render the conflict
 schemahub diff <project/repo> <base..head> [--schema-path ""]
@@ -449,7 +463,7 @@ schemahub codegen get     <project/repo/schema> [--branch] [--lang] [--out ./gen
 schemahub codegen preview <project/repo/schema> [--branch] [--lang]
 ```
 
-> **AS-BUILT — CLI scope.** Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). There is no top-level `merge` command — merge lives under `branch merge`. `op log` is the only `op` subcommand. Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env, or `~/.schemahub` profile (`--profile`). CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch.
+> **AS-BUILT — CLI scope.** Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). Top-level `diff` lives at the root (`schemahub diff …`), not under `branch`; `merge` lives under `branch merge`. `op log` is the only `op` subcommand. `project` ships subcommands for `create` and `member {add,remove,set-role}` (wired to the RBAC layer). Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env (clap `env` feature), or `~/.schemahub` profile (`--profile`). CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch.
 
 ---
 

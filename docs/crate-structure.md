@@ -97,19 +97,22 @@ The jj-lib integration and database persistence — this is where v1's `schemahu
 
 ```
 schemahub-vcs/src/
-  lib.rs
-  object_db.rs     # ObjectDb trait (content-addressed object store + op-log tables)
-  redb_db.rs       # RedbObjectDb: ObjectDb   (embedded default)
-  postgres_db.rs   # PgObjectDb: ObjectDb      (server option)
-  backend.rs       # DbBackend: jj_lib::backend::Backend over ObjectDb
-  op_store.rs      # DbOpStore: jj_lib::op_store::OpStore over ObjectDb
-  repo.rs          # repo loader / transaction helpers (load_at_head, begin_tx, commit_op)
-  tree.rs          # mapping schema files ↔ jj trees; per-declaration file entries (§4.2)
-  conflict.rs      # conflict (de)construction at DeclBlob granularity
-  bookmark.rs      # bookmark create/move/list, protected-bookmark matching
+  lib.rs            # Vcs handle: load_schema/commit_write_multi/merge/undo/gc; RefSpec; WriteResult
+  object_db.rs      # ObjectDb trait (content-addressed object store + op-log + refs tables)
+  redb_db.rs        # RedbObjectDb: ObjectDb (embedded default; single-file MVCC store)
+  memory_db.rs      # MemoryObjectDb: ObjectDb (in-memory, for tests)
+  pg_db.rs          # PgObjectDb: ObjectDb (server option; behind the `postgres` feature)
+  jj_backend.rs     # DbBackend: jj_lib::backend::Backend over ObjectDb
+  jj_op_store.rs    # DbOpStore: jj_lib::op_store::OpStore over ObjectDb
+  jj_op_heads.rs    # DbOpHeadsStore: jj_lib::op_heads_store::OpHeadsStore (durable head pointer)
+  repo.rs           # repo loader / Store (per-Vcs dedicated tokio current-thread runtime)
+  bookmark.rs       # protected-bookmark glob matching (`is_protected`)
+  tests.rs          # in-repo unit tests against MemoryObjectDb/RedbObjectDb
 ```
 
-`schemahub-vcs` exposes a schemahub-shaped API (load a repo, read a declaration at a ref, run a transaction that upserts/removes declarations and moves a bookmark, list operations, undo) and hides jj-lib behind it. **Dependencies:** `schemahub-types`, `jj-lib`, `redb`, `tokio-postgres`/`sqlx` (feature-gated), `bytes`.
+Per-declaration storage lives in `lib.rs` directly: `decl_path` / `encode_decl_name` map a `(<schema>, <decl>)` pair to a single jj path component (percent-encoding `%` and `/`), and `__meta__` is the well-known entry name for the file `MetaBlob` within each schema subtree. No separate `tree.rs` / `conflict.rs` files: jj inlines conflicts as multi-side tree entries, and the `ConflictId` / `ObjectKind::Conflict` types in `object_db.rs` are retained as shims but unused (see `DECISIONS.md`).
+
+`schemahub-vcs` exposes a schemahub-shaped API (load a repo, read a declaration at a ref, run a transaction that upserts/removes declarations and moves a bookmark, list operations, undo) and hides jj-lib behind it. **Dependencies:** `schemahub-types`, `jj-lib` (default features off — no git interop), `redb`, `sqlx` (optional, behind `postgres`), `bytes`, `pollster`, `async-trait`, `tokio`, `futures`, `tempfile`, `blake2`, `prost`, `serde`, `serde_json`, `uuid`, `sha2`, `hex`, `thiserror`. Features: `postgres` (compile `PgObjectDb`), `postgres-integration` (run real-Postgres tests, requires `SCHEMAHUB_TEST_POSTGRES_URL`).
 
 ### 3.3 `schemahub-core`
 
@@ -118,23 +121,32 @@ Orchestration over the VCS and the compiler registry. No `main.rs`.
 ```
 schemahub-core/src/
   lib.rs
-  registry.rs        # HashMap<format_id, Arc<dyn Compiler>>
+  config.rs          # RepoConfig (default_bookmark, direction, protected_bookmarks) + RepoConfigStore
+  error.rs           # CoreError + CoreResult (wraps VCS / auth / compiler errors)
+  registry.rs        # CompilerRegistry: HashMap<format_id, Arc<dyn Compiler>>
+  request.rs         # MutationRequest / TransactionRequest / TransactionLimits / LogEntry / SearchHit
   mutation/
     mod.rs
     single.rs        # single-mutation flow (design.md §5.1)
-    transaction.rs   # transaction flow (design.md §5.2)
+    transaction.rs   # transaction flow (design.md §5.2; multi-file via commit_write_multi)
     idempotency.rs   # RPC-edge idempotency dedupe
     compat.rs        # compatibility orchestration (protected-bookmark gating)
     closure.rs       # transitive import closure BFS (codegen)
   conflict.rs        # render/resolve conflicted declarations via the compiler
   exploration.rs     # ListDeclarations, GetDeclaration, FollowType, ListDependencies, Search
   codegen.rs         # GetDescriptors, PreviewCodegen
-  history.rs         # log (commits/changes), op log, diff
+  history.rs         # log (commits/changes; honors RefSpec + limit), op log (limit), undo, diff
+  refs.rs            # bookmark + tag orchestration (create/delete/list, merge wrappers)
+  projects.rs        # CreateProject, GetProject, AddMember etc. — RBAC over ProjectStore + RoleStore
   gc.rs              # GC via jj-lib (op-log + reachable objects)
   auth.rs            # AuthnProvider + AuthzPolicy invocation in flows
+  auth_store.rs      # ProjectStore + RoleStore traits, ProjectMeta { name, visibility, creator }
+  auth_files.rs      # FileProjectStore + FileRoleStore — JSON persistence under [auth].data_dir
+  auth_impls.rs      # BearerTokenAuthn (token → Identity) + RoleBasedAuthz
+  tests.rs           # in-repo unit tests using a mock Compiler + MemoryObjectDb
 ```
 
-**Dependencies:** `schemahub-types`, `schemahub-vcs`.
+**Dependencies:** `schemahub-types`, `schemahub-vcs`, `serde` + `serde_json` (file-backed stores), `bytes` (Compiler-trait re-export), `thiserror`. Dev-deps: `schemahub-compiler-protobuf` (only for tests), `tempfile`.
 
 ### 3.4 `schemahub-api`
 
@@ -174,18 +186,26 @@ The composition root.
 
 ```
 schemahub-server/src/
-  main.rs            # startup: config, open ObjectDb, build registry, start tonic
-  config.rs          # schemahub.toml (db backend choice, protected bookmarks, bootstrap roles)
+  main.rs            # startup: parse args (--listen/--db/--db-url/--config),
+                     # open ObjectDb, build Core, start tonic; binds to
+                     # TAILSCALE_IP:port when set, else 0.0.0.0:50051.
+  lib.rs             # composition root EXPOSED as a library: `build_core(db, config)`
+                     # + `build_router(core)`. Lets in-process integration tests
+                     # (`tests/e2e*.rs`) build the same stack without spawning a binary.
+  config.rs          # schemahub.toml: [storage], [listen], [repos.*], [auth] (tokens),
+                     # [projects.<name>] (visibility, owners, members). auth_enabled()
+                     # drives the choice between Noop and BearerToken + RBAC.
   wire.rs            # schemahub-api types ↔ schemahub-core types
-  services/
-    schema.rs        # SchemaService
-    bookmark.rs      # bookmarks/tags (was ref_service)
-    exploration.rs   # ExplorationService
-    codegen.rs       # CodegenService
-    project.rs       # ProjectService
-    history.rs       # log / op log / undo / resolve-conflict
-    admin.rs         # GC, rebuild index
   error.rs           # core errors → tonic::Status
+  services/
+    mod.rs           # token_from() helper (Authorization: Bearer <token>)
+    schema.rs        # SchemaService (create/update/delete + ApplyMutation/Transaction)
+    bookmark.rs      # RefService — commits, diff, branches (== bookmarks), tags, merge
+    exploration.rs   # ExplorationService (read API; honors `at` ref)
+    codegen.rs       # CodegenService (GetDescriptors, PreviewCodegen)
+    project.rs       # ProjectService (real projects + RBAC; repo registry still echo)
+    history.rs       # HistoryService — Log, OpLog, Undo, Render/Resolve conflict
+    admin.rs         # AdminService — RunGC, RebuildIndex, GetServerConfig
 ```
 
 ```rust
@@ -224,24 +244,32 @@ Pure gRPC client.
 
 ```
 schemahub-cli/src/
-  main.rs
-  config.rs          # ~/.schemahub/config + .schemahub project file
-  format.rs          # extension → format
-  output.rs          # DeclDetail bytes → human-readable per format
-  client.rs          # channel setup, auth header injection
-  commands/
-    schema.rs        # create / update / pull / delete
-    field.rs message.rs enum_.rs service.rs   # granular mutations
-    bookmark.rs tag.rs                          # bookmarks/tags
-    log.rs op_log.rs undo.rs resolve.rs diff.rs # jj-style history/recovery
-    import_.rs codegen.rs search.rs project.rs
+  main.rs            # clap entrypoint; subcommands: repo / project / schema / field /
+                     # branch / tag / log / op / undo / resolve / codegen / diff
+  config.rs          # ~/.schemahub config; reads --server/--token or env vars
+  client.rs          # tonic Channel + Authorization header attachment
+  cmd/
+    mod.rs           # parse_ref: "@hex"→Commit, "tag:N"→Tag, else Branch
+    repo.rs          # `repo init` (project + repo creation)
+    project.rs       # `project create` + `project member {add,remove,set-role}` (RBAC)
+    schema.rs        # `schema create/update/pull/delete`
+    field.rs         # Protobuf granular field ops: add/remove/rename
+    branch.rs        # `branch create/delete/list/merge`
+    tag.rs           # `tag create/delete/list`
+    log.rs           # `log` — RefService.ListCommits
+    history.rs       # `op log`, `undo`, `resolve` — HistoryService
+    codegen.rs       # `codegen get/preview`
 ```
 
-**Dependencies:** `schemahub-api`, `clap`, `tonic`, `tokio`, `serde`, `toml`, `anyhow`.
+There is no `message` / `enum` / `service` CLI subcommand yet (those `ApplyMutation` ops exist on the wire only). No top-level `search`, `import`, or `op` subcommands beyond `op log`.
+
+**Dependencies:** `schemahub-api`, `clap` (with `derive` and `env` features), `tonic`, `tokio`, `prost`, `serde`, `toml`, `anyhow`, `bytes`, `uuid`.
 
 ---
 
 ## 4. Workspace `Cargo.toml`
+
+Reflects the actual root `Cargo.toml` on `v2-rearchitecture`.
 
 ```toml
 [workspace]
@@ -264,14 +292,28 @@ tonic       = "0.12"
 tonic-build = "0.12"
 prost       = "0.13"
 prost-types = "0.13"
-jj-lib      = "*"          # pin to a vendored version (see design.md §4.6)
+# jj-lib is the real Jujutsu VCS library; schemahub-vcs implements its
+# Backend + OpStore traits over our ObjectDb (see schemahub-vcs/DECISIONS.md).
+jj-lib      = { version = "0.41", default-features = false }
+pollster    = "0.4"
+async-trait = "0.1"
+futures     = "0.3"
+tempfile    = "3"
 redb        = "2"
 bytes       = "1"
 serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
 toml        = "0.8"
-clap        = { version = "4", features = ["derive"] }
+clap        = { version = "4", features = ["derive", "env"] }
 anyhow      = "1"
 thiserror   = "1"
+sha2        = "0.10"
+hex         = "0.4"
+uuid        = { version = "1", features = ["v4"] }
+# Postgres backend for schemahub-vcs (optional, behind the `postgres` feature).
+sqlx        = { version = "0.9", default-features = false,
+                features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
 
 # sibling compilers (path deps within ~/projects/shuozeli/compilers/)
 protoc-rs-parser  = { path = "../../compilers/protobuf-rs/parser" }
@@ -281,6 +323,8 @@ flatc-rs-parser   = { path = "../../compilers/flatbuffers-rs/parser" }
 flatc-rs-schema   = { path = "../../compilers/flatbuffers-rs/schema" }
 flatc-rs-codegen  = { path = "../../compilers/flatbuffers-rs/codegen" }
 ```
+
+`jj-lib` is pinned at `0.41` with `default-features = false` so the `git` interop feature is off (we bypass git — see `design.md` §4.6). `sqlx` is workspace-declared but only depended on through the optional `postgres` feature on `schemahub-vcs` (and forwarded into `schemahub-server`).
 
 > Path deps assume the post-2026-05-13 layout: schemahub at `~/projects/shuozeli/codegen/schemahub`, compilers at `~/projects/shuozeli/compilers/`. Confirm the relative paths against the actual workspace root before building.
 

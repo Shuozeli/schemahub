@@ -130,7 +130,15 @@ pub struct MetaBlob(pub Vec<u8>);
 
 ### 2.1 Blob encoding
 
-Each compiler serializes its AST nodes with a stable, versioned encoding. Because Protobuf and FlatBuffers ASTs come from the sibling crates, the encoding is `prost`/`serde` over those types (whichever the sibling crate already supports), wrapped with a `blob_version: u32` for migration. The VCS layer never inspects these bytes — it only content-addresses and stores them.
+Each compiler serializes its AST nodes with a stable, versioned encoding, wrapped with a `blob_version: u32` for migration. The VCS layer never inspects these bytes — it only content-addresses and stores them. The encoding used per compiler is determined by what the underlying AST types support:
+
+| Compiler | Encoding | Why |
+|----------|----------|-----|
+| Protobuf | `prost` | `protoc-rs-schema::FileDescriptorProto` and its sub-descriptors implement `prost::Message`. |
+| FlatBuffers | `serde_json` | `flatc-rs-schema` types implement `serde::Serialize`/`Deserialize` but NOT `prost::Message`. |
+| OpenAPI | `serde_json` | In-tree AST; small, human-debuggable; serde is already a dependency. |
+
+Determinism: each encoder writes fields in declaration order with no key reordering, so identical ASTs round-trip to identical bytes.
 
 ---
 
@@ -246,6 +254,8 @@ impl OpStore for DbOpStore {
 
 **Every schemahub write is one jj operation.** A mutation, a transaction, a bookmark move, a GC run, a role change — each is a `Transaction` that commits to a new `Operation`. This is the audit log (`who/when/what`) and the substrate for `undo` (restore the repo to a prior `OperationId`). It replaces v1's bespoke `pending/` GC roots and idempotency-as-durability machinery.
 
+`Vcs::undo` is a **linear monotonic walk-back stack**, not jj's bare op-toggle: consecutive `undo` calls step further back through the content-op chain (skipping leading `undo` ops at the head), rather than re-doing the previous undo. The newly recorded `undo` operation's view equals the target state's view; the response carries the id of the operation whose effect was rolled past.
+
 ### 4.5 Database choice
 
 The backend/op-store are written against a small internal `ObjectDb` trait so the concrete database is swappable:
@@ -293,7 +303,11 @@ Project/repo namespacing: each `project/repo` is an independent jj repo (its own
 
 ### 5.2 Transaction flow
 
-Identical, except step 7 calls `compiler.apply_mutations(&schema, &ops)` (final-state validation only), step 8 checks every changed declaration, and step 9 writes all changes under **one** commit / one operation. Limits (≤ ops, ≤ schemas, timeout) are validated before step 7. Atomicity is inherent: a jj transaction either commits one operation or none.
+Identical to §5.1, except step 7 calls `compiler.apply_mutations(&schema, &ops)` (final-state validation only), step 8 checks every changed declaration, and step 9 writes all changes under **one** commit / one operation. Limits (≤ ops, ≤ schemas, timeout) are validated before step 7. Atomicity is inherent: a jj transaction either commits one operation or none.
+
+**Multi-file transactions.** A transaction may touch several schema files within one `(project, repo)`. The implementation (`schemahub-core/src/mutation/transaction.rs`) groups the ordered ops by `Mutation::schema_path` (preserving op order within each file and first-appearance file order), loads each touched file's base, applies that file's ops through the compiler to produce one `MutationEffect` per file, runs the compat gate per file when the bookmark is protected, and commits every effect atomically through `Vcs::commit_write_multi` — one commit, one operation across all touched files. Every op in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`.
+
+Default limits served by the core (`TransactionLimits::default`): `max_ops = 100`, `max_schemas = 20`. The proto's `schema_service.proto` comment ("≤ 500 operations") is aspirational; `AdminService.GetServerConfig` reports the live values.
 
 ---
 
@@ -349,6 +363,8 @@ rpc GetSchemaSource(...)    // compiler.print(SchemaObjects) — reconstructed, 
 
 `FollowType` and `Search` use the dependency / name index; both can cross repo boundaries via the full `project/repo/schema` path in each `Import`.
 
+`Log` (the commit/change history) walks the **real** commit graph from a ref via `Vcs::commit_log`, newest→oldest, surfacing each commit's content-addressed `commit_id`, its stable jj `change_id` (reverse hex), parents, author, message, and timestamp. This is distinct from `OpLog` (the operation log audit record); see §6 / §4.4.
+
 ---
 
 ## 10. Codegen API
@@ -367,7 +383,7 @@ The Protobuf compiler builds a `FileDescriptorSet` from the AST and calls `proto
 
 ## 11. Auth Model
 
-Unchanged from v1 §6:
+Two trait interfaces in `schemahub-types`:
 
 ```rust
 trait AuthnProvider { fn identify(&self, md: &RequestMetadata) -> Result<Identity, AuthnError>; }
@@ -375,10 +391,39 @@ trait AuthzPolicy   { fn check(&self, who: &Identity, a: Action, r: &ResourcePat
 enum Action { Read, Write, Force, ManageProject, ManageRepo }
 ```
 
-- No-op implementations (`Identity::Anonymous`, `Ok(())`) ship in-tree as the getting-started default.
-- Four project-scoped roles: `Owner` / `Maintainer` / `Writer` / `Reader`. `--force` requires `Maintainer`+.
-- Auth runs after the idempotency check, before the transaction (steps 2–3). Public projects: reads open, writes always authenticated.
-- Default role store: a `roles/<project>/<identity>` table, bootstrapped from `schemahub.toml`.
+### Default ("Noop") mode
+
+When `schemahub.toml` has no `[auth]` section, the server installs `NoopAuthn` (`Identity::Anonymous`) + `NoopAuthz` (every action allowed). This is the getting-started default — anonymous reads and writes, no enforcement.
+
+### Real RBAC mode
+
+When `[auth].tokens` is non-empty, the server installs the real RBAC layer (`schemahub-server/src/lib.rs::build_core`):
+
+- **`BearerTokenAuthn`** (`schemahub-core/src/auth_impls.rs`) — a static `token → Identity` table populated from `[auth].tokens`.
+- **`RoleBasedAuthz`** (`schemahub-core/src/auth_impls.rs`) — project-scoped role checks over a `RoleStore` and `ProjectStore`.
+- **`FileRoleStore` + `FileProjectStore`** (`schemahub-core/src/auth_files.rs`) — JSON files at `[auth].data_dir/{roles.json, projects.json}`.
+
+Four project-scoped roles, descending: `Owner` / `Maintainer` / `Writer` / `Reader`. `--force` requires `Maintainer`+. `ManageProject` (member CRUD) is `Owner`-only. Auth runs after the idempotency check, before the transaction (mutation steps 2–3).
+
+**Visibility:** projects carry `Visibility::Public | Private` in `ProjectMeta`. Public projects open reads to anonymous; private projects require a member identity.
+
+**Invariants:**
+
+- *Last Owner guard.* `remove_member` / `update_member_role` fail-fast if the change would leave a project with zero Owners.
+- *Create-project authentication.* `CreateProject` requires a non-anonymous identity (the caller becomes the project's Owner).
+
+### Bootstrap from `schemahub.toml`
+
+`[projects.<name>]` blocks seed the project + role registries at startup, idempotently — entries already in the on-disk stores are not overwritten:
+
+```toml
+[projects.acme]
+visibility = "private"           # or "public"
+owners     = ["alice"]
+members    = { bob = "Writer", carol = "Reader" }
+```
+
+A `[projects.*].members` entry whose role string doesn't parse as one of `Reader`/`Writer`/`Maintainer`/`Owner` fails the server at startup (fail-closed). When the registries are not configured, `EmptyRoleStore` / `EmptyProjectStore` fallbacks are used — every lookup is `None`, every write succeeds silently (so a Noop deployment can still call `add_member` without surfacing a "no store" error to clients).
 
 ---
 
@@ -423,10 +468,19 @@ Config: `~/.schemahub/config` (TOML) with `SCHEMAHUB_SERVER` / `SCHEMAHUB_TOKEN`
 
 ## 13. Migration From the v1 Implementation
 
-The current code compiles and its mechanics (idempotency, auth traits, compatibility, transactions) are reusable, but three things change structurally:
+The structural migration to v2 is **complete** (initial v2 commit landed on the `v2-rearchitecture` branch). Three things changed:
 
-1. **Replace hand-rolled parsers/ASTs** (`schemahub-plugin-*/src/parser.rs`, `ast/mod.rs`) with compiler wrappers over `protobuf-rs` / `flatbuffers-rs`. Keep the OpenAPI AST. **Write the printers** (the sibling compilers have none).
-2. **Replace the `__schema__` single-blob storage** with the per-declaration split (§4.2). The `Compiler::parse` now returns `ParsedSchema { meta, decls }`; the VCS layer stores each decl as its own file.
-3. **Replace the bespoke git-style object store + refs + GC** (`schemahub-storage`, `schemahub-core/version_control`, mutation CAS) with the jj-lib model: `DbBackend` + `DbOpStore` over `ObjectDb`, transactions, bookmarks, op-log/undo, first-class conflicts. The mutation/transaction *flows* (§5) keep their shape; the primitives underneath change.
+1. **Hand-rolled parsers/ASTs replaced** by compiler wrappers over `protobuf-rs` / `flatbuffers-rs` (`schemahub-compiler-protobuf` / `schemahub-compiler-flatbuffers`); the OpenAPI AST stayed in-tree (`schemahub-compiler-openapi`). All three compilers ship in-tree printers (the sibling crates have none).
+2. **`__schema__` single-blob storage replaced** by the per-declaration split (§4.2). `Compiler::parse` returns `ParsedSchema { meta, decls }`; the VCS layer stores each decl at `<schema>/<decl>` with `__meta__` for the file metadata.
+3. **Bespoke git-style object store + refs + GC replaced** by the jj-lib model: `DbBackend` + `DbOpStore` over an `ObjectDb`, transactions, bookmarks, op-log/undo, first-class conflicts. Mutation/transaction flows (§5) keep their shape; the primitives underneath are jj-native.
 
-Net effect: `schemahub-types`, `schemahub-api`, `schemahub-server`, `schemahub-cli` largely survive (with the `FormatPlugin`→`Compiler` rename and conflict/op-log RPCs added); `schemahub-storage` and `schemahub-core/version_control` are reworked onto jj-lib; the plugin crates become compiler crates. See `crate-structure.md`.
+Net effect: `schemahub-types`, `schemahub-api`, `schemahub-server`, `schemahub-cli` largely survived (with the `FormatPlugin`→`Compiler` rename and conflict/op-log RPCs added); `schemahub-storage` + `schemahub-core/version_control` were reworked into `schemahub-vcs`; the plugin crates became compiler crates. See `crate-structure.md`.
+
+### Post-v2 increments
+
+After the v2 cut, two extensions landed on the same branch (not architectural changes, just filling in what v2 left as Noop / stub):
+
+- **Postgres `ObjectDb`** behind the `postgres` feature on `schemahub-vcs` (and forwarded to `schemahub-server` via `--features postgres`). Redb remains the default.
+- **Project-scoped RBAC** — `BearerTokenAuthn` + `RoleBasedAuthz` over file-backed `RoleStore` + `ProjectStore` (JSON under `[auth].data_dir`), with `[projects.*]` bootstrap. See §11. Noop auth still ships when `[auth]` is absent.
+
+The repo registry (`CreateRepo` / `GetRepo` / `UpdateRepo` / `ListRepos`) remains mostly echo until a persisted repo registry lands.

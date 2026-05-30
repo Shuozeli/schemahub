@@ -81,7 +81,21 @@ runtime (`Store::block_on`) and never blocks on an ambient/shared runtime
 
 ## Persistence seam = `ObjectDb` trait
 
-Two impls ship: `RedbObjectDb` (embedded default) and `MemoryObjectDb` (tests /
-core unit tests). The trait gained `put_object_at` / `put_op_at` (store under a
+Three impls ship:
+
+- `RedbObjectDb` (embedded default — single-file MVCC store, zero-ops).
+- `MemoryObjectDb` (tests / core unit tests — non-persistent).
+- `PgObjectDb` (server / multi-instance deployments — `pg_db.rs`), gated by the
+  `postgres` cargo feature on `schemahub-vcs`. Integration tests against a real
+  Postgres are further gated by `postgres-integration` and read
+  `SCHEMAHUB_TEST_POSTGRES_URL`. Workspace dep: `sqlx 0.9` with
+  `runtime-tokio + tls-rustls`.
+
+`RedbObjectDb` remains the default. The server crate's `postgres` feature
+forwards into `schemahub-vcs/postgres` so a `--features postgres` build pulls
+`PgObjectDb` into `schemahub-server`; `storage.backend = "postgres"` in
+`schemahub.toml` then routes through it.
+
+The trait gained `put_object_at` / `put_op_at` (store under a
 *caller-supplied* id, since jj computes its own blake2b ids) and `Symlink`/`View`
-object kinds. A `postgres` impl remains future work (P3) — redb stays default.
+object kinds.

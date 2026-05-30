@@ -1,6 +1,6 @@
 # schemahub
 
-A general-purpose schema registry server. Manage Protobuf, FlatBuffers, and OpenAPI schemas via gRPC and a CLI — with git-style version control, granular mutations, compatibility enforcement, and code generation built in.
+A general-purpose schema registry server. Manage Protobuf, FlatBuffers, and OpenAPI schemas via gRPC and a CLI — with **jj-style version control** (stable change IDs, first-class conflicts, operation log + undo), granular mutations, compatibility enforcement, and code generation built in.
 
 ## Contents
 
@@ -22,25 +22,29 @@ A general-purpose schema registry server. Manage Protobuf, FlatBuffers, and Open
 
 ## Overview
 
-schemahub stores schemas as structured, parsed representations rather than raw files. Every change is a commit. Branches and tags work like git. Protobuf and FlatBuffers schemas support field-level mutations (add/remove/rename fields, messages, enums, services) applied atomically through a structured API — no text editing required. Compatibility checks run automatically on protected branches.
+schemahub stores schemas as structured, parsed representations rather than raw files. Every change is a commit with a stable jj **change ID**. Branches (bookmarks) and tags work like git, but concurrent edits to the same declaration produce **first-class conflicts** rather than rejections, and every write is recorded in an **operation log** with `undo`. Protobuf and FlatBuffers schemas support field-level mutations (add/remove/rename fields, messages, enums, services); OpenAPI supports a handful of granular path/operation/component mutations plus whole-document push. Compatibility checks run automatically on protected branches.
 
 **What it is not**: a file server for `.proto` files. Schemas live in the registry; your build pipeline pulls descriptors from it.
+
+See `docs/design.md` for the architecture deep-dive, `docs/grpc-api.md` for the wire contract, `docs/crate-structure.md` for the workspace layout, and `docs/openapi-ast.md` for the OpenAPI AST.
 
 ---
 
 ## Workspace structure
 
+Nine crates, organized as two layers (format-agnostic VCS + per-format compilers):
+
 | Crate | Purpose |
 |---|---|
-| `schemahub-types` | Shared types, auth traits, error types, compatibility definitions |
-| `schemahub-storage` | `StorageBackend` trait + redb implementation |
-| `schemahub-core` | Business logic: mutations, version control, compatibility, search index |
-| `schemahub-api` | Proto definitions and generated gRPC bindings |
-| `schemahub-plugin-protobuf` | Protobuf: parse, print, diff, compat, mutations, codegen |
-| `schemahub-plugin-flatbuffers` | FlatBuffers: parse, print, diff, compat, mutations |
-| `schemahub-plugin-openapi` | OpenAPI: parse, print, diff, compat (whole-document only in v1) |
-| `schemahub-server` | gRPC server — SchemaService, RefService, ExplorationService, CodegenService, ProjectService, AdminService |
-| `schemahub-cli` | `schemahub` CLI binary |
+| `schemahub-types` | Shared types, the `Compiler` trait, auth traits (`AuthnProvider`/`AuthzPolicy`), errors |
+| `schemahub-vcs` | jj-lib over a swappable `ObjectDb`: `DbBackend` + `DbOpStore`; redb default, in-memory + Postgres impls |
+| `schemahub-core` | Orchestration: mutations, transactions, compatibility, conflicts, history, GC, RBAC (real `BearerTokenAuthn` + `RoleBasedAuthz`) |
+| `schemahub-api` | tonic/prost-generated gRPC bindings for the protos in `crates/schemahub-api/proto/schemahub/v1/` |
+| `schemahub-compiler-protobuf` | Protobuf compiler — wraps `protobuf-rs` (parse/AST/codegen); owns the `.proto` printer + mutation validator + compat checker |
+| `schemahub-compiler-flatbuffers` | FlatBuffers compiler — wraps `flatbuffers-rs`; owns the `.fbs` printer |
+| `schemahub-compiler-openapi` | OpenAPI compiler — in-tree AST/parser/printer (`docs/openapi-ast.md`) |
+| `schemahub-server` | gRPC server (binary `schemahub-server`) — SchemaService, RefService, HistoryService, ExplorationService, CodegenService, ProjectService, AdminService |
+| `schemahub-cli` | `schemahub` CLI binary — pure gRPC client |
 
 ---
 
@@ -52,15 +56,28 @@ schemahub stores schemas as structured, parsed representations rather than raw f
 cargo build --release
 ```
 
-Produces two binaries: `schemahub-server` and `schemahub` (the CLI).
+Produces two binaries: `schemahub-server` and `schemahub` (the CLI). The Postgres-backed `ObjectDb` is feature-gated:
+
+```bash
+# Build with Postgres support
+cargo build --release --features postgres -p schemahub-server
+```
 
 ### Run the server
 
 ```bash
-schemahub-server --listen [::1]:50051 --db ./schemahub.db
+# Defaults: redb at ./schemahub.db, listening on 0.0.0.0:50051
+schemahub-server
+
+# Pin everything explicitly
+schemahub-server --listen 0.0.0.0:50051 --db ./schemahub.db --config schemahub.toml
+
+# Postgres backend (requires --features postgres)
+schemahub-server --db-url postgres://user:pass@host:5432/dbname \
+                 --config schemahub.toml
 ```
 
-Both flags are optional (those are the defaults).
+If the `TAILSCALE_IP` environment variable is set and `--listen` is not given, the server binds to that IP on the port from `[listen].addr` (user infra convention). Otherwise the default is `0.0.0.0:50051`.
 
 ### Configure the CLI
 
@@ -117,6 +134,17 @@ schemahub repo init [--public] [--default-branch B] <project/repo>
 
 Creates the project and repo in one idempotent step. If the project already exists, it is reused. Use this instead of calling `CreateProject` and `CreateRepo` separately.
 
+### `project` — project + member management (RBAC)
+
+```
+schemahub project create [--public] <name>
+schemahub project member add        <project> <identity_id> [--role Reader]
+schemahub project member remove     <project> <identity_id>
+schemahub project member set-role   <project> <identity_id> --role <role>
+```
+
+Roles: `Reader` / `Writer` / `Maintainer` / `Owner`. `CreateProject` requires an authenticated identity (anonymous callers are rejected); the caller becomes the project's Owner. Member CRUD is Owner-only and enforces the "last Owner" invariant — a project must always have at least one Owner.
+
 ### `schema` — schema lifecycle
 
 ```
@@ -149,7 +177,7 @@ schemahub branch list   [--project P] [--repo R] [--prefix PREFIX]
 schemahub branch merge  [--into B] [--base-revision H] [--message MSG] [--project P] [--repo R] <source>
 ```
 
-Merge is fast-forward only in v1. The target branch must be a direct ancestor of the source.
+Merge is a real jj 3-way merge: the server creates a 2-parent merge commit whose tree is jj's auto-merge over the merge base. Same-declaration divergence becomes a stored first-class conflict (resolve with `schemahub resolve`), not an error.
 
 ### `tag` — tag management
 
@@ -164,10 +192,35 @@ Providing `--message` creates an annotated tag. Without it, the tag is lightweig
 ### `log` — commit history
 
 ```
-schemahub log [--branch B] [--limit N] [--project P] [--repo R]
+schemahub log [--branch B] [--limit N] <project/repo>
 ```
 
-Default limit: 20 commits.
+Default limit: 20 commits. Walks the real commit/change graph via `Vcs::commit_log`, surfacing each commit's content-addressed `commit_id`, stable jj `change_id`, parents, author, and message.
+
+### `op log` — operation log (jj-style audit record)
+
+```
+schemahub op log [--limit N] <project/repo>
+```
+
+`--limit 0` (the default) returns the full log. Each entry shows the operation id, author, timestamp, and description. Every schemahub write is one operation.
+
+### `undo` — undo the last operation
+
+```
+schemahub undo [--author A] <project/repo>
+```
+
+Linear monotonic walk-back: consecutive `undo` calls step further back through content ops, rather than redoing the previous undo. Prints the id of the operation whose effect was rolled past.
+
+### `resolve` — render / resolve a conflicted declaration
+
+```
+schemahub resolve <project/repo/schema> <declaration>
+                  [--branch B] [--from <file>] [--author A] [--message M]
+```
+
+Omit `--from` to render the conflict's competing sides (the `base` and each `side`) for inspection. Pass `--from <file>` containing the resolved schema source to commit the resolution: the server parses the file, extracts the named declaration's blob, validates it, and records the resolution as one operation.
 
 ### `codegen` — descriptor generation
 
@@ -176,7 +229,7 @@ schemahub codegen get     [--branch B | --at @<sha> | --at tag:<name>] <project/
 schemahub codegen preview [--branch B] <project/repo/schema>
 ```
 
-`get` downloads the schema descriptor (FileDescriptorSet for Protobuf, YAML for OpenAPI/FlatBuffers) and prints it to stdout, following transitive imports automatically. `preview` is not yet implemented server-side.
+`get` downloads the schema descriptor (`FileDescriptorSet` for Protobuf, reconstructed `.fbs` bundle for FlatBuffers, resolved YAML for OpenAPI) and prints it to stdout, following transitive imports automatically. `preview` renders generated source for the chosen language — implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`.
 
 Ref formats accepted by `--at` / `--branch`:
 - `main` (branch name, default)
@@ -195,7 +248,7 @@ Range example: `main..feature/add-user`. Output lists added, removed, and change
 
 ## gRPC API
 
-All services are defined in `crates/schemahub-api/proto/schemahub/v1/`. The default listen address is `[::1]:50051`.
+All services are defined in `crates/schemahub-api/proto/schemahub/v1/`. The default listen address is `0.0.0.0:50051` (overridden by `TAILSCALE_IP` env when `--listen` is omitted).
 
 ### SchemaService
 
@@ -209,14 +262,28 @@ All services are defined in `crates/schemahub-api/proto/schemahub/v1/`. The defa
 
 ### RefService
 
+Branch names map to jj **bookmarks**; the branch RPCs are a compatibility-shaped face over them.
+
 | RPC | Description |
 |---|---|
 | `GetCommit` | Fetch commit metadata by hash. |
 | `ListCommits` | Stream commits in reverse chronological order. |
-| `Diff` | Semantic diff between two version refs. |
+| `Diff` | Per-declaration semantic diff between two version refs. |
 | `CreateBranch` / `DeleteBranch` / `ListBranches` / `GetBranch` | Branch CRUD. |
 | `CreateTag` / `DeleteTag` / `ListTags` | Tag CRUD. `DeleteTag` requires `force=true`. |
-| `Merge` | Fast-forward merge. Returns `FAILED_PRECONDITION` if not fast-forwardable. |
+| `Merge` | Real jj 3-way merge with first-class conflicts; produces a 2-parent merge commit. Same-declaration divergence is recorded as a stored conflict, not an error. |
+
+### HistoryService
+
+The wire surface for the jj operation log and first-class conflict resolution (new in v2).
+
+| RPC | Description |
+|---|---|
+| `Log` | Commit/change history graph from a ref. Each entry carries both the content-addressed `commit_id` and the stable jj `change_id`. Honors `at` + `limit` (default 100). |
+| `OpLog` | The operation log — every schemahub write (mutation, transaction, bookmark move, undo, …) is one operation. `limit = 0` returns the full log. |
+| `Undo` | Linear monotonic walk-back stack: each call steps further back through content ops (not jj's bare op-toggle). Returns the id of the operation whose effect was rolled past. |
+| `RenderConflict` | Render a conflicted declaration's competing sides for human/agent display. Returns `FAILED_PRECONDITION` if the decl is not conflicted. |
+| `ResolveConflict` | Submit a resolved schema source; the server parses it, extracts the named declaration's blob, validates it, and commits the resolution as one operation. |
 
 A `VersionRef` can be a branch name, a commit hex, or a tag name:
 
@@ -246,18 +313,21 @@ message VersionRef {
 
 | RPC | Description |
 |---|---|
-| `GetDescriptors` | Return a reconstructed descriptor for a schema and all its transitive imports. Protobuf → `FileDescriptorSet`; OpenAPI / FlatBuffers → resolved YAML. |
-| `PreviewCodegen` | _(not yet implemented)_ Server-side code generation for a specified language. |
+| `GetDescriptors` | Return a reconstructed descriptor for a schema and all its transitive imports. Protobuf → `FileDescriptorSet`; FlatBuffers → reconstructed `.fbs` bundle; OpenAPI → resolved YAML. |
+| `PreviewCodegen` | Render generated source code server-side for the requested language. Implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`. Response carries the rendered text (no files written). |
 
 ### ProjectService
 
-Manages the project / repo / membership hierarchy.
+Manages the project / repo / membership hierarchy. Projects and members are real (persisted via the `ProjectStore` + `RoleStore`); the repo registry is still implicit (a `(project, repo)` springs into existence on first write).
 
 | RPC | Description |
 |---|---|
-| `CreateProject` / `GetProject` / `ListProjects` / `DeleteProject` | Project CRUD. `DeleteProject` requires Owner role; fails if repos exist unless `force=true`. |
-| `CreateRepo` / `GetRepo` / `UpdateRepo` / `ListRepos` / `DeleteRepo` | Repo CRUD. `CreateRepo` accepts `compatibility_direction`, `protected_branches` (glob patterns), and `default_branch`. |
-| `AddMember` / `RemoveMember` / `UpdateMemberRole` / `ListMembers` | Role-based membership. |
+| `CreateProject` / `GetProject` / `ListProjects` | Real — wired to the `ProjectStore`. `CreateProject` rejects anonymous identities; the caller becomes the project's Owner. `ListProjects` returns only projects the caller can `Read` (public ∪ private-where-member). |
+| `DeleteProject` | `UNIMPLEMENTED`. |
+| `CreateRepo` / `GetRepo` / `UpdateRepo` | Echo back a `RepoConfig` with defaults (`default_branch="main"`, `protected_branches=["main"]`, direction `FULL`). Per-repo compatibility config lives in `[repos.*]` in `schemahub.toml`. |
+| `ListRepos` | Returns an empty list (no persisted repo registry yet). |
+| `DeleteRepo` | `UNIMPLEMENTED`. |
+| `AddMember` / `RemoveMember` / `UpdateMemberRole` / `ListMembers` | Real role-based membership. Owner-only. Enforces the "last Owner" invariant. |
 
 ### AdminService
 
@@ -274,8 +344,8 @@ Manages the project / repo / membership hierarchy.
 | Format | Extensions | Granular mutations | Compatibility check | GetDescriptors output |
 |---|---|---|---|---|
 | Protobuf | `.proto` | Yes — full suite | Yes | `FileDescriptorSet` (binary proto) |
-| FlatBuffers | `.fbs` | Yes — see restrictions | Yes | YAML representation |
-| OpenAPI | `.yaml` `.yml` `.json` | No (v1) | Yes | Resolved YAML |
+| FlatBuffers | `.fbs` | Yes — see restrictions | Yes | Reconstructed `.fbs` bundle |
+| OpenAPI | `.yaml` `.yml` `.json` | Partial — 6 granular ops (`ApplyMutation` only, not transactions); plus whole-document push | Yes | Resolved YAML (multi-document for closures) |
 
 ---
 
@@ -368,19 +438,33 @@ Granular mutations are applied via `ApplyMutation` (single) or `ApplyTransaction
 
 ### OpenAPI
 
-Granular mutations are not supported in v1. Use `UpdateSchema` to replace the full document.
+OpenAPI supports a focused set of granular operations plus a whole-document push (used internally by `UpdateSchema`). All ops are reachable via `ApplyMutation`; OpenAPI ops are **not** transactionable.
+
+| Mutation | Description |
+|---|---|
+| `PushDocument` | Whole-document replacement. Used internally by `UpdateSchema`. |
+| `AddPath` | Add a new empty `path:<pattern>` declaration. Fails if the path already exists. |
+| `RemovePath` | Remove the `path:<pattern>` declaration. |
+| `AddOperation` | Add one HTTP method (`get`/`post`/`put`/`delete`/`patch`/`head`/`options`/`trace`) to a path item. |
+| `RemoveOperation` | Remove one HTTP method from a path item. |
+| `AddComponentSchema` | Add a new `schema:<name>` declaration with a JSON Schema type. |
+| `RemoveComponentSchema` | Remove the `schema:<name>` declaration. |
+
+Any other granular OpenAPI op returns `UnsupportedInV1`. See `docs/openapi-ast.md` for the AST and the per-declaration key scheme (`path:`, `schema:`, `param:`, `response:`, `requestBody:`).
 
 ---
 
 ## Version control model
 
-schemahub uses a git-inspired object model stored in redb:
+schemahub uses the **Jujutsu (jj) model** via `jj-lib` (default features off — no git interop), with all persistence delegated to the `ObjectDb`:
 
-- **Commits** — Immutable objects with hash, parent hashes, timestamp, author, and message.
-- **Trees** — Map schema names to their content blobs (two-level: root tree → per-schema subtree → `__schema__` blob).
-- **Branches** — Mutable refs pointing to the latest commit. Branch names support glob patterns for protection rules (e.g., `main`, `release/*`).
+- **Commits** — Immutable, content-addressed (`CommitId` via blake2b). Each carries a stable **`ChangeId`** that survives rewrite/rebase/squash — the durable identity of an edit even after history is rewritten.
+- **Trees** — Per-declaration storage: a schema file is a jj subtree `<schema-file>/`; each top-level declaration is a file entry `<schema-file>/<Decl>` holding the `DeclBlob`; `<schema-file>/__meta__` holds the file's `MetaBlob` (package, imports, syntax/edition).
+- **Branches (bookmarks)** — Mutable named refs. Names support glob patterns for protection rules (e.g., `main`, `release/*`). The branch RPCs are a compatibility-shaped face over jj bookmarks.
 - **Tags** — Immutable refs. Lightweight tags are just a ref; annotated tags carry a message, tagger, and timestamp.
-- **Merge** — Fast-forward only in v1. Returns `FAILED_PRECONDITION` if the target is not a direct ancestor of the source.
+- **First-class conflicts** — Concurrent edits to the **same** declaration produce a stored conflict (a multi-side tree entry), surfaced in `conflicted_decls` on the response, not a hard error. The caller resolves it later via `HistoryService.ResolveConflict`. Concurrent edits to **different** declarations merge automatically.
+- **Merge** — Real 3-way merge via `jj_lib::rewrite::merge_commit_trees`, producing a 2-parent merge commit. Same-decl divergence becomes a stored conflict; the merge itself never fails for this reason.
+- **Operation log + undo** — Every write (mutation, transaction, bookmark move, tag, GC, resolve) is one jj `Operation`. `Undo` is a linear monotonic walk-back stack — consecutive `undo` calls step further back through content ops, rather than redoing the previous undo.
 
 All ref arguments (`--branch`, `--at`) accept:
 - A branch name: `main`, `feature/xyz`
@@ -442,31 +526,50 @@ pub trait AuthzPolicy: Send + Sync + 'static {
 
 **Resource paths**: scoped to project or project/repo.
 
-**Defaults**: The server ships with `NoopAuthn` (all requests are `Identity::Anonymous`) and `NoopAuthz` (all actions allowed). Replace these with real implementations for production deployments.
+The server picks one of two modes at startup (`schemahub-server/src/lib.rs::build_core`):
+
+### Noop (default)
+
+If `schemahub.toml` has no `[auth]` section (and no `[projects.*]` bootstrap), the server installs `NoopAuthn` (every request is `Identity::Anonymous`) and `NoopAuthz` (every action allowed). Tokens are accepted but ignored. This is the getting-started default.
+
+### BearerToken + RBAC (configured)
+
+When `[auth].tokens` is non-empty, the real RBAC layer turns on automatically:
+
+- **`BearerTokenAuthn`** — a static `Bearer <token> → Identity` table from `[auth].tokens`.
+- **`RoleBasedAuthz`** — project-scoped role checks.
+- **`FileRoleStore` + `FileProjectStore`** — JSON persistence at `[auth].data_dir/{roles.json, projects.json}`.
+
+Four roles, descending: `Owner` / `Maintainer` / `Writer` / `Reader`. `--force` requires `Maintainer`+; `ManageProject` (member CRUD) is `Owner`-only. The server enforces a **last Owner** invariant: removing or downgrading the only Owner of a project fails fast.
+
+`[projects.<name>]` blocks seed the project + role registries at startup, idempotently — entries already in the on-disk stores are not overwritten. See `docs/design.md` §11 for details.
 
 ---
 
 ## Storage
 
-The storage backend is [redb](https://github.com/cberner/redb), an embedded key-value store. The entire database is a single file on disk.
+The VCS layer (`schemahub-vcs`) implements jj-lib's `Backend` and `OpStore` traits over a small `ObjectDb` abstraction. Three backends ship:
 
+| Backend | Build | Use case |
+|---|---|---|
+| `RedbObjectDb` | default | Embedded single-file MVCC store; ideal for self-hosted/dev. The whole database is one file on disk. |
+| `PgObjectDb` | `--features postgres` on `schemahub-server` | Multi-instance server deployments; uses `sqlx 0.9` with `runtime-tokio + tls-rustls`. |
+| `MemoryObjectDb` | (tests only) | In-memory, non-persistent. |
+
+Pick the backend in `schemahub.toml`:
+
+```toml
+[storage]
+backend = "redb"                       # or "postgres" (requires `--features postgres`)
+path    = "/var/lib/schemahub/data.db" # honored for backend = "redb"
+url     = "postgres://user:pass@host/db" # honored for backend = "postgres"
 ```
-schemahub-server --db /var/lib/schemahub/data.db
-```
 
-The `StorageBackend` trait in `schemahub-storage` abstracts all storage access. A different backend can be plugged in by implementing the trait.
+`--db` / `--db-url` on the server binary override `path` / `url` respectively.
 
-**Key namespaces used internally:**
+Internally, every object is content-addressed via jj-lib's blake2b hashing — files (`DeclBlob`/`MetaBlob`), trees, commits, views, plus a per-`(project, repo)` operation log. Content dedups globally; the op-log and refs are scoped per repo. There are no v1-era `pending/` or `idempotency/` key namespaces — durability comes from the op-log and content addressing.
 
-| Prefix | Contents |
-|---|---|
-| `objects/` | Content-addressed blobs (schemas, trees, commits) |
-| `refs/branches/` | Branch HEAD pointers |
-| `refs/tags/` | Tag pointers |
-| `search/` | Declaration name index (used by `Search`) |
-| `idempotency/` | Idempotency key → result mappings (24 h TTL) |
-| `pending/` | In-flight mutation markers |
-| `config/` | Per-repo configuration |
+The `ObjectDb` trait is the only persistence seam: implementing it (plus the per-repo `set_ref`/`get_ref` ref table) is enough to add a new backend.
 
 ---
 
@@ -476,8 +579,40 @@ The `StorageBackend` trait in `schemahub-storage` abstracts all storage access. 
 
 | Flag | Default | Description |
 |---|---|---|
-| `--listen` | `[::1]:50051` | Address to bind |
-| `--db` | `schemahub.db` | Path to the redb database file |
+| `--listen` | `0.0.0.0:50051` (or `TAILSCALE_IP:50051` if `TAILSCALE_IP` env is set) | Address to bind |
+| `--db` | `schemahub.db` | Path to the redb database file (honored when `storage.backend = "redb"`) |
+| `--db-url` | _(none)_ | Postgres connection URL (honored when `storage.backend = "postgres"`; requires `--features postgres`) |
+| `--config` | `schemahub.toml` | Path to the server config file (optional — defaults apply if missing) |
+
+### Server config file
+
+`schemahub.toml` (optional):
+
+```toml
+[storage]
+backend = "redb"          # or "postgres"
+path    = "schemahub.db"  # for redb
+# url   = "postgres://..." # for postgres
+
+[listen]
+addr = "0.0.0.0:50051"     # overridden by TAILSCALE_IP env when --listen is omitted
+
+[repos."acme/payments"]    # per-(project/repo) compatibility config
+default_bookmark    = "main"
+compatibility       = "full"           # backward | forward | full | disabled
+protected_bookmarks = ["main", "release/*"]
+
+[auth]                                  # presence flips Noop → BearerToken + RBAC
+data_dir = "schemahub-data"
+[auth.tokens."secret-token-alice"]
+id      = "alice"
+display = "Alice Example"
+
+[projects.acme]                         # bootstrap project + roles at startup
+visibility = "private"                  # or "public"
+owners     = ["alice"]
+members    = { bob = "Writer", carol = "Reader" }
+```
 
 ### CLI config file
 
@@ -493,7 +628,7 @@ server = "https://schemahub.example.com"
 token  = "Bearer eyJ..."
 ```
 
-Resolution order (first wins): CLI flags → config file profile → environment variables → built-in defaults.
+Resolution order (first wins): CLI flags → environment variables (`SCHEMAHUB_SERVER`, `SCHEMAHUB_TOKEN`) → config file profile → built-in defaults.
 
 ---
 
@@ -501,8 +636,9 @@ Resolution order (first wins): CLI flags → config file profile → environment
 
 | Feature | Status |
 |---|---|
-| OpenAPI granular mutations | Not supported. Use `UpdateSchema` (whole-document replacement). |
-| `CodegenService.PreviewCodegen` | Not implemented. |
+| OpenAPI granular mutations | Partial. The compiler implements `AddPath`, `RemovePath`, `AddOperation`, `RemoveOperation`, `AddComponentSchema`, `RemoveComponentSchema` plus the whole-document `PushDocument` (used by `UpdateSchema`). Other granular ops return `UnsupportedInV1`. OpenAPI ops are reachable via `ApplyMutation` only, not `ApplyTransaction`. |
+| `CodegenService.PreviewCodegen` | Implemented for Protobuf and FlatBuffers. For OpenAPI it returns `UNIMPLEMENTED` (OpenAPI client/server codegen is out of scope). |
 | Protobuf `UpdateImport` remove | The API proto does not expose a `remove` flag; import entries can be added/updated but not removed via the API in v1. |
-| 3-way merge | Not supported. Merge is fast-forward only. |
-| Multiple storage backends | Only redb is implemented. The trait is ready for other backends. |
+| Cross-repo `Search` | Not supported. `SearchRequest.project` + `repo` are required; cross-repo search returns `INVALID_ARGUMENT`. |
+| Persisted repo registry | `CreateRepo` / `GetRepo` / `UpdateRepo` echo back defaults; `ListRepos` returns empty; `DeleteRepo` and `DeleteProject` are `UNIMPLEMENTED`. Per-repo compatibility config lives in `[repos.*]` in `schemahub.toml` instead. |
+| Cross-repo rename propagation | Not automatic. `Diff`/dependency reads surface the affected importers; the caller issues `UpdateImport` against the downstream repos. |
