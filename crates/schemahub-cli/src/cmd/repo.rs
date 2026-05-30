@@ -1,8 +1,7 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
-    project_service_client::ProjectServiceClient,
-    CreateProjectRequest, CreateRepoRequest,
+    project_service_client::ProjectServiceClient, CreateProjectRequest, CreateRepoRequest,
 };
 use tonic::transport::Channel;
 
@@ -31,7 +30,11 @@ pub enum RepoAction {
 
 pub async fn run(args: RepoArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
-        RepoAction::Init { repo, public, default_branch } => {
+        RepoAction::Init {
+            repo,
+            public,
+            default_branch,
+        } => {
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
                 anyhow::bail!("repo must be 'project/repo', e.g. acme/platform");

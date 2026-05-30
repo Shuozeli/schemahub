@@ -46,17 +46,29 @@ pub fn parse(source: &str) -> Result<ParsedSchema, ParseError> {
     let mut order_entries: Vec<(u32, u8, String)> = Vec::new();
     for o in &schema.objects {
         if let Some(n) = &o.name {
-            order_entries.push((o.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX), 0, n.clone()));
+            order_entries.push((
+                o.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX),
+                0,
+                n.clone(),
+            ));
         }
     }
     for e in &schema.enums {
         if let Some(n) = &e.name {
-            order_entries.push((e.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX), 1, n.clone()));
+            order_entries.push((
+                e.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX),
+                1,
+                n.clone(),
+            ));
         }
     }
     for s in &schema.services {
         if let Some(n) = &s.name {
-            order_entries.push((s.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX), 2, n.clone()));
+            order_entries.push((
+                s.span.as_ref().map(|s| s.line).unwrap_or(u32::MAX),
+                2,
+                n.clone(),
+            ));
         }
     }
     order_entries.sort_by_key(|e| (e.0, e.1));

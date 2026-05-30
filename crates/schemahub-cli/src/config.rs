@@ -27,17 +27,18 @@ impl Config {
     ) -> anyhow::Result<Self> {
         let raw = load_raw_config();
 
-        let profile_data = raw.profiles.get(profile).map(|p| (p.server.as_deref(), p.token.as_deref())).unwrap_or((None, None));
+        let profile_data = raw
+            .profiles
+            .get(profile)
+            .map(|p| (p.server.as_deref(), p.token.as_deref()))
+            .unwrap_or((None, None));
 
         let server = server_override
             .or(profile_data.0)
             .unwrap_or("http://[::1]:50051")
             .to_string();
 
-        let token = token_override
-            .or(profile_data.1)
-            .unwrap_or("")
-            .to_string();
+        let token = token_override.or(profile_data.1).unwrap_or("").to_string();
 
         Ok(Config { server, token })
     }
@@ -57,6 +58,9 @@ fn load_raw_config() -> RawConfig {
 
 fn dirs_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".schemahub").join("config"))
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".schemahub")
+            .join("config"),
+    )
 }
-

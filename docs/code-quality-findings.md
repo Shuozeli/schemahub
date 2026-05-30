@@ -4,6 +4,21 @@ Audit of `v2-rearchitecture` @ `516639f`. Baseline before fixes: `cargo build
 --workspace` clean, `cargo test --workspace` = 288 passed / 0 failed / 0
 ignored. `cargo build --workspace --features schemahub-vcs/postgres` clean.
 
+## Status (after Phase 3 — 2026-05-30)
+
+| Section | Items | Status |
+|---|---|---|
+| 1. Data integrity (P0) | 1 | Fixed (commit 980247b) |
+| 2. Silent failure (P1) | 3 | All fixed (980247b, 7fb6ade) |
+| 3. API / contract drift (P1) | 6 | 5 fixed, 1 partial (3010eb8, 6fe5ca4, 726a77b, 8dfe0ec, a46fdc2) |
+| 4. Auth / audit (P1) | 2 | Both fixed (8dfe0ec) |
+| 5. Lifecycle / consistency (P1) | 3 | 2 fixed, 1 deferred (3010eb8) |
+| 6. std-trait drift (P1) | 1 | Fixed (6fe5ca4) |
+| 7. Defensive coding (P1) | 2 | Both fixed (7fb6ade) |
+| 8. Style / clippy (P2) | 7 | All actioned (62d892a; large_err deferred as tonic idiom) |
+
+After fixes: 292 passed / 0 failed / 0 ignored (4 new tests).
+
 Priorities:
 
 - **P0** — correctness, security, data-loss, crash. Must fix.
@@ -219,8 +234,15 @@ Priorities:
 
 ## 5. Lifecycle / consistency (P1)
 
-### `create_project` is not atomic between project-store and role-store
+### `create_project` is not atomic between project-store and role-store [DEFERRED]
 
+- **Status:** Not fixed. The right fix requires adding `delete` to the
+  `ProjectStore` trait (so we can roll back project_store.set if role_store.set
+  fails). This is a noticeable surface change; deferred to a follow-up. The
+  TOCTOU window between the existence check and the set is acceptable for
+  v1 (concurrent create with the same name produces one project, one role,
+  same end-state). The half-create-on-role-failure window is narrow and the
+  resulting state is detectable by `guard_last_owner` on the next mutation.
 - **Location:** `crates/schemahub-core/src/projects.rs:43-60`.
 - **Problem:** Sequence is:
   1. check `project_store.get(name).is_none()`,

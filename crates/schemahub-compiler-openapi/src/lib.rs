@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 
 use schemahub_types::{
-    CodegenError, Compiler, CompatibilityRules, CompatibilityViolation, ConflictError,
+    CodegenError, CompatibilityRules, CompatibilityViolation, Compiler, ConflictError,
     ConflictSides, DeclBlob, DeclChange, DeclDetail, DeclKind, DeclSummary, DescriptorError,
     DiffError, Import, Language, MetaBlob, Mutation, MutationEffect, MutationError, ParseError,
     ParsedSchema, PrintError, ReadError, SchemaClosure, SchemaObjects, TypeRef,
@@ -185,25 +185,41 @@ impl Compiler for OpenApiCompiler {
             DeclPayload::ComponentSchema(b) => (
                 format!("schema:{}", b.name),
                 DeclKind::ComponentSchema,
-                b.schema.as_ref().and_then(|s| s.description.clone()).unwrap_or_default(),
+                b.schema
+                    .as_ref()
+                    .and_then(|s| s.description.clone())
+                    .unwrap_or_default(),
             ),
             DeclPayload::ComponentParameter(b) => (
                 format!("param:{}", b.name),
                 DeclKind::ComponentParameter,
-                b.parameter.as_ref().and_then(|p| p.description.clone()).unwrap_or_default(),
+                b.parameter
+                    .as_ref()
+                    .and_then(|p| p.description.clone())
+                    .unwrap_or_default(),
             ),
             DeclPayload::ComponentResponse(b) => (
                 format!("response:{}", b.name),
                 DeclKind::ComponentResponse,
-                b.response.as_ref().map(|r| r.description.clone()).unwrap_or_default(),
+                b.response
+                    .as_ref()
+                    .map(|r| r.description.clone())
+                    .unwrap_or_default(),
             ),
             DeclPayload::ComponentRequestBody(b) => (
                 format!("requestBody:{}", b.name),
                 DeclKind::ComponentRequestBody,
-                b.request_body.as_ref().and_then(|r| r.description.clone()).unwrap_or_default(),
+                b.request_body
+                    .as_ref()
+                    .and_then(|r| r.description.clone())
+                    .unwrap_or_default(),
             ),
         };
-        Ok(DeclSummary { name, kind, doc_comment: doc })
+        Ok(DeclSummary {
+            name,
+            kind,
+            doc_comment: doc,
+        })
     }
 
     fn decl_detail(&self, blob: &DeclBlob) -> Result<DeclDetail, ReadError> {
@@ -245,8 +261,8 @@ impl Compiler for OpenApiCompiler {
 
         let mut out = String::new();
         for (_, schema) in sorted {
-            let yaml = print_schema_objects(schema)
-                .map_err(|e| DescriptorError::Other(e.to_string()))?;
+            let yaml =
+                print_schema_objects(schema).map_err(|e| DescriptorError::Other(e.to_string()))?;
             if !out.is_empty() {
                 out.push_str("---\n");
             }
@@ -293,7 +309,11 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
             })
         }
 
-        OpenApiOp::AddPath { path_pattern, summary, description } => {
+        OpenApiOp::AddPath {
+            path_pattern,
+            summary,
+            description,
+        } => {
             let key = format!("path:{path_pattern}");
             if schema.decls.contains_key(&key) {
                 return Err(MutationError::InvalidOperation(format!(
@@ -345,7 +365,10 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
             Ok(upsert(key, DeclPayload::PathItem(path_blob)))
         }
 
-        OpenApiOp::RemoveOperation { path_pattern, method } => {
+        OpenApiOp::RemoveOperation {
+            path_pattern,
+            method,
+        } => {
             let key = format!("path:{path_pattern}");
             let mut path_blob = load_path_item(schema, &key)?;
             let method_enum: ast::HttpMethod = method.parse().map_err(|_| {
@@ -361,7 +384,11 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
             Ok(upsert(key, DeclPayload::PathItem(path_blob)))
         }
 
-        OpenApiOp::AddComponentSchema { schema_name, schema_type, description } => {
+        OpenApiOp::AddComponentSchema {
+            schema_name,
+            schema_type,
+            description,
+        } => {
             let key = format!("schema:{schema_name}");
             if schema.decls.contains_key(&key) {
                 return Err(MutationError::InvalidOperation(format!(
@@ -419,9 +446,14 @@ fn load_path_item(schema: &SchemaObjects, key: &str) -> Result<PathItemBlob, Mut
         .decls
         .get(key)
         .ok_or_else(|| MutationError::DeclarationNotFound(key.to_string()))?;
-    match decode_decl(blob).map_err(|e| MutationError::MalformedBlob(e.0))?.kind {
+    match decode_decl(blob)
+        .map_err(|e| MutationError::MalformedBlob(e.0))?
+        .kind
+    {
         DeclPayload::PathItem(b) => Ok(b),
-        _ => Err(MutationError::InvalidOperation(format!("'{key}' is not a path item"))),
+        _ => Err(MutationError::InvalidOperation(format!(
+            "'{key}' is not a path item"
+        ))),
     }
 }
 
@@ -540,7 +572,12 @@ fn collect_schema_def_refs(schema: &JsonSchemaDef, refs: &mut Vec<TypeRef>) {
             collect_schema_refs(s, refs);
         }
     }
-    for s in schema.all_of.iter().chain(&schema.any_of).chain(&schema.one_of) {
+    for s in schema
+        .all_of
+        .iter()
+        .chain(&schema.any_of)
+        .chain(&schema.one_of)
+    {
         collect_schema_refs(s, refs);
     }
     if let Some(not) = &schema.not {

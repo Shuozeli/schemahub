@@ -65,12 +65,8 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let cfg = config::Config::load(
-        &cli.profile,
-        cli.server.as_deref(),
-        cli.token.as_deref(),
-    )
-    .context("loading config")?;
+    let cfg = config::Config::load(&cli.profile, cli.server.as_deref(), cli.token.as_deref())
+        .context("loading config")?;
 
     match cli.command {
         Commands::Repo(args) => {
@@ -117,7 +113,11 @@ async fn main() -> anyhow::Result<()> {
             let ch = client::build_channel(&cfg.server).await?;
             codegen::run(args, ch, &cfg.token).await
         }
-        Commands::Diff { repo, range, schema_path } => {
+        Commands::Diff {
+            repo,
+            range,
+            schema_path,
+        } => {
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
             if parts.len() != 2 {
                 bail!("repo must be 'project/repo'");
@@ -142,8 +142,12 @@ async fn main() -> anyhow::Result<()> {
                     DiffRequest {
                         project,
                         repo: repo_name,
-                        base: Some(VersionRef { r#ref: Some(cmd::parse_ref(base_str)) }),
-                        head: Some(VersionRef { r#ref: Some(cmd::parse_ref(head_str)) }),
+                        base: Some(VersionRef {
+                            r#ref: Some(cmd::parse_ref(base_str)),
+                        }),
+                        head: Some(VersionRef {
+                            r#ref: Some(cmd::parse_ref(head_str)),
+                        }),
                         schema_path,
                     },
                     &cfg.token,

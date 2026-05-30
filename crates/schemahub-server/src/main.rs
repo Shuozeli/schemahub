@@ -112,16 +112,15 @@ fn resolve_listen_addr(explicit: Option<String>, config: &Config) -> anyhow::Res
     }
     if let Ok(ip) = std::env::var("TAILSCALE_IP") {
         if !ip.trim().is_empty() {
-            let port = config
-                .listen
-                .addr
-                .rsplit(':')
-                .next()
-                .unwrap_or("50051");
+            let port = config.listen.addr.rsplit(':').next().unwrap_or("50051");
             return format!("{}:{}", ip.trim(), port)
                 .parse()
                 .context("parsing TAILSCALE_IP listen address");
         }
     }
-    config.listen.addr.parse().context("parsing config listen address")
+    config
+        .listen
+        .addr
+        .parse()
+        .context("parsing config listen address")
 }

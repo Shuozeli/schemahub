@@ -201,10 +201,19 @@ fn empty_store_err(op: &str) -> std::io::Error {
 }
 
 impl RoleStore for EmptyRoleStore {
-    fn get(&self, _project: &str, _identity: &schemahub_types::Identity) -> Option<schemahub_types::Role> {
+    fn get(
+        &self,
+        _project: &str,
+        _identity: &schemahub_types::Identity,
+    ) -> Option<schemahub_types::Role> {
         None
     }
-    fn set(&self, _project: &str, _identity_id: &str, _role: schemahub_types::Role) -> std::io::Result<()> {
+    fn set(
+        &self,
+        _project: &str,
+        _identity_id: &str,
+        _role: schemahub_types::Role,
+    ) -> std::io::Result<()> {
         Err(empty_store_err("RoleStore::set"))
     }
     fn remove(&self, _project: &str, _identity_id: &str) -> std::io::Result<()> {

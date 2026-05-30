@@ -20,13 +20,13 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use blake2::Blake2b512;
 use blake2::Digest as _;
-use futures::StreamExt as _;
 use futures::stream;
 use futures::stream::BoxStream;
+use futures::StreamExt as _;
 use jj_lib::backend::{
-    Backend, BackendError, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId,
-    CopyRecord, FileId, MillisSinceEpoch, SecureSig, Signature, SigningFn, SymlinkId, Timestamp,
-    Tree, TreeId, TreeValue, make_root_commit,
+    make_root_commit, Backend, BackendError, BackendResult, ChangeId, Commit, CommitId,
+    CopyHistory, CopyId, CopyRecord, FileId, MillisSinceEpoch, SecureSig, Signature, SigningFn,
+    SymlinkId, Timestamp, Tree, TreeId, TreeValue,
 };
 use jj_lib::conflict_labels::ConflictLabels;
 use jj_lib::content_hash::blake2b_hash;
@@ -52,7 +52,11 @@ fn to_other_err(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Bac
     BackendError::Other(err.into())
 }
 
-fn not_found(object_type: &str, hash: String, err: crate::object_db::ObjectDbError) -> BackendError {
+fn not_found(
+    object_type: &str,
+    hash: String,
+    err: crate::object_db::ObjectDbError,
+) -> BackendError {
     BackendError::ObjectNotFound {
         object_type: object_type.to_string(),
         hash,
@@ -162,7 +166,11 @@ impl Backend for DbBackend {
     async fn write_symlink(&self, _path: &RepoPath, target: &str) -> BackendResult<SymlinkId> {
         let id = SymlinkId::new(Blake2b512::digest(target.as_bytes()).to_vec());
         self.db
-            .put_object_at(ObjectKind::Symlink, &ObjectId(id.to_bytes()), target.as_bytes())
+            .put_object_at(
+                ObjectKind::Symlink,
+                &ObjectId(id.to_bytes()),
+                target.as_bytes(),
+            )
             .map_err(to_other_err)?;
         Ok(id)
     }
@@ -179,7 +187,10 @@ impl Backend for DbBackend {
         ))
     }
 
-    async fn get_related_copies(&self, _copy_id: &CopyId) -> BackendResult<Vec<jj_lib::backend::RelatedCopy>> {
+    async fn get_related_copies(
+        &self,
+        _copy_id: &CopyId,
+    ) -> BackendResult<Vec<jj_lib::backend::RelatedCopy>> {
         Err(BackendError::Unsupported(
             "schemahub backend does not support copy tracking".to_string(),
         ))
@@ -198,7 +209,11 @@ impl Backend for DbBackend {
         let proto = tree_to_proto(tree);
         let id = TreeId::new(blake2b_hash(tree).to_vec());
         self.db
-            .put_object_at(ObjectKind::Tree, &ObjectId(id.to_bytes()), &proto.encode_to_vec())
+            .put_object_at(
+                ObjectKind::Tree,
+                &ObjectId(id.to_bytes()),
+                &proto.encode_to_vec(),
+            )
             .map_err(to_other_err)?;
         Ok(id)
     }
@@ -238,7 +253,11 @@ impl Backend for DbBackend {
         }
         let id = CommitId::new(blake2b_hash(&commit).to_vec());
         self.db
-            .put_object_at(ObjectKind::Commit, &ObjectId(id.to_bytes()), &proto.encode_to_vec())
+            .put_object_at(
+                ObjectKind::Commit,
+                &ObjectId(id.to_bytes()),
+                &proto.encode_to_vec(),
+            )
             .map_err(to_other_err)?;
         Ok((id, commit))
     }
@@ -305,13 +324,11 @@ fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
             executable,
             copy_id,
         } => {
-            proto.value = Some(protos::tree_value::Value::File(
-                protos::tree_value::File {
-                    id: id.to_bytes(),
-                    executable: *executable,
-                    copy_id: copy_id.to_bytes(),
-                },
-            ));
+            proto.value = Some(protos::tree_value::Value::File(protos::tree_value::File {
+                id: id.to_bytes(),
+                executable: *executable,
+                copy_id: copy_id.to_bytes(),
+            }));
         }
         TreeValue::Symlink(id) => {
             proto.value = Some(protos::tree_value::Value::SymlinkId(id.to_bytes()));
@@ -327,9 +344,9 @@ fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
 }
 
 fn tree_value_from_proto(proto: protos::TreeValue) -> BackendResult<TreeValue> {
-    let value = proto.value.ok_or_else(|| {
-        to_other_err("malformed tree value: missing oneof".to_string())
-    })?;
+    let value = proto
+        .value
+        .ok_or_else(|| to_other_err("malformed tree value: missing oneof".to_string()))?;
     Ok(match value {
         protos::tree_value::Value::TreeId(id) => TreeValue::Tree(TreeId::new(id)),
         protos::tree_value::Value::File(protos::tree_value::File {

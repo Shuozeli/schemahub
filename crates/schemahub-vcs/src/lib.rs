@@ -30,9 +30,7 @@ pub mod repo;
 use std::sync::Arc;
 
 pub use memory_db::MemoryObjectDb;
-pub use object_db::{
-    ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKind, OpId,
-};
+pub use object_db::{ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKind, OpId};
 #[cfg(feature = "postgres")]
 pub use pg_db::PgObjectDb;
 pub use redb_db::RedbObjectDb;
@@ -181,8 +179,9 @@ impl Vcs {
                     .cloned()
                     .ok_or_else(|| VcsError::TagNotFound(name.clone()))
             }
-            RefSpec::Commit(id_hex) => CommitId::try_from_hex(id_hex)
-                .ok_or_else(|| VcsError::BadRef(id_hex.clone())),
+            RefSpec::Commit(id_hex) => {
+                CommitId::try_from_hex(id_hex).ok_or_else(|| VcsError::BadRef(id_hex.clone()))
+            }
         }
     }
 
@@ -214,7 +213,10 @@ impl Vcs {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
-        let commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&commit_id)))?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
         let tree = commit.tree();
 
         // Enumerate the schema subtree's direct entries.
@@ -262,7 +264,10 @@ impl Vcs {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
-        let commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&commit_id)))?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
         let tree = commit.tree();
         let mut schemas = std::collections::BTreeSet::new();
         for (path, value) in tree.entries() {
@@ -300,7 +305,10 @@ impl Vcs {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
-        let commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&commit_id)))?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
         let tree = commit.tree();
         let path = decl_path(schema_path, decl)?;
         let value = Self::map_jj(self.store.block_on(tree.path_value(&path)))?;
@@ -308,7 +316,9 @@ impl Vcs {
             Ok(Some(TreeValue::File { id, .. })) => {
                 Ok(DeclBlob::new(self.read_file(&jj_repo, &id)?))
             }
-            Ok(Some(_)) => Err(VcsError::Corrupt(format!("{schema_path}/{decl} is not a file"))),
+            Ok(Some(_)) => Err(VcsError::Corrupt(format!(
+                "{schema_path}/{decl} is not a file"
+            ))),
             Ok(None) => Err(VcsError::DeclNotFound(decl.to_string())),
             Err(_) => Err(VcsError::NotConflicted {
                 decl: format!("{decl} is conflicted; use read_conflict"),
@@ -325,9 +335,10 @@ impl Vcs {
                 .read_file(jj_lib::repo_path::RepoPath::root(), id)
                 .await?;
             let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.map_err(|e| {
-                jj_lib::backend::BackendError::Other(Box::new(e))
-            })?;
+            reader
+                .read_to_end(&mut buf)
+                .await
+                .map_err(|e| jj_lib::backend::BackendError::Other(Box::new(e)))?;
             Ok::<_, jj_lib::backend::BackendError>(buf)
         });
         Self::map_jj(bytes)
@@ -420,9 +431,8 @@ impl Vcs {
             Some(tip) if Some(tip) == base_id.as_ref() => (writer_tree, vec![tip.clone()]),
             Some(tip) => {
                 // Merge the writer's tree with the tip's tree over their base.
-                let tip_commit = Self::map_jj(
-                    self.store.block_on(jj_repo.store().get_commit_async(tip)),
-                )?;
+                let tip_commit =
+                    Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(tip)))?;
                 let merged = self.merge_trees(
                     &jj_repo,
                     base_commit.as_ref(),
@@ -444,14 +454,16 @@ impl Vcs {
 
         let conflicted = self.conflicted_decls(&final_tree)?;
 
-        let commit = Self::map_jj(self.store.block_on(
-            tx.repo_mut()
-                .new_commit(parents, final_tree)
-                .set_author(signature.clone())
-                .set_committer(signature)
-                .set_description(message)
-                .write(),
-        ))?;
+        let commit = Self::map_jj(
+            self.store.block_on(
+                tx.repo_mut()
+                    .new_commit(parents, final_tree)
+                    .set_author(signature.clone())
+                    .set_committer(signature)
+                    .set_description(message)
+                    .write(),
+            ),
+        )?;
 
         // 3. Move bookmark + heads.
         self.set_bookmark_in_tx(&mut tx, bookmark, commit.id().clone());
@@ -507,17 +519,16 @@ impl Vcs {
             (base_tree, String::new()),
             (theirs.clone(), String::new()),
         ]);
-        let merged = self.store.block_on(jj_lib::merged_tree::MergedTree::merge(merge));
+        let merged = self
+            .store
+            .block_on(jj_lib::merged_tree::MergedTree::merge(merge));
         Self::map_jj(merged)
     }
 
     /// The conflicted declaration names in a tree. Each conflict is a
     /// `<schema>/<decl>` path; we return the bare `<decl>` basename (matching the
     /// `commit_write` contract — the touched schema file is known to the caller).
-    fn conflicted_decls(
-        &self,
-        tree: &jj_lib::merged_tree::MergedTree,
-    ) -> VcsResult<Vec<String>> {
+    fn conflicted_decls(&self, tree: &jj_lib::merged_tree::MergedTree) -> VcsResult<Vec<String>> {
         let mut out = Vec::new();
         for (path, value) in tree.conflicts() {
             Self::map_jj(value)?; // surface read errors
@@ -541,11 +552,7 @@ impl Vcs {
             .set_local_bookmark_target(RefName::new(bookmark), RefTarget::normal(commit));
     }
 
-    fn commit_tx(
-        &self,
-        tx: jj_lib::transaction::Transaction,
-        description: &str,
-    ) -> VcsResult<()> {
+    fn commit_tx(&self, tx: jj_lib::transaction::Transaction, description: &str) -> VcsResult<()> {
         Self::map_jj(self.store.block_on(tx.commit(description.to_string()))).map(|_| ())
     }
 
@@ -573,7 +580,11 @@ impl Vcs {
     ) -> VcsResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        if jj_repo.view().get_local_bookmark(RefName::new(name)).is_present() {
+        if jj_repo
+            .view()
+            .get_local_bookmark(RefName::new(name))
+            .is_present()
+        {
             return Err(VcsError::BookmarkExists(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, from)?;
@@ -596,7 +607,11 @@ impl Vcs {
     ) -> VcsResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        if jj_repo.view().get_local_bookmark(RefName::new(name)).is_absent() {
+        if jj_repo
+            .view()
+            .get_local_bookmark(RefName::new(name))
+            .is_absent()
+        {
             return Err(VcsError::BookmarkNotFound(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, to)?;
@@ -618,7 +633,11 @@ impl Vcs {
     ) -> VcsResult<()> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        if jj_repo.view().get_local_bookmark(RefName::new(name)).is_absent() {
+        if jj_repo
+            .view()
+            .get_local_bookmark(RefName::new(name))
+            .is_absent()
+        {
             return Err(VcsError::BookmarkNotFound(name.to_string()));
         }
         let mut tx = jj_repo.start_transaction();
@@ -629,7 +648,11 @@ impl Vcs {
     }
 
     /// List bookmarks (name → target commit ids) at the current view.
-    pub fn list_bookmarks(&self, project: &str, repo: &str) -> VcsResult<Vec<(String, Vec<String>)>> {
+    pub fn list_bookmarks(
+        &self,
+        project: &str,
+        repo: &str,
+    ) -> VcsResult<Vec<(String, Vec<String>)>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         Ok(jj_repo
@@ -665,13 +688,7 @@ impl Vcs {
     }
 
     /// Delete a tag.
-    pub fn delete_tag(
-        &self,
-        project: &str,
-        repo: &str,
-        name: &str,
-        author: &str,
-    ) -> VcsResult<()> {
+    pub fn delete_tag(&self, project: &str, repo: &str, name: &str, author: &str) -> VcsResult<()> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo.view().get_local_tag(RefName::new(name)).is_absent() {
@@ -736,7 +753,8 @@ impl Vcs {
             });
             for parent_id in op.parent_ids() {
                 if parent_id != &root_op_id {
-                    let parent = Self::map_jj(self.store.block_on(loader.load_operation(parent_id)))?;
+                    let parent =
+                        Self::map_jj(self.store.block_on(loader.load_operation(parent_id)))?;
                     cursor.push(parent);
                 }
             }
@@ -786,9 +804,9 @@ impl Vcs {
             }
             // Follow the single non-root parent (the chain is linear).
             cursor = match op.parent_ids().iter().find(|p| **p != root_op_id) {
-                Some(parent_id) => {
-                    Some(Self::map_jj(self.store.block_on(loader.load_operation(parent_id)))?)
-                }
+                Some(parent_id) => Some(Self::map_jj(
+                    self.store.block_on(loader.load_operation(parent_id)),
+                )?),
                 None => None,
             };
         }
@@ -826,8 +844,7 @@ impl Vcs {
                 .cloned();
             match parent_id {
                 Some(pid) => {
-                    let parent_op =
-                        Self::map_jj(self.store.block_on(loader.load_operation(&pid)))?;
+                    let parent_op = Self::map_jj(self.store.block_on(loader.load_operation(&pid)))?;
                     let parent_repo =
                         Self::map_jj(self.store.block_on(loader.load_at(&parent_op)))?;
                     parent_repo.view().clone()
@@ -837,8 +854,7 @@ impl Vcs {
                     // the root operation's (empty) view.
                     let root_op =
                         Self::map_jj(self.store.block_on(loader.load_operation(&root_op_id)))?;
-                    let root_repo =
-                        Self::map_jj(self.store.block_on(loader.load_at(&root_op)))?;
+                    let root_repo = Self::map_jj(self.store.block_on(loader.load_at(&root_op)))?;
                     root_repo.view().clone()
                 }
             }
@@ -912,7 +928,10 @@ impl Vcs {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
-        let commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&commit_id)))?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
         let tree = commit.tree();
         let path = decl_path(schema_path, decl)?;
         let value = Self::map_jj(self.store.block_on(tree.path_value(&path)))?;
@@ -976,14 +995,16 @@ impl Vcs {
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
-        let commit = Self::map_jj(self.store.block_on(
-            tx.repo_mut()
-                .new_commit(vec![tip.clone()], new_tree)
-                .set_author(signature.clone())
-                .set_committer(signature)
-                .set_description(message)
-                .write(),
-        ))?;
+        let commit = Self::map_jj(
+            self.store.block_on(
+                tx.repo_mut()
+                    .new_commit(vec![tip.clone()], new_tree)
+                    .set_author(signature.clone())
+                    .set_committer(signature)
+                    .set_description(message)
+                    .write(),
+            ),
+        )?;
         self.set_bookmark_in_tx(&mut tx, bookmark, commit.id().clone());
         Self::map_jj(self.store.block_on(tx.repo_mut().add_head(&commit)))?;
         self.commit_tx(tx, &format!("resolve_conflict {schema_path}/{decl}"))?;
@@ -1018,27 +1039,36 @@ impl Vcs {
             .resolve_ref(&jj_repo, &RefSpec::bookmark(dst))
             .map_err(|_| VcsError::BookmarkNotFound(dst.to_string()))?;
 
-        let dst_commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&dst_id)))?;
-        let src_commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&src_id)))?;
+        let dst_commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&dst_id)),
+        )?;
+        let src_commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&src_id)),
+        )?;
 
         // jj's merge_commit_trees does the N-way merge over the index-derived
         // base, yielding first-class conflicts inline.
-        let merged_tree = Self::map_jj(self.store.block_on(
-            jj_lib::rewrite::merge_commit_trees(jj_repo.as_ref(), &[dst_commit.clone(), src_commit.clone()]),
-        ))?;
+        let merged_tree = Self::map_jj(self.store.block_on(jj_lib::rewrite::merge_commit_trees(
+            jj_repo.as_ref(),
+            &[dst_commit.clone(), src_commit.clone()],
+        )))?;
         let conflicted = self.conflicted_decls(&merged_tree)?;
 
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
-        let commit = Self::map_jj(self.store.block_on(
-            tx.repo_mut()
-                .new_commit(vec![dst_id.clone(), src_id.clone()], merged_tree)
-                .set_author(signature.clone())
-                .set_committer(signature)
-                .set_description(format!("merge {src} into {dst}"))
-                .write(),
-        ))?;
+        let commit = Self::map_jj(
+            self.store.block_on(
+                tx.repo_mut()
+                    .new_commit(vec![dst_id.clone(), src_id.clone()], merged_tree)
+                    .set_author(signature.clone())
+                    .set_committer(signature)
+                    .set_description(format!("merge {src} into {dst}"))
+                    .write(),
+            ),
+        )?;
         self.set_bookmark_in_tx(&mut tx, dst, commit.id().clone());
         Self::map_jj(self.store.block_on(tx.repo_mut().add_head(&commit)))?;
         self.commit_tx(tx, &format!("merge {src} into {dst}"))?;
@@ -1106,17 +1136,24 @@ impl Vcs {
         let root_id = any_repo.store().root_commit_id().clone();
         let mut queue: Vec<String> = reachable_commits.iter().cloned().collect();
         while let Some(c_hex) = queue.pop() {
-            let cid = CommitId::try_from_hex(&c_hex)
-                .ok_or_else(|| VcsError::Corrupt(format!("malformed reachable commit hex: {c_hex}")))?;
+            let cid = CommitId::try_from_hex(&c_hex).ok_or_else(|| {
+                VcsError::Corrupt(format!("malformed reachable commit hex: {c_hex}"))
+            })?;
             if cid == root_id {
                 continue;
             }
             // Fail-fast on read errors — silently skipping here would leave
             // this commit's trees + files unmarked, and the sweep would then
             // drop content the operation log still references.
-            let commit = Self::map_jj(self.store.block_on(any_repo.store().get_commit_async(&cid)))?;
+            let commit =
+                Self::map_jj(self.store.block_on(any_repo.store().get_commit_async(&cid)))?;
             for tree_id in commit.tree_ids().iter() {
-                self.mark_tree(&any_repo, tree_id, &mut reachable_trees, &mut reachable_files)?;
+                self.mark_tree(
+                    &any_repo,
+                    tree_id,
+                    &mut reachable_trees,
+                    &mut reachable_files,
+                )?;
             }
             for parent in commit.parent_ids() {
                 if *parent != root_id && reachable_commits.insert(parent.hex()) {
@@ -1144,10 +1181,12 @@ impl Vcs {
         if !trees.insert(tree_id.hex()) {
             return Ok(());
         }
-        let tree = Self::map_jj(self.store.block_on(
-            repo.store()
-                .get_tree(jj_lib::repo_path::RepoPathBuf::root(), tree_id),
-        ))?;
+        let tree = Self::map_jj(
+            self.store.block_on(
+                repo.store()
+                    .get_tree(jj_lib::repo_path::RepoPathBuf::root(), tree_id),
+            ),
+        )?;
         for entry in tree.entries_non_recursive() {
             match entry.value() {
                 TreeValue::File { id, .. } => {

@@ -1,8 +1,7 @@
 use anyhow::{bail, Context};
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
-    apply_mutation_request::Operation,
-    schema_service_client::SchemaServiceClient,
+    apply_mutation_request::Operation, schema_service_client::SchemaServiceClient,
     ApplyMutationRequest, ProtoAddField, ProtoRemoveField, ProtoRenameField, ProtobufMutation,
 };
 use tonic::transport::Channel;
@@ -120,7 +119,9 @@ pub async fn run(args: FieldArgs, channel: Channel, token: &str) -> anyhow::Resu
             base_revision,
         } => {
             let parts: Vec<&str> = schema_path.splitn(3, '/').collect();
-            if parts.len() != 3 { bail!("schema_path must be project/repo/schema_name"); }
+            if parts.len() != 3 {
+                bail!("schema_path must be project/repo/schema_name");
+            }
             let (project, repo, schema_file) = (parts[0], parts[1], parts[2]);
 
             let mutation = ProtobufMutation {
@@ -152,7 +153,10 @@ pub async fn run(args: FieldArgs, channel: Channel, token: &str) -> anyhow::Resu
                 .await
                 .context("ApplyMutation RPC")?;
 
-            println!("Removed field. New commit: {}", resp.into_inner().new_commit);
+            println!(
+                "Removed field. New commit: {}",
+                resp.into_inner().new_commit
+            );
         }
         FieldAction::Rename {
             schema_path,
@@ -163,7 +167,9 @@ pub async fn run(args: FieldArgs, channel: Channel, token: &str) -> anyhow::Resu
             base_revision,
         } => {
             let parts: Vec<&str> = schema_path.splitn(3, '/').collect();
-            if parts.len() != 3 { bail!("schema_path must be project/repo/schema_name"); }
+            if parts.len() != 3 {
+                bail!("schema_path must be project/repo/schema_name");
+            }
             let (project, repo, schema_file) = (parts[0], parts[1], parts[2]);
 
             let mutation = ProtobufMutation {
@@ -196,7 +202,10 @@ pub async fn run(args: FieldArgs, channel: Channel, token: &str) -> anyhow::Resu
                 .await
                 .context("ApplyMutation RPC")?;
 
-            println!("Renamed field. New commit: {}", resp.into_inner().new_commit);
+            println!(
+                "Renamed field. New commit: {}",
+                resp.into_inner().new_commit
+            );
         }
     }
     Ok(())

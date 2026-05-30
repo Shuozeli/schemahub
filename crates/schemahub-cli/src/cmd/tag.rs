@@ -53,15 +53,25 @@ fn parse_repo(s: &str) -> anyhow::Result<(String, String)> {
 
 pub async fn run(args: TagArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
-        TagAction::Create { repo, name, commit, branch, message: _ } => {
+        TagAction::Create {
+            repo,
+            name,
+            commit,
+            branch,
+            message: _,
+        } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let target = Some(if let Some(commit_hex) = commit {
                 VersionRef {
-                    r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Commit(commit_hex)),
+                    r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Commit(
+                        commit_hex,
+                    )),
                 }
             } else {
                 VersionRef {
-                    r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(branch)),
+                    r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(
+                        branch,
+                    )),
                 }
             });
 

@@ -65,7 +65,10 @@ impl DbOpHeadsStore {
         self.db
             .set_ref(&self.repo_key, OP_HEADS_REF, text.as_bytes())
             .map_err(|e| OpHeadsStoreError::Write {
-                new_op_id: ids.last().cloned().unwrap_or_else(|| OperationId::new(vec![])),
+                new_op_id: ids
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| OperationId::new(vec![])),
                 source: Box::new(e),
             })
     }

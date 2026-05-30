@@ -315,7 +315,10 @@ async fn create_then_delete_branch_roundtrip() {
         .expect("list_branches after delete")
         .into_inner();
     let names: Vec<&str> = after.branches.iter().map(|b| b.name.as_str()).collect();
-    assert!(!names.contains(&"feature/x"), "branch should be deleted: {names:?}");
+    assert!(
+        !names.contains(&"feature/x"),
+        "branch should be deleted: {names:?}"
+    );
     assert!(names.contains(&"main"), "main should remain: {names:?}");
 }
 
@@ -386,10 +389,20 @@ async fn log_reports_real_commit_graph() {
     assert_eq!(log.entries.len(), 2, "expected 2 commits in the graph");
     let head = &log.entries[0];
     let base = &log.entries[1];
-    assert_eq!(head.commit_id, add.new_commit, "head is the add-field commit");
-    assert_eq!(base.commit_id, create.new_commit, "base is the create commit");
+    assert_eq!(
+        head.commit_id, add.new_commit,
+        "head is the add-field commit"
+    );
+    assert_eq!(
+        base.commit_id, create.new_commit,
+        "base is the create commit"
+    );
     assert_ne!(head.commit_id, head.change_id, "commit id != change id");
-    assert_eq!(head.parents, vec![base.commit_id.clone()], "linear parent link");
+    assert_eq!(
+        head.parents,
+        vec![base.commit_id.clone()],
+        "linear parent link"
+    );
     // The base write's parent is the jj root commit (not the add-field commit),
     // so it never points back at the head.
     assert!(

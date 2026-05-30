@@ -26,10 +26,7 @@ pub enum BranchAction {
         from: String,
     },
     /// Delete a branch
-    Delete {
-        repo: String,
-        name: String,
-    },
+    Delete { repo: String, name: String },
     /// List branches
     List {
         repo: String,
@@ -67,7 +64,9 @@ pub async fn run(args: BranchArgs, channel: Channel, token: &str) -> anyhow::Res
                         repo: repo_name,
                         name,
                         from: Some(VersionRef {
-                            r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(from)),
+                            r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(
+                                from,
+                            )),
                         }),
                     },
                     token,
@@ -114,7 +113,13 @@ pub async fn run(args: BranchArgs, channel: Channel, token: &str) -> anyhow::Res
                 println!("  {}{} → {}", branch.name, protected, branch.head_commit);
             }
         }
-        BranchAction::Merge { repo, source, into, base_revision, message } => {
+        BranchAction::Merge {
+            repo,
+            source,
+            into,
+            base_revision,
+            message,
+        } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             let resp = client

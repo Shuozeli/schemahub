@@ -6,13 +6,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use schemahub_api::schemahub_v1 as pb;
 use pb::codegen_service_client::CodegenServiceClient;
 use pb::exploration_service_client::ExplorationServiceClient;
 use pb::history_service_client::HistoryServiceClient;
 use pb::project_service_client::ProjectServiceClient;
 use pb::ref_service_client::RefServiceClient;
 use pb::schema_service_client::SchemaServiceClient;
+use schemahub_api::schemahub_v1 as pb;
 use schemahub_server::{build_core, build_router, config::Config};
 use schemahub_vcs::{MemoryObjectDb, ObjectDb};
 use tokio::net::TcpListener;

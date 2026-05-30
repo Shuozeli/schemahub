@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use schemahub_core::{detect_format_from_name, load_base, Core, MutationRequest, TransactionRequest};
+use schemahub_core::{
+    detect_format_from_name, load_base, Core, MutationRequest, TransactionRequest,
+};
 use schemahub_types::{Action, MutationEffect, SchemaObjects};
 use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};

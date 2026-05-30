@@ -246,14 +246,7 @@ impl RefService for BookmarkHandler {
         let author = resolve_author(&self.core, token.as_deref())?;
         let commit = self
             .core
-            .create_tag(
-                &r.project,
-                &r.repo,
-                &r.name,
-                &at,
-                &author,
-                token.as_deref(),
-            )
+            .create_tag(&r.project, &r.repo, &r.name, &at, &author, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::CreateTagResponse {
             tag: Some(pb::TagInfo {

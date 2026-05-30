@@ -71,4 +71,3 @@ fn parse_import_path(path: &str) -> Option<SchemaPath> {
     }
     Some(SchemaPath::new(project, repo, schema))
 }
-

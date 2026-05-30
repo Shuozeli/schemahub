@@ -15,17 +15,19 @@ use serde_yaml::Value;
 
 use crate::ast::{
     ComponentParameterBlob, ComponentRequestBodyBlob, ComponentResponseBlob, ComponentSchemaBlob,
-    DeclPayload, DocumentMetadataBlob, Extensions, HeaderDef, HttpMethod, InfoObject, JsonSchemaDef,
-    JsonSchemaType, MediaTypeEntry, OpenApiDecl, OperationDef, ParameterDef, ParameterLocation,
-    ParameterOrRef, PathItemBlob, PropertyDef, RequestBodyDef, RequestBodyOrRef, ResponseDef,
-    ResponseEntry, ResponseOrRef, SchemaOrRef, SchemaRef, ServerObject, BLOB_VERSION,
+    DeclPayload, DocumentMetadataBlob, Extensions, HeaderDef, HttpMethod, InfoObject,
+    JsonSchemaDef, JsonSchemaType, MediaTypeEntry, OpenApiDecl, OperationDef, ParameterDef,
+    ParameterLocation, ParameterOrRef, PathItemBlob, PropertyDef, RequestBodyDef, RequestBodyOrRef,
+    ResponseDef, ResponseEntry, ResponseOrRef, SchemaOrRef, SchemaRef, ServerObject, BLOB_VERSION,
 };
 use crate::blob::{encode_decl, encode_meta};
 
 /// Parse an OpenAPI 3.1 document (YAML or JSON — JSON is a subset of YAML).
 pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
-    let root: Value = serde_yaml::from_str(source)
-        .map_err(|e| ParseError::SyntaxError { line: 0, message: e.to_string() })?;
+    let root: Value = serde_yaml::from_str(source).map_err(|e| ParseError::SyntaxError {
+        line: 0,
+        message: e.to_string(),
+    })?;
 
     let root_map = root
         .as_mapping()
@@ -171,7 +173,12 @@ fn parse_info_object(info: Option<&Value>) -> Result<InfoObject, ParseError> {
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
-    Ok(InfoObject { title, description, version, terms_of_service })
+    Ok(InfoObject {
+        title,
+        description,
+        version,
+        terms_of_service,
+    })
 }
 
 fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> {
@@ -185,8 +192,14 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
         }
     };
 
-    let summary = map.get("summary").and_then(|v| v.as_str()).map(str::to_owned);
-    let description = map.get("description").and_then(|v| v.as_str()).map(str::to_owned);
+    let summary = map
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let description = map
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
 
     let parameters = map
         .get("parameters")
@@ -197,7 +210,9 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
     let extensions = extract_extensions(map);
 
     let mut operations: Vec<OperationDef> = Vec::new();
-    let http_methods = ["get", "post", "put", "delete", "patch", "head", "options", "trace"];
+    let http_methods = [
+        "get", "post", "put", "delete", "patch", "head", "options", "trace",
+    ];
     for method_str in &http_methods {
         if let Some(op_val) = map.get(*method_str) {
             // The input is a string literal from `http_methods`, so this
@@ -225,15 +240,28 @@ fn parse_operation_def(method: HttpMethod, val: &Value) -> OperationDef {
         None => return OperationDef::empty(method),
     };
 
-    let operation_id = map.get("operationId").and_then(|v| v.as_str()).map(str::to_owned);
-    let summary = map.get("summary").and_then(|v| v.as_str()).map(str::to_owned);
-    let description = map.get("description").and_then(|v| v.as_str()).map(str::to_owned);
+    let operation_id = map
+        .get("operationId")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let summary = map
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let description = map
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
 
     let tags = map
         .get("tags")
         .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|t| t.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
 
     let parameters = map
@@ -289,14 +317,24 @@ fn parse_parameter_def(val: &Value) -> ParameterDef {
         None => return ParameterDef::default(),
     };
 
-    let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let name = map
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
     let location_str = map.get("in").and_then(|v| v.as_str()).unwrap_or("query");
     let location = ParameterLocation::from_str(location_str).unwrap_or(ParameterLocation::Query);
     // NOTE: an unknown `in` value falls back to Query for v1 leniency; a
     // stricter pass would surface ParseError. Tracked in
     // docs/code-quality-findings.md §8.
-    let description = map.get("description").and_then(|v| v.as_str()).map(str::to_owned);
-    let required = map.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+    let description = map
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let required = map
+        .get("required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
     let schema = map.get("schema").map(parse_schema_or_ref);
 
@@ -330,8 +368,14 @@ fn parse_request_body_def(val: &Value) -> RequestBodyDef {
     };
 
     RequestBodyDef {
-        description: map.get("description").and_then(|v| v.as_str()).map(str::to_owned),
-        required: map.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
+        description: map
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        required: map
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         content: parse_content(map.get("content")),
         extensions: extract_extensions(map),
     }
@@ -355,7 +399,11 @@ fn parse_response_def(val: &Value) -> ResponseDef {
         None => return ResponseDef::default(),
     };
 
-    let description = map.get("description").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let description = map
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
     let content = parse_content(map.get("content"));
 
     let headers = map
@@ -370,9 +418,16 @@ fn parse_response_def(val: &Value) -> ResponseDef {
                         .and_then(|m| m.get("description"))
                         .and_then(|d| d.as_str())
                         .map(str::to_owned);
-                    let required = hmap.and_then(|m| m.get("required")).and_then(|r| r.as_bool());
+                    let required = hmap
+                        .and_then(|m| m.get("required"))
+                        .and_then(|r| r.as_bool());
                     let schema = hmap.and_then(|m| m.get("schema")).map(parse_schema_or_ref);
-                    HeaderDef { name, description, required, schema }
+                    HeaderDef {
+                        name,
+                        description,
+                        required,
+                        schema,
+                    }
                 })
                 .collect()
         })
@@ -395,7 +450,11 @@ fn parse_content(val: Option<&Value>) -> Vec<MediaTypeEntry> {
                     let cmap = v.as_mapping();
                     let schema = cmap.and_then(|m| m.get("schema")).map(parse_schema_or_ref);
                     let extensions = cmap.and_then(extract_extensions);
-                    MediaTypeEntry { media_type, schema, extensions }
+                    MediaTypeEntry {
+                        media_type,
+                        schema,
+                        extensions,
+                    }
                 })
                 .collect()
         })
@@ -408,7 +467,10 @@ fn parse_schema_or_ref(val: &Value) -> SchemaOrRef {
             .strip_prefix("#/components/schemas/")
             .map(str::to_owned)
             .unwrap_or_else(|| ref_str.clone());
-        SchemaOrRef::Ref(SchemaRef { local_name, external_import: None })
+        SchemaOrRef::Ref(SchemaRef {
+            local_name,
+            external_import: None,
+        })
     } else {
         SchemaOrRef::Inline(parse_schema_def(val))
     }
@@ -423,7 +485,9 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
 
     let types: Vec<JsonSchemaType> = if let Some(type_val) = map.get("type") {
         if let Some(s) = type_val.as_str() {
-            JsonSchemaType::from_str(s).map(|t| vec![t]).unwrap_or_default()
+            JsonSchemaType::from_str(s)
+                .map(|t| vec![t])
+                .unwrap_or_default()
         } else if let Some(seq) = type_val.as_sequence() {
             seq.iter()
                 .filter_map(|t| t.as_str().and_then(|s| JsonSchemaType::from_str(s).ok()))
@@ -435,14 +499,23 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
         vec![]
     };
 
-    let format = map.get("format").and_then(|v| v.as_str()).map(str::to_owned);
-    let description = map.get("description").and_then(|v| v.as_str()).map(str::to_owned);
+    let format = map
+        .get("format")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let description = map
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     let title = map.get("title").and_then(|v| v.as_str()).map(str::to_owned);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
     let read_only = map.get("readOnly").and_then(|v| v.as_bool());
     let write_only = map.get("writeOnly").and_then(|v| v.as_bool());
 
-    let pattern = map.get("pattern").and_then(|v| v.as_str()).map(str::to_owned);
+    let pattern = map
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     let min_length = map.get("minLength").and_then(|v| v.as_u64());
     let max_length = map.get("maxLength").and_then(|v| v.as_u64());
 
@@ -474,7 +547,11 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
     let required: Vec<String> = map
         .get("required")
         .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
 
     let min_properties = map.get("minProperties").and_then(|v| v.as_u64());
@@ -515,11 +592,19 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
     let enum_values: Vec<String> = map
         .get("enum")
         .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(|v| serde_json::to_string(v).unwrap_or_default()).collect())
+        .map(|seq| {
+            seq.iter()
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .collect()
+        })
         .unwrap_or_default();
 
-    let const_value = map.get("const").map(|v| serde_json::to_string(v).unwrap_or_default());
-    let default = map.get("default").map(|v| serde_json::to_string(v).unwrap_or_default());
+    let const_value = map
+        .get("const")
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let default = map
+        .get("default")
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
 
     JsonSchemaDef {
         types,
@@ -577,7 +662,9 @@ fn extract_extensions(map: &serde_yaml::Mapping) -> Option<Extensions> {
     if ext_map.is_empty() {
         None
     } else {
-        Some(Extensions { json_bytes: serde_json::to_vec(&ext_map).unwrap_or_default() })
+        Some(Extensions {
+            json_bytes: serde_json::to_vec(&ext_map).unwrap_or_default(),
+        })
     }
 }
 

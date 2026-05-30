@@ -83,8 +83,7 @@ pub fn print_file(file: &FileDescriptorProto) -> String {
     // singular fields have no label keyword. Editions files (which set `edition`
     // and leave `syntax` unset) are treated like proto3 here, so an editions
     // singular field does not gain a stray `optional`/`required` keyword.
-    let is_proto2 =
-        file.edition.is_none() && matches!(file.syntax_enum(), Syntax::Proto2);
+    let is_proto2 = file.edition.is_none() && matches!(file.syntax_enum(), Syntax::Proto2);
 
     // Emit top-level declarations in original SOURCE order, interleaving
     // messages / enums / services. `FileDescriptorProto` groups them into
@@ -92,7 +91,11 @@ pub fn print_file(file: &FileDescriptorProto) -> String {
     // `source_code_info` span start line. Decls without source info (e.g. added
     // by a later mutation) sort last by line, then by (kind, index) — a stable,
     // deterministic fallback that reduces to message→enum→service.
-    enum Top { Msg(usize), Enum(usize), Svc(usize) }
+    enum Top {
+        Msg(usize),
+        Enum(usize),
+        Svc(usize),
+    }
     let start_line = |path: &[i32]| -> i64 {
         comments
             .get(path)
@@ -102,13 +105,28 @@ pub fn print_file(file: &FileDescriptorProto) -> String {
     };
     let mut tops: Vec<(i64, i32, usize, Top)> = Vec::new();
     for i in 0..file.message_type.len() {
-        tops.push((start_line(&[FILE_MESSAGE_TYPE, i as i32]), FILE_MESSAGE_TYPE, i, Top::Msg(i)));
+        tops.push((
+            start_line(&[FILE_MESSAGE_TYPE, i as i32]),
+            FILE_MESSAGE_TYPE,
+            i,
+            Top::Msg(i),
+        ));
     }
     for i in 0..file.enum_type.len() {
-        tops.push((start_line(&[FILE_ENUM_TYPE, i as i32]), FILE_ENUM_TYPE, i, Top::Enum(i)));
+        tops.push((
+            start_line(&[FILE_ENUM_TYPE, i as i32]),
+            FILE_ENUM_TYPE,
+            i,
+            Top::Enum(i),
+        ));
     }
     for i in 0..file.service.len() {
-        tops.push((start_line(&[FILE_SERVICE, i as i32]), FILE_SERVICE, i, Top::Svc(i)));
+        tops.push((
+            start_line(&[FILE_SERVICE, i as i32]),
+            FILE_SERVICE,
+            i,
+            Top::Svc(i),
+        ));
     }
     // Sort by source line, then (kind, index) as a stable tiebreaker.
     tops.sort_by_key(|t| (t.0, t.1, t.2));
@@ -117,7 +135,15 @@ pub fn print_file(file: &FileDescriptorProto) -> String {
         match *top {
             Top::Msg(i) => {
                 let path = vec![FILE_MESSAGE_TYPE, i as i32];
-                print_message(&mut out, &file.message_type[i], 0, &path, &comments, pkg, is_proto2);
+                print_message(
+                    &mut out,
+                    &file.message_type[i],
+                    0,
+                    &path,
+                    &comments,
+                    pkg,
+                    is_proto2,
+                );
             }
             Top::Enum(i) => {
                 let path = vec![FILE_ENUM_TYPE, i as i32];
@@ -256,7 +282,12 @@ fn print_message(
     let map_entries: HashMap<&str, (&FieldDescriptorProto, &FieldDescriptorProto)> = msg
         .nested_type
         .iter()
-        .filter(|n| n.options.as_ref().and_then(|o| o.map_entry).unwrap_or(false))
+        .filter(|n| {
+            n.options
+                .as_ref()
+                .and_then(|o| o.map_entry)
+                .unwrap_or(false)
+        })
         .filter_map(|n| {
             let key = n.field.iter().find(|f| f.number == Some(1))?;
             let val = n.field.iter().find(|f| f.number == Some(2))?;
@@ -297,8 +328,7 @@ fn print_message(
             continue;
         }
 
-        let is_real_oneof = field.oneof_index.is_some()
-            && !field.proto3_optional.unwrap_or(false);
+        let is_real_oneof = field.oneof_index.is_some() && !field.proto3_optional.unwrap_or(false);
 
         if is_real_oneof {
             let oneof_index = field.oneof_index.unwrap();
@@ -367,7 +397,11 @@ fn print_message(
             continue;
         }
         // A group field's backing message is printed inline as the group body.
-        if nested.name.as_deref().is_some_and(|n| group_msgs.contains(n)) {
+        if nested
+            .name
+            .as_deref()
+            .is_some_and(|n| group_msgs.contains(n))
+        {
             continue;
         }
         let mut p = path.to_vec();
@@ -423,7 +457,11 @@ fn print_group_field(
     is_proto2: bool,
 ) {
     let indent = "  ".repeat(depth + 1);
-    let group_name = field.type_name.as_deref().map(short_type_name).unwrap_or("");
+    let group_name = field
+        .type_name
+        .as_deref()
+        .map(short_type_name)
+        .unwrap_or("");
     let number = field.number.unwrap_or(0);
     let label = match field.label {
         Some(FieldLabel::Repeated) => "repeated ",
@@ -431,7 +469,9 @@ fn print_group_field(
         Some(FieldLabel::Optional) if is_proto2 => "optional ",
         _ => "",
     };
-    out.push_str(&format!("{indent}{label}group {group_name} = {number} {{\n"));
+    out.push_str(&format!(
+        "{indent}{label}group {group_name} = {number} {{\n"
+    ));
 
     // Find the backing message and print its body (fields, then nested decls).
     if let Some(body) = parent
@@ -748,10 +788,7 @@ fn emit_comment_block(out: &mut String, indent: &str, text: &str) {
 /// appended after the statement on the same line, or `""` when there is none.
 /// Newlines inside a trailing comment are collapsed to spaces so the suffix
 /// stays on one physical line and reparses cleanly.
-fn trailing_comment_suffix(
-    path: &[i32],
-    comments: &HashMap<Vec<i32>, &SourceLocation>,
-) -> String {
+fn trailing_comment_suffix(path: &[i32], comments: &HashMap<Vec<i32>, &SourceLocation>) -> String {
     let Some(loc) = comments.get(path) else {
         return String::new();
     };

@@ -19,12 +19,12 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use jj_lib::backend::{CommitId, MillisSinceEpoch, Timestamp};
 use jj_lib::content_hash::blake2b_hash;
+use jj_lib::merge::Merge;
 use jj_lib::object_id::{HexPrefix, ObjectId as _, PrefixResolution};
 use jj_lib::op_store::{
-    Operation, OperationId, OperationMetadata, OpStore, OpStoreError, OpStoreResult, RefTarget,
+    OpStore, OpStoreError, OpStoreResult, Operation, OperationId, OperationMetadata, RefTarget,
     RootOperationData, TimestampRange, View, ViewId,
 };
-use jj_lib::merge::Merge;
 use jj_lib::ref_name::{RefNameBuf, WorkspaceNameBuf};
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +33,11 @@ use crate::object_db::{ObjectDb, ObjectId, ObjectKind};
 const OPERATION_ID_LENGTH: usize = 64;
 const VIEW_ID_LENGTH: usize = 64;
 
-fn to_read_err(object_type: &str, hash: String, err: impl std::error::Error + Send + Sync + 'static) -> OpStoreError {
+fn to_read_err(
+    object_type: &str,
+    hash: String,
+    err: impl std::error::Error + Send + Sync + 'static,
+) -> OpStoreError {
     OpStoreError::ReadObject {
         object_type: object_type.to_string(),
         hash,
@@ -41,7 +45,11 @@ fn to_read_err(object_type: &str, hash: String, err: impl std::error::Error + Se
     }
 }
 
-fn not_found(object_type: &str, hash: String, err: crate::object_db::ObjectDbError) -> OpStoreError {
+fn not_found(
+    object_type: &str,
+    hash: String,
+    err: crate::object_db::ObjectDbError,
+) -> OpStoreError {
     OpStoreError::ObjectNotFound {
         object_type: object_type.to_string(),
         hash,
@@ -108,8 +116,7 @@ impl OpStore for DbOpStore {
 
     async fn write_view(&self, view: &View) -> OpStoreResult<ViewId> {
         let stored = StoredView::from_view(view);
-        let bytes = serde_json::to_vec(&stored)
-            .map_err(|e| OpStoreError::Other(Box::new(e)))?;
+        let bytes = serde_json::to_vec(&stored).map_err(|e| OpStoreError::Other(Box::new(e)))?;
         // jj's id is the blake2b of the View's ContentHash — compute it so the
         // id is identical to what jj's SimpleOpStore would assign.
         let id = ViewId::new(blake2b_hash(view).to_vec());
@@ -135,11 +142,14 @@ impl OpStore for DbOpStore {
     async fn write_operation(&self, operation: &Operation) -> OpStoreResult<OperationId> {
         assert!(!operation.parents.is_empty());
         let stored = StoredOperation::from_operation(operation);
-        let bytes = serde_json::to_vec(&stored)
-            .map_err(|e| OpStoreError::Other(Box::new(e)))?;
+        let bytes = serde_json::to_vec(&stored).map_err(|e| OpStoreError::Other(Box::new(e)))?;
         let id = OperationId::new(blake2b_hash(operation).to_vec());
         self.db
-            .put_op_at(&self.repo_key, &crate::object_db::OpId(id.to_bytes()), &bytes)
+            .put_op_at(
+                &self.repo_key,
+                &crate::object_db::OpId(id.to_bytes()),
+                &bytes,
+            )
             .map_err(|e| write_err("operation", e))?;
         Ok(id)
     }
@@ -262,7 +272,12 @@ impl StoredView {
             wc_commit_ids: self
                 .wc_commit_ids
                 .into_iter()
-                .map(|(name, id)| (WorkspaceNameBuf::from(name), CommitId::new(hex_to_bytes(&id))))
+                .map(|(name, id)| {
+                    (
+                        WorkspaceNameBuf::from(name),
+                        CommitId::new(hex_to_bytes(&id)),
+                    )
+                })
                 .collect(),
         }
     }
@@ -297,8 +312,17 @@ impl StoredOperation {
             hostname: op.metadata.hostname.clone(),
             username: op.metadata.username.clone(),
             is_snapshot: op.metadata.is_snapshot,
-            workspace_name: op.metadata.workspace_name.as_ref().map(|n| n.as_str().to_owned()),
-            attributes: op.metadata.attributes.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            workspace_name: op
+                .metadata
+                .workspace_name
+                .as_ref()
+                .map(|n| n.as_str().to_owned()),
+            attributes: op
+                .metadata
+                .attributes
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         }
     }
 
@@ -323,11 +347,14 @@ impl StoredOperation {
         };
         Operation {
             view_id: ViewId::new(hex_to_bytes(&self.view_id)),
-            parents: self.parents.into_iter().map(|h| OperationId::new(hex_to_bytes(&h))).collect(),
+            parents: self
+                .parents
+                .into_iter()
+                .map(|h| OperationId::new(hex_to_bytes(&h)))
+                .collect(),
             metadata,
             // schemahub doesn't track commit predecessors across operations.
             commit_predecessors: None,
         }
     }
 }
-

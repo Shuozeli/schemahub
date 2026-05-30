@@ -14,10 +14,10 @@ use schemahub_api::schemahub_v1 as pb;
 use schemahub_compiler_flatbuffers::FbsOp;
 use schemahub_compiler_openapi::operations::OpenApiOp;
 use schemahub_compiler_protobuf::{
-    OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality,
-    OpChangeFieldType, OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage,
-    OpRemoveEnumValue, OpRemoveField, OpRemoveRpc, OpRemoveService, OpRenameEnumValue,
-    OpRenameField, OpRenameMessage, OpRenameRpc, OpUpdateImport, ProtoOp,
+    OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality, OpChangeFieldType,
+    OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage, OpRemoveEnumValue, OpRemoveField,
+    OpRemoveRpc, OpRemoveService, OpRenameEnumValue, OpRenameField, OpRenameMessage, OpRenameRpc,
+    OpUpdateImport, ProtoOp,
 };
 use schemahub_types::{DeclKind, DeclSummary, Language, Mutation, SchemaPath};
 use schemahub_vcs::RefSpec;

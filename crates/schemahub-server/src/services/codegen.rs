@@ -63,7 +63,9 @@ impl CodegenService for CodegenHandler {
         let r = request.into_inner();
         let bookmark = wire::version_ref_bookmark(&r.at, DEFAULT_BOOKMARK);
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        let lang = wire::language_from_pb(pb::Language::try_from(r.language).unwrap_or(pb::Language::Unspecified))?;
+        let lang = wire::language_from_pb(
+            pb::Language::try_from(r.language).unwrap_or(pb::Language::Unspecified),
+        )?;
         let code = self
             .core
             .preview_codegen(&schema, &bookmark, lang, token.as_deref())

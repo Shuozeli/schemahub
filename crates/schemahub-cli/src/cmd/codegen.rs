@@ -40,7 +40,12 @@ pub enum CodegenAction {
 
 pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
-        CodegenAction::Get { schema_path, branch, lang: _, out: _ } => {
+        CodegenAction::Get {
+            schema_path,
+            branch,
+            lang: _,
+            out: _,
+        } => {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
             let resp = client
@@ -63,7 +68,11 @@ pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Re
                 .unwrap_or_else(|_| "(binary descriptor — not printable)".to_string());
             print!("{source}");
         }
-        CodegenAction::Preview { schema_path, branch, lang: _ } => {
+        CodegenAction::Preview {
+            schema_path,
+            branch,
+            lang: _,
+        } => {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
             let resp = client

@@ -136,8 +136,10 @@ fn bootstrap_projects(
         }
         for (id, role) in section.parsed_members()? {
             // Don't downgrade a configured Owner.
-            if matches!(roles.get(name, &Identity::user(id.clone())), Some(Role::Owner))
-                && role != Role::Owner
+            if matches!(
+                roles.get(name, &Identity::user(id.clone())),
+                Some(Role::Owner)
+            ) && role != Role::Owner
             {
                 continue;
             }

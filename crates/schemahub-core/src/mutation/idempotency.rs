@@ -51,7 +51,12 @@ impl IdempotencyStore {
 
     /// Return a previously stored result for `key`, if any.
     pub fn get(&self, key: &str) -> Option<MutationResponse> {
-        self.inner.lock().expect("idempotency lock").seen.get(key).cloned()
+        self.inner
+            .lock()
+            .expect("idempotency lock")
+            .seen
+            .get(key)
+            .cloned()
     }
 
     /// Record the result for `key`. Evicts the oldest entry when the cap is
@@ -104,7 +109,10 @@ mod tests {
         store.put("k1", resp("commit-1"));
 
         // Assert
-        assert_eq!(store.get("k1").map(|r| r.commit_id), Some("commit-1".to_string()));
+        assert_eq!(
+            store.get("k1").map(|r| r.commit_id),
+            Some("commit-1".to_string())
+        );
     }
 
     #[test]
@@ -148,9 +156,15 @@ mod tests {
 
         // Assert: both still present; the next *new* insertion evicts k1
         // (the older one), proving the order tracker wasn't touched.
-        assert_eq!(store.get("k1").map(|r| r.commit_id), Some("c1-updated".to_string()));
+        assert_eq!(
+            store.get("k1").map(|r| r.commit_id),
+            Some("c1-updated".to_string())
+        );
         store.put("k3", resp("c3"));
-        assert!(store.get("k1").is_none(), "k1 was inserted first; must evict first");
+        assert!(
+            store.get("k1").is_none(),
+            "k1 was inserted first; must evict first"
+        );
         assert!(store.get("k2").is_some());
         assert!(store.get("k3").is_some());
     }

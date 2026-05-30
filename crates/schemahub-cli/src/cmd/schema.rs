@@ -1,13 +1,13 @@
+use ::uuid::Uuid;
 use anyhow::{bail, Context};
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
     exploration_service_client::ExplorationServiceClient,
-    schema_service_client::SchemaServiceClient,
-    CreateSchemaRequest, GetSchemaSourceRequest, SchemaFormat, VersionRef,
+    schema_service_client::SchemaServiceClient, CreateSchemaRequest, GetSchemaSourceRequest,
+    SchemaFormat, VersionRef,
 };
 use std::path::PathBuf;
 use tonic::transport::Channel;
-use ::uuid::Uuid;
 
 use crate::cmd::bearer;
 
@@ -97,7 +97,11 @@ pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Res
                 .with_context(|| format!("reading {}", file.display()))?;
             let format_i32 = detect_format(&file)?;
             let schema_name = name
-                .or_else(|| file.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                .or_else(|| {
+                    file.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
                 .context("cannot determine schema name")?;
 
             let mut client = SchemaServiceClient::new(channel);
@@ -132,7 +136,11 @@ pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Res
             let source = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
             let schema_name = name
-                .or_else(|| file.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                .or_else(|| {
+                    file.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                })
                 .context("cannot determine schema name")?;
 
             let mut client = SchemaServiceClient::new(channel);
@@ -155,7 +163,10 @@ pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Res
 
             println!("Updated commit: {}", resp.into_inner().new_commit);
         }
-        SchemaAction::Pull { schema_path, branch } => {
+        SchemaAction::Pull {
+            schema_path,
+            branch,
+        } => {
             // schema_path is "project/repo/schema_name"
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = ExplorationServiceClient::new(channel);
@@ -213,7 +224,9 @@ pub fn parse_schema_path_3(s: &str) -> anyhow::Result<(String, String, String)> 
     if parts.len() != 3 {
         bail!("schema_path must be 'project/repo/schema_name', got: {s}");
     }
-    Ok((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
+    Ok((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        parts[2].to_string(),
+    ))
 }
-
-

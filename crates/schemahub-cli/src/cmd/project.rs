@@ -14,9 +14,7 @@
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use schemahub_api::schemahub_v1::{
-    self as pb, project_service_client::ProjectServiceClient,
-};
+use schemahub_api::schemahub_v1::{self as pb, project_service_client::ProjectServiceClient};
 use tonic::transport::Channel;
 
 use crate::cmd::bearer;
@@ -91,7 +89,11 @@ pub async fn run(args: ProjectArgs, channel: Channel, token: &str) -> anyhow::Re
             );
         }
         ProjectAction::Member { action } => match action {
-            MemberAction::Add { project, identity_id, role } => {
+            MemberAction::Add {
+                project,
+                identity_id,
+                role,
+            } => {
                 let role_pb = parse_role(&role)?;
                 let req = bearer(
                     pb::AddMemberRequest {
@@ -104,7 +106,10 @@ pub async fn run(args: ProjectArgs, channel: Channel, token: &str) -> anyhow::Re
                 client.add_member(req).await.context("AddMember RPC")?;
                 println!("Added '{identity_id}' to '{project}' as {role:?}.");
             }
-            MemberAction::Remove { project, identity_id } => {
+            MemberAction::Remove {
+                project,
+                identity_id,
+            } => {
                 let req = bearer(
                     pb::RemoveMemberRequest {
                         project: project.clone(),
@@ -112,10 +117,17 @@ pub async fn run(args: ProjectArgs, channel: Channel, token: &str) -> anyhow::Re
                     },
                     token,
                 )?;
-                client.remove_member(req).await.context("RemoveMember RPC")?;
+                client
+                    .remove_member(req)
+                    .await
+                    .context("RemoveMember RPC")?;
                 println!("Removed '{identity_id}' from '{project}'.");
             }
-            MemberAction::SetRole { project, identity_id, role } => {
+            MemberAction::SetRole {
+                project,
+                identity_id,
+                role,
+            } => {
                 let role_pb = parse_role(&role)?;
                 let req = bearer(
                     pb::UpdateMemberRoleRequest {
@@ -148,4 +160,3 @@ fn parse_role(s: &str) -> anyhow::Result<pb::Role> {
         ),
     }
 }
-
