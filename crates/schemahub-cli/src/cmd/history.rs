@@ -10,6 +10,7 @@ use schemahub_api::schemahub_v1::{
 use std::path::PathBuf;
 use tonic::transport::Channel;
 
+use super::bearer;
 use super::schema::parse_schema_path_3;
 
 fn parse_repo(s: &str) -> anyhow::Result<(String, String)> {
@@ -40,17 +41,20 @@ pub enum OpAction {
     },
 }
 
-pub async fn run_op(args: OpArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run_op(args: OpArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         OpAction::Log { repo, limit } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = HistoryServiceClient::new(channel);
             let resp = client
-                .op_log(OpLogRequest {
-                    project,
-                    repo: repo_name,
-                    limit,
-                })
+                .op_log(bearer(
+                    OpLogRequest {
+                        project,
+                        repo: repo_name,
+                        limit,
+                    },
+                    token,
+                )?)
                 .await
                 .context("OpLog RPC")?;
             let ops = resp.into_inner().operations;
@@ -80,15 +84,18 @@ pub struct UndoArgs {
     pub author: String,
 }
 
-pub async fn run_undo(args: UndoArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run_undo(args: UndoArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     let (project, repo) = parse_repo(&args.repo)?;
     let mut client = HistoryServiceClient::new(channel);
     let resp = client
-        .undo(UndoRequest {
-            project,
-            repo,
-            author: args.author,
-        })
+        .undo(bearer(
+            UndoRequest {
+                project,
+                repo,
+                author: args.author,
+            },
+            token,
+        )?)
         .await
         .context("Undo RPC")?;
     println!("Undid operation {}", resp.into_inner().undone_op_id);
@@ -116,7 +123,7 @@ pub struct ResolveArgs {
     pub message: String,
 }
 
-pub async fn run_resolve(args: ResolveArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run_resolve(args: ResolveArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     let (project, repo, schema_name) = parse_schema_path_3(&args.schema_path)?;
     let mut client = HistoryServiceClient::new(channel);
 
@@ -124,15 +131,18 @@ pub async fn run_resolve(args: ResolveArgs, channel: Channel) -> anyhow::Result<
         None => {
             // Render the conflict so the user can craft a resolution.
             let resp = client
-                .render_conflict(RenderConflictRequest {
-                    project,
-                    repo,
-                    schema_path: schema_name,
-                    declaration_name: args.declaration,
-                    at: Some(VersionRef {
-                        r#ref: Some(super::parse_ref(&args.branch)),
-                    }),
-                })
+                .render_conflict(bearer(
+                    RenderConflictRequest {
+                        project,
+                        repo,
+                        schema_path: schema_name,
+                        declaration_name: args.declaration,
+                        at: Some(VersionRef {
+                            r#ref: Some(super::parse_ref(&args.branch)),
+                        }),
+                    },
+                    token,
+                )?)
                 .await
                 .context("RenderConflict RPC")?;
             println!("{}", resp.into_inner().rendered);
@@ -142,16 +152,19 @@ pub async fn run_resolve(args: ResolveArgs, channel: Channel) -> anyhow::Result<
             let resolved_source = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
             let resp = client
-                .resolve_conflict(ResolveConflictRequest {
-                    project,
-                    repo,
-                    bookmark: args.branch,
-                    schema_path: schema_name,
-                    declaration_name: args.declaration,
-                    resolved_source,
-                    author: args.author,
-                    message: args.message,
-                })
+                .resolve_conflict(bearer(
+                    ResolveConflictRequest {
+                        project,
+                        repo,
+                        bookmark: args.branch,
+                        schema_path: schema_name,
+                        declaration_name: args.declaration,
+                        resolved_source,
+                        author: args.author,
+                        message: args.message,
+                    },
+                    token,
+                )?)
                 .await
                 .context("ResolveConflict RPC")?;
             println!("Resolved. New commit: {}", resp.into_inner().new_commit);

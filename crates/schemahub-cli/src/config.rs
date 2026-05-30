@@ -16,7 +16,6 @@ struct RawConfig {
 /// Resolved configuration for a single operation.
 pub struct Config {
     pub server: String,
-    #[allow(dead_code)]
     pub token: String,
 }
 

@@ -5,6 +5,7 @@ use schemahub_api::schemahub_v1::{
 };
 use tonic::transport::Channel;
 
+use super::bearer;
 use super::schema::parse_schema_path_3;
 
 #[derive(Args)]
@@ -37,20 +38,23 @@ pub enum CodegenAction {
     },
 }
 
-pub async fn run(args: CodegenArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         CodegenAction::Get { schema_path, branch, lang: _, out: _ } => {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
             let resp = client
-                .get_descriptors(GetDescriptorsRequest {
-                    project: parts.0,
-                    repo: parts.1,
-                    schema_path: parts.2,
-                    at: Some(VersionRef {
-                        r#ref: Some(super::parse_ref(&branch)),
-                    }),
-                })
+                .get_descriptors(bearer(
+                    GetDescriptorsRequest {
+                        project: parts.0,
+                        repo: parts.1,
+                        schema_path: parts.2,
+                        at: Some(VersionRef {
+                            r#ref: Some(super::parse_ref(&branch)),
+                        }),
+                    },
+                    token,
+                )?)
                 .await
                 .context("GetDescriptors RPC")?;
 
@@ -63,14 +67,17 @@ pub async fn run(args: CodegenArgs, channel: Channel) -> anyhow::Result<()> {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
             let resp = client
-                .get_descriptors(GetDescriptorsRequest {
-                    project: parts.0,
-                    repo: parts.1,
-                    schema_path: parts.2,
-                    at: Some(VersionRef {
-                        r#ref: Some(super::parse_ref(&branch)),
-                    }),
-                })
+                .get_descriptors(bearer(
+                    GetDescriptorsRequest {
+                        project: parts.0,
+                        repo: parts.1,
+                        schema_path: parts.2,
+                        at: Some(VersionRef {
+                            r#ref: Some(super::parse_ref(&branch)),
+                        }),
+                    },
+                    token,
+                )?)
                 .await
                 .context("GetDescriptors RPC")?;
 

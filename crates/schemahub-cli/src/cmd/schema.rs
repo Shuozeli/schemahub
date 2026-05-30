@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use tonic::transport::Channel;
 use ::uuid::Uuid;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct SchemaArgs {
     #[command(subcommand)]
@@ -81,7 +83,7 @@ fn detect_format(path: &std::path::Path) -> anyhow::Result<i32> {
     }
 }
 
-pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         SchemaAction::Create {
             file,
@@ -100,16 +102,19 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .create_schema(CreateSchemaRequest {
-                    project,
-                    repo,
-                    branch,
-                    schema_name,
-                    format: format_i32,
-                    source,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                })
+                .create_schema(bearer(
+                    CreateSchemaRequest {
+                        project,
+                        repo,
+                        branch,
+                        schema_name,
+                        format: format_i32,
+                        source,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                    },
+                    token,
+                )?)
                 .await
                 .context("CreateSchema RPC")?;
 
@@ -132,16 +137,19 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .update_schema(schemahub_api::schemahub_v1::UpdateSchemaRequest {
-                    project,
-                    repo,
-                    branch,
-                    schema_name,
-                    source,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    force,
-                })
+                .update_schema(bearer(
+                    schemahub_api::schemahub_v1::UpdateSchemaRequest {
+                        project,
+                        repo,
+                        branch,
+                        schema_name,
+                        source,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        force,
+                    },
+                    token,
+                )?)
                 .await
                 .context("UpdateSchema RPC")?;
 
@@ -152,14 +160,17 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = ExplorationServiceClient::new(channel);
             let resp = client
-                .get_schema_source(GetSchemaSourceRequest {
-                    project: parts.0,
-                    repo: parts.1,
-                    schema_path: parts.2,
-                    at: Some(VersionRef {
-                        r#ref: Some(super::parse_ref(&branch)),
-                    }),
-                })
+                .get_schema_source(bearer(
+                    GetSchemaSourceRequest {
+                        project: parts.0,
+                        repo: parts.1,
+                        schema_path: parts.2,
+                        at: Some(VersionRef {
+                            r#ref: Some(super::parse_ref(&branch)),
+                        }),
+                    },
+                    token,
+                )?)
                 .await
                 .context("GetSchemaSource RPC")?;
 
@@ -176,15 +187,18 @@ pub async fn run(args: SchemaArgs, channel: Channel) -> anyhow::Result<()> {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .delete_schema(schemahub_api::schemahub_v1::DeleteSchemaRequest {
-                    project: parts.0,
-                    repo: parts.1,
-                    schema_name: parts.2,
-                    branch,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    force,
-                })
+                .delete_schema(bearer(
+                    schemahub_api::schemahub_v1::DeleteSchemaRequest {
+                        project: parts.0,
+                        repo: parts.1,
+                        schema_name: parts.2,
+                        branch,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        force,
+                    },
+                    token,
+                )?)
                 .await
                 .context("DeleteSchema RPC")?;
             println!("Deleted. New commit: {}", resp.into_inner().new_commit);

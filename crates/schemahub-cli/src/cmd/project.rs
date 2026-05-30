@@ -17,9 +17,9 @@ use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
     self as pb, project_service_client::ProjectServiceClient,
 };
-use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
-use tonic::Request;
+
+use crate::cmd::bearer;
 
 #[derive(Args)]
 pub struct ProjectArgs {
@@ -149,15 +149,3 @@ fn parse_role(s: &str) -> anyhow::Result<pb::Role> {
     }
 }
 
-/// Wrap a request body with `Authorization: Bearer <token>` when `token` is
-/// non-empty.
-fn bearer<T>(body: T, token: &str) -> anyhow::Result<Request<T>> {
-    let mut req = Request::new(body);
-    if !token.is_empty() {
-        let header: MetadataValue<_> = format!("Bearer {}", token)
-            .parse()
-            .context("token contains invalid metadata characters")?;
-        req.metadata_mut().insert("authorization", header);
-    }
-    Ok(req)
-}

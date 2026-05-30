@@ -3,6 +3,8 @@ use clap::Args;
 use schemahub_api::schemahub_v1::{ref_service_client::RefServiceClient, ListCommitsRequest};
 use tonic::transport::Channel;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct LogArgs {
     /// project/repo
@@ -14,7 +16,7 @@ pub struct LogArgs {
     pub limit: usize,
 }
 
-pub async fn run(args: LogArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: LogArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     let parts: Vec<&str> = args.repo.splitn(2, '/').collect();
     if parts.len() != 2 {
         bail!("repo must be 'project/repo'");
@@ -23,15 +25,18 @@ pub async fn run(args: LogArgs, channel: Channel) -> anyhow::Result<()> {
 
     let mut client = RefServiceClient::new(channel);
     let mut stream = client
-        .list_commits(ListCommitsRequest {
-            project,
-            repo,
-            from: Some(schemahub_api::schemahub_v1::VersionRef {
-                r#ref: Some(super::parse_ref(&args.branch)),
-            }),
-            stop_at_commit: String::new(),
-            schema_path: String::new(),
-        })
+        .list_commits(bearer(
+            ListCommitsRequest {
+                project,
+                repo,
+                from: Some(schemahub_api::schemahub_v1::VersionRef {
+                    r#ref: Some(super::parse_ref(&args.branch)),
+                }),
+                stop_at_commit: String::new(),
+                schema_path: String::new(),
+            },
+            token,
+        )?)
         .await
         .context("ListCommits RPC")?
         .into_inner();

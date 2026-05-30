@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Repo(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            repo::run(args, ch).await
+            repo::run(args, ch, &cfg.token).await
         }
         Commands::Project(args) => {
             let ch = client::build_channel(&cfg.server).await?;
@@ -83,39 +83,39 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Schema(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            schema::run(args, ch).await
+            schema::run(args, ch, &cfg.token).await
         }
         Commands::Field(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            field::run(args, ch).await
+            field::run(args, ch, &cfg.token).await
         }
         Commands::Branch(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            branch::run(args, ch).await
+            branch::run(args, ch, &cfg.token).await
         }
         Commands::Tag(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            tag::run(args, ch).await
+            tag::run(args, ch, &cfg.token).await
         }
         Commands::Log(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            log::run(args, ch).await
+            log::run(args, ch, &cfg.token).await
         }
         Commands::Op(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            history::run_op(args, ch).await
+            history::run_op(args, ch, &cfg.token).await
         }
         Commands::Undo(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            history::run_undo(args, ch).await
+            history::run_undo(args, ch, &cfg.token).await
         }
         Commands::Resolve(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            history::run_resolve(args, ch).await
+            history::run_resolve(args, ch, &cfg.token).await
         }
         Commands::Codegen(args) => {
             let ch = client::build_channel(&cfg.server).await?;
-            codegen::run(args, ch).await
+            codegen::run(args, ch, &cfg.token).await
         }
         Commands::Diff { repo, range, schema_path } => {
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
@@ -138,13 +138,16 @@ async fn main() -> anyhow::Result<()> {
             let ch = client::build_channel(&cfg.server).await?;
             let mut client = RefServiceClient::new(ch);
             let resp = client
-                .diff(DiffRequest {
-                    project,
-                    repo: repo_name,
-                    base: Some(VersionRef { r#ref: Some(cmd::parse_ref(base_str)) }),
-                    head: Some(VersionRef { r#ref: Some(cmd::parse_ref(head_str)) }),
-                    schema_path,
-                })
+                .diff(cmd::bearer(
+                    DiffRequest {
+                        project,
+                        repo: repo_name,
+                        base: Some(VersionRef { r#ref: Some(cmd::parse_ref(base_str)) }),
+                        head: Some(VersionRef { r#ref: Some(cmd::parse_ref(head_str)) }),
+                        schema_path,
+                    },
+                    &cfg.token,
+                )?)
                 .await
                 .context("Diff RPC")?;
 

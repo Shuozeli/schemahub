@@ -7,6 +7,8 @@ use schemahub_api::schemahub_v1::{
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct BranchArgs {
     #[command(subcommand)]
@@ -53,20 +55,23 @@ pub enum BranchAction {
     },
 }
 
-pub async fn run(args: BranchArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: BranchArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         BranchAction::Create { repo, name, from } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             let resp = client
-                .create_branch(CreateBranchRequest {
-                    project,
-                    repo: repo_name,
-                    name,
-                    from: Some(VersionRef {
-                        r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(from)),
-                    }),
-                })
+                .create_branch(bearer(
+                    CreateBranchRequest {
+                        project,
+                        repo: repo_name,
+                        name,
+                        from: Some(VersionRef {
+                            r#ref: Some(schemahub_api::schemahub_v1::version_ref::Ref::Branch(from)),
+                        }),
+                    },
+                    token,
+                )?)
                 .await
                 .context("CreateBranch RPC")?;
 
@@ -77,11 +82,14 @@ pub async fn run(args: BranchArgs, channel: Channel) -> anyhow::Result<()> {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             client
-                .delete_branch(DeleteBranchRequest {
-                    project,
-                    repo: repo_name,
-                    name: name.clone(),
-                })
+                .delete_branch(bearer(
+                    DeleteBranchRequest {
+                        project,
+                        repo: repo_name,
+                        name: name.clone(),
+                    },
+                    token,
+                )?)
                 .await
                 .context("DeleteBranch RPC")?;
             println!("Deleted branch '{name}'");
@@ -90,11 +98,14 @@ pub async fn run(args: BranchArgs, channel: Channel) -> anyhow::Result<()> {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             let resp = client
-                .list_branches(ListBranchesRequest {
-                    project,
-                    repo: repo_name,
-                    name_prefix: prefix,
-                })
+                .list_branches(bearer(
+                    ListBranchesRequest {
+                        project,
+                        repo: repo_name,
+                        name_prefix: prefix,
+                    },
+                    token,
+                )?)
                 .await
                 .context("ListBranches RPC")?;
 
@@ -107,15 +118,18 @@ pub async fn run(args: BranchArgs, channel: Channel) -> anyhow::Result<()> {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             let resp = client
-                .merge(MergeRequest {
-                    project,
-                    repo: repo_name,
-                    source_branch: source.clone(),
-                    target_branch: into.clone(),
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    message,
-                })
+                .merge(bearer(
+                    MergeRequest {
+                        project,
+                        repo: repo_name,
+                        source_branch: source.clone(),
+                        target_branch: into.clone(),
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        message,
+                    },
+                    token,
+                )?)
                 .await
                 .context("Merge RPC")?;
 

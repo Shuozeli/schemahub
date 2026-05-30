@@ -6,6 +6,8 @@ use schemahub_api::schemahub_v1::{
 };
 use tonic::transport::Channel;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct TagArgs {
     #[command(subcommand)]
@@ -49,7 +51,7 @@ fn parse_repo(s: &str) -> anyhow::Result<(String, String)> {
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
-pub async fn run(args: TagArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: TagArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         TagAction::Create { repo, name, commit, branch, message: _ } => {
             let (project, repo_name) = parse_repo(&repo)?;
@@ -65,13 +67,16 @@ pub async fn run(args: TagArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = RefServiceClient::new(channel);
             let resp = client
-                .create_tag(CreateTagRequest {
-                    project,
-                    repo: repo_name,
-                    name: name.clone(),
-                    target,
-                    message: String::new(),
-                })
+                .create_tag(bearer(
+                    CreateTagRequest {
+                        project,
+                        repo: repo_name,
+                        name: name.clone(),
+                        target,
+                        message: String::new(),
+                    },
+                    token,
+                )?)
                 .await
                 .context("CreateTag RPC")?;
 
@@ -82,12 +87,15 @@ pub async fn run(args: TagArgs, channel: Channel) -> anyhow::Result<()> {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             client
-                .delete_tag(DeleteTagRequest {
-                    project,
-                    repo: repo_name,
-                    name: name.clone(),
-                    force,
-                })
+                .delete_tag(bearer(
+                    DeleteTagRequest {
+                        project,
+                        repo: repo_name,
+                        name: name.clone(),
+                        force,
+                    },
+                    token,
+                )?)
                 .await
                 .context("DeleteTag RPC")?;
             println!("Deleted tag '{name}'");
@@ -96,11 +104,14 @@ pub async fn run(args: TagArgs, channel: Channel) -> anyhow::Result<()> {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
             let resp = client
-                .list_tags(ListTagsRequest {
-                    project,
-                    repo: repo_name,
-                    name_prefix: prefix,
-                })
+                .list_tags(bearer(
+                    ListTagsRequest {
+                        project,
+                        repo: repo_name,
+                        name_prefix: prefix,
+                    },
+                    token,
+                )?)
                 .await
                 .context("ListTags RPC")?;
 

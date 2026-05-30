@@ -8,6 +8,8 @@ use schemahub_api::schemahub_v1::{
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct FieldArgs {
     #[command(subcommand)]
@@ -51,7 +53,7 @@ pub enum FieldAction {
     },
 }
 
-pub async fn run(args: FieldArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: FieldArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         FieldAction::Add {
             schema_path,
@@ -93,15 +95,18 @@ pub async fn run(args: FieldArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .apply_mutation(ApplyMutationRequest {
-                    project: project.to_string(),
-                    repo: repo.to_string(),
-                    branch,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    force: false,
-                    operation: Some(Operation::ProtobufOp(mutation)),
-                })
+                .apply_mutation(bearer(
+                    ApplyMutationRequest {
+                        project: project.to_string(),
+                        repo: repo.to_string(),
+                        branch,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        force: false,
+                        operation: Some(Operation::ProtobufOp(mutation)),
+                    },
+                    token,
+                )?)
                 .await
                 .context("ApplyMutation RPC")?;
 
@@ -132,15 +137,18 @@ pub async fn run(args: FieldArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .apply_mutation(ApplyMutationRequest {
-                    project: project.to_string(),
-                    repo: repo.to_string(),
-                    branch,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    force: false,
-                    operation: Some(Operation::ProtobufOp(mutation)),
-                })
+                .apply_mutation(bearer(
+                    ApplyMutationRequest {
+                        project: project.to_string(),
+                        repo: repo.to_string(),
+                        branch,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        force: false,
+                        operation: Some(Operation::ProtobufOp(mutation)),
+                    },
+                    token,
+                )?)
                 .await
                 .context("ApplyMutation RPC")?;
 
@@ -173,15 +181,18 @@ pub async fn run(args: FieldArgs, channel: Channel) -> anyhow::Result<()> {
 
             let mut client = SchemaServiceClient::new(channel);
             let resp = client
-                .apply_mutation(ApplyMutationRequest {
-                    project: project.to_string(),
-                    repo: repo.to_string(),
-                    branch,
-                    base_revision,
-                    idempotency_key: Uuid::new_v4().to_string(),
-                    force: false,
-                    operation: Some(Operation::ProtobufOp(mutation)),
-                })
+                .apply_mutation(bearer(
+                    ApplyMutationRequest {
+                        project: project.to_string(),
+                        repo: repo.to_string(),
+                        branch,
+                        base_revision,
+                        idempotency_key: Uuid::new_v4().to_string(),
+                        force: false,
+                        operation: Some(Operation::ProtobufOp(mutation)),
+                    },
+                    token,
+                )?)
                 .await
                 .context("ApplyMutation RPC")?;
 

@@ -6,6 +6,8 @@ use schemahub_api::schemahub_v1::{
 };
 use tonic::transport::Channel;
 
+use crate::cmd::bearer;
+
 #[derive(Args)]
 pub struct RepoArgs {
     #[command(subcommand)]
@@ -27,7 +29,7 @@ pub enum RepoAction {
     },
 }
 
-pub async fn run(args: RepoArgs, channel: Channel) -> anyhow::Result<()> {
+pub async fn run(args: RepoArgs, channel: Channel, token: &str) -> anyhow::Result<()> {
     match args.action {
         RepoAction::Init { repo, public, default_branch } => {
             let parts: Vec<&str> = repo.splitn(2, '/').collect();
@@ -41,10 +43,13 @@ pub async fn run(args: RepoArgs, channel: Channel) -> anyhow::Result<()> {
 
             // Create the project — ignore AlreadyExists so `repo init` is idempotent.
             let proj_result = client
-                .create_project(CreateProjectRequest {
-                    name: project.clone(),
-                    is_public: public,
-                })
+                .create_project(bearer(
+                    CreateProjectRequest {
+                        name: project.clone(),
+                        is_public: public,
+                    },
+                    token,
+                )?)
                 .await;
 
             match proj_result {
@@ -57,13 +62,16 @@ pub async fn run(args: RepoArgs, channel: Channel) -> anyhow::Result<()> {
 
             // Create the repo.
             client
-                .create_repo(CreateRepoRequest {
-                    project: project.clone(),
-                    name: repo_name.clone(),
-                    default_branch,
-                    compatibility_direction: 0,
-                    protected_branches: vec![],
-                })
+                .create_repo(bearer(
+                    CreateRepoRequest {
+                        project: project.clone(),
+                        name: repo_name.clone(),
+                        default_branch,
+                        compatibility_direction: 0,
+                        protected_branches: vec![],
+                    },
+                    token,
+                )?)
                 .await
                 .context("CreateRepo RPC")?;
 
