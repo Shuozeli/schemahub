@@ -30,3 +30,16 @@ tempfile    = { workspace = true }
 # the DbBackend to compute jj ids and (de)serialize jj's proto objects.
 blake2      = "0.10"
 prost       = "0.14"
+
+# Optional: postgres-backed ObjectDb (server/multi-instance deployments).
+# Gated by the `postgres` feature; not built by default.
+sqlx        = { workspace = true, optional = true }
+
+[features]
+default = []
+# Compile the postgres-backed ObjectDb (`PgObjectDb`).
+postgres = ["dep:sqlx"]
+# Run the Postgres integration tests in `pg_db::tests`. Requires
+# `SCHEMAHUB_TEST_POSTGRES_URL` to point at a reachable Postgres instance.
+# Implies `postgres`.
+postgres-integration = ["postgres"]

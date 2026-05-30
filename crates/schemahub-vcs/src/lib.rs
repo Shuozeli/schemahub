@@ -22,6 +22,8 @@ pub mod jj_op_heads;
 pub mod jj_op_store;
 pub mod memory_db;
 pub mod object_db;
+#[cfg(feature = "postgres")]
+pub mod pg_db;
 pub mod redb_db;
 pub mod repo;
 
@@ -31,6 +33,8 @@ pub use memory_db::MemoryObjectDb;
 pub use object_db::{
     ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKind, OpId,
 };
+#[cfg(feature = "postgres")]
+pub use pg_db::PgObjectDb;
 pub use redb_db::RedbObjectDb;
 
 use jj_lib::backend::{CommitId, CopyId, FileId, Signature, Timestamp, TreeValue};

@@ -20,14 +20,22 @@ pub struct Config {
     pub repos: HashMap<String, RepoSection>,
 }
 
+/// Storage backend config. `backend` selects between the embedded redb default
+/// and a Postgres deployment; the relevant subset of fields is honored per
+/// backend (`path` for redb, `url` for postgres).
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
-    /// Backend id: currently only "redb" is wired.
+    /// Backend id: `"redb"` (default, embedded) or `"postgres"` (server-mode;
+    /// requires the `postgres` feature on `schemahub-server`).
     #[serde(default = "default_backend")]
     pub backend: String,
-    /// Path to the redb database file.
+    /// Path to the redb database file. Honored when `backend = "redb"`.
     #[serde(default = "default_db_path")]
     pub path: String,
+    /// Postgres connection URL. Honored (and required) when
+    /// `backend = "postgres"`.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 impl Default for StorageConfig {
@@ -35,6 +43,7 @@ impl Default for StorageConfig {
         Self {
             backend: default_backend(),
             path: default_db_path(),
+            url: None,
         }
     }
 }
@@ -77,11 +86,49 @@ fn default_addr() -> String {
 }
 
 impl Config {
-    /// Load from a TOML file if it exists, else defaults.
+    /// Load from a TOML file if it exists, else defaults. Validates the
+    /// storage selection so a misconfigured `backend = "postgres"` (with the
+    /// feature off, or with a missing `url`) is surfaced at startup rather
+    /// than as a downstream connection error.
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Ok(toml::from_str(&s)?),
-            Err(_) => Ok(Self::default()),
+        let cfg: Self = match std::fs::read_to_string(path) {
+            Ok(s) => toml::from_str(&s)?,
+            Err(_) => Self::default(),
+        };
+        cfg.validate_storage()?;
+        Ok(cfg)
+    }
+
+    /// Validate the `[storage]` selection. Fail-fast errors:
+    /// - `backend = "postgres"` requires the `postgres` cargo feature on
+    ///   `schemahub-server`; the binary was built without it.
+    /// - `backend = "postgres"` requires `storage.url` to be set.
+    /// - Any unknown `backend` string.
+    fn validate_storage(&self) -> anyhow::Result<()> {
+        match self.storage.backend.as_str() {
+            "redb" => Ok(()),
+            "postgres" => {
+                #[cfg(not(feature = "postgres"))]
+                {
+                    anyhow::bail!(
+                        "storage.backend = \"postgres\" requires building schemahub-server \
+                         with `--features postgres`; this binary was built without it"
+                    );
+                }
+                #[cfg(feature = "postgres")]
+                {
+                    if self.storage.url.as_deref().unwrap_or("").is_empty() {
+                        anyhow::bail!(
+                            "storage.backend = \"postgres\" requires storage.url \
+                             (e.g. postgres://user:pass@host:5432/dbname)"
+                        );
+                    }
+                    Ok(())
+                }
+            }
+            other => anyhow::bail!(
+                "unknown storage.backend {other:?}; expected \"redb\" or \"postgres\""
+            ),
         }
     }
 

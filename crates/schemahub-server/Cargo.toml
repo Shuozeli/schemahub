@@ -26,6 +26,12 @@ toml     = { workspace = true }
 clap     = { workspace = true }
 tokio-stream = "0.1"
 
+[features]
+default = []
+# Enable the Postgres-backed ObjectDb. Pulls the `postgres` feature on
+# schemahub-vcs (which is the actual compile gate for `PgObjectDb`).
+postgres = ["schemahub-vcs/postgres"]
+
 [dev-dependencies]
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }

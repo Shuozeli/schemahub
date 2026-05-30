@@ -37,6 +37,10 @@ thiserror   = "1"
 sha2        = "0.10"
 hex         = "0.4"
 uuid        = { version = "1", features = ["v4"] }
+# Postgres backend for schemahub-vcs (optional, behind the `postgres` feature).
+# `runtime-tokio` + `tls-rustls` is the modern equivalent of the old
+# `runtime-tokio-rustls` combo feature.
+sqlx        = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
 
 # sibling compilers (path deps within ~/projects/shuozeli/compilers/)
 protoc-rs-parser  = { path = "../../compilers/protobuf-rs/parser" }
