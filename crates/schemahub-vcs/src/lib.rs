@@ -1043,15 +1043,15 @@ impl Vcs {
             let root_op_id = loader.op_store().root_operation_id().clone();
 
             // Every operation's view is a GC root (op-log retention for undo).
+            // A failure here is fail-fast: silently skipping a load would mean
+            // the op's bookmarks/tags/heads are absent from the reachable set,
+            // and the sweep below would happily delete still-pinned objects.
             for op_id in self.store.db.list_ops(&repo_key)? {
                 let op_id = jj_lib::op_store::OperationId::new(op_id.0);
                 if op_id == root_op_id {
                     continue;
                 }
-                let op = match self.store.block_on(loader.load_operation(&op_id)) {
-                    Ok(op) => op,
-                    Err(_) => continue,
-                };
+                let op = Self::map_jj(self.store.block_on(loader.load_operation(&op_id)))?;
                 let view = Self::map_jj(self.store.block_on(op.view()))?;
                 reachable_views.insert(op.view_id().hex());
                 for head in view.heads() {
@@ -1080,16 +1080,15 @@ impl Vcs {
         let root_id = any_repo.store().root_commit_id().clone();
         let mut queue: Vec<String> = reachable_commits.iter().cloned().collect();
         while let Some(c_hex) = queue.pop() {
-            let Some(cid) = CommitId::try_from_hex(&c_hex) else {
-                continue;
-            };
+            let cid = CommitId::try_from_hex(&c_hex)
+                .ok_or_else(|| VcsError::Corrupt(format!("malformed reachable commit hex: {c_hex}")))?;
             if cid == root_id {
                 continue;
             }
-            let commit = match self.store.block_on(any_repo.store().get_commit_async(&cid)) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+            // Fail-fast on read errors — silently skipping here would leave
+            // this commit's trees + files unmarked, and the sweep would then
+            // drop content the operation log still references.
+            let commit = Self::map_jj(self.store.block_on(any_repo.store().get_commit_async(&cid)))?;
             for tree_id in commit.tree_ids().iter() {
                 self.mark_tree(&any_repo, tree_id, &mut reachable_trees, &mut reachable_files)?;
             }

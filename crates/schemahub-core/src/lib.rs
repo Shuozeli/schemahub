@@ -50,6 +50,7 @@ pub use auth_store::{ProjectMeta, ProjectStore, RoleStore};
 pub use config::{RepoConfig, RepoConfigStore};
 pub use error::{CoreError, CoreResult};
 pub use mutation::idempotency::IdempotencyStore;
+pub use mutation::load_base;
 pub use registry::CompilerRegistry;
 pub use request::{
     CodegenRequest, DeclLocation, LogEntry, MutationRequest, MutationResponse, OperationRecord,

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use schemahub_core::{detect_format_from_name, Core, MutationRequest, TransactionRequest};
+use schemahub_core::{detect_format_from_name, load_base, Core, MutationRequest, TransactionRequest};
 use schemahub_types::{Action, MutationEffect, SchemaObjects};
 use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};
@@ -84,12 +84,17 @@ impl SchemaService for SchemaHandler {
             .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
             .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
-        // First write may target a fresh bookmark; tolerate a missing base.
-        let base = self
-            .core
-            .vcs()
-            .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
-            .unwrap_or_default();
+        // First write may target a fresh bookmark; `load_base` tolerates a
+        // missing bookmark/schema but propagates real VCS errors (corrupt
+        // object, IO failure) so we don't silently overwrite real content.
+        let base = load_base(
+            self.core.vcs(),
+            &r.project,
+            &r.repo,
+            &r.schema_name,
+            &base_ref,
+        )
+        .map_err(to_status)?;
         let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
         let write = self
             .core
@@ -122,11 +127,16 @@ impl SchemaService for SchemaHandler {
             .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
             .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
-        let base = self
-            .core
-            .vcs()
-            .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
-            .unwrap_or_default();
+        // `load_base` tolerates a not-yet-existing bookmark or schema (a
+        // first-write update is legal) but propagates real VCS errors.
+        let base = load_base(
+            self.core.vcs(),
+            &r.project,
+            &r.repo,
+            &r.schema_name,
+            &base_ref,
+        )
+        .map_err(to_status)?;
         let effect = self.effect_from_source(&r.schema_name, &r.source, &base)?;
         let write = self
             .core

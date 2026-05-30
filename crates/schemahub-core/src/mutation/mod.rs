@@ -16,7 +16,13 @@ use crate::error::CoreResult;
 /// existing bookmark or schema file (returns an empty [`SchemaObjects`]). This
 /// makes "create the first schema on a fresh bookmark" just work: the compiler's
 /// create/add ops produce upserts against an empty base.
-pub(crate) fn load_base(
+///
+/// Crucially: only the "ref/file is genuinely missing" variants
+/// (`BookmarkNotFound` / `SchemaNotFound` / `TagNotFound`) become an empty
+/// base. Every other `VcsError` (`Corrupt`, `ObjectDb`, `BadRef`, …) is
+/// propagated — silently swallowing those would let a broken VCS look like
+/// a fresh bookmark and overwrite real content.
+pub fn load_base(
     vcs: &Vcs,
     project: &str,
     repo: &str,

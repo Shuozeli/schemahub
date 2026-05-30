@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use schemahub_core::Core;
 use schemahub_types::{DeclChange, SchemaPath};
-use schemahub_vcs::RefSpec;
+use schemahub_vcs::{RefSpec, VcsError};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -101,16 +101,24 @@ impl RefService for BookmarkHandler {
         let head = wire::version_ref_to_refspec(&r.head, DEFAULT_BOOKMARK);
 
         // Determine the schema files to diff: the explicit one, or the union
-        // present at either side.
+        // present at either side. A missing ref on either side is legal (the
+        // bookmark may not exist yet, or be empty) and yields no schemas
+        // for that side; everything else propagates as a real error so we
+        // don't silently turn an IO/corrupt failure into "empty diff".
         let schema_paths: Vec<String> = if !r.schema_path.is_empty() {
             vec![r.schema_path.clone()]
         } else {
             let mut names = std::collections::BTreeSet::new();
-            if let Ok(s) = self.core.vcs().list_schemas(&r.project, &r.repo, &head) {
-                names.extend(s);
-            }
-            if let Ok(s) = self.core.vcs().list_schemas(&r.project, &r.repo, &base) {
-                names.extend(s);
+            for side in [&head, &base] {
+                match self.core.vcs().list_schemas(&r.project, &r.repo, side) {
+                    Ok(s) => names.extend(s),
+                    Err(
+                        VcsError::BookmarkNotFound(_)
+                        | VcsError::TagNotFound(_)
+                        | VcsError::SchemaNotFound(_),
+                    ) => {}
+                    Err(e) => return Err(to_status(e.into())),
+                }
             }
             names.into_iter().collect()
         };
