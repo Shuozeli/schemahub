@@ -397,6 +397,8 @@ async fn history_log_and_repeated_undo_roll_back() {
         .log(pb::LogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            at: None,
+            limit: 0,
         })
         .await
         .expect("log")
@@ -406,6 +408,7 @@ async fn history_log_and_repeated_undo_roll_back() {
         .op_log(pb::OpLogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            limit: 0,
         })
         .await
         .expect("op_log")
@@ -468,6 +471,8 @@ async fn history_log_and_repeated_undo_roll_back() {
         .log(pb::LogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            at: None,
+            limit: 0,
         })
         .await
         .expect("log after undo")
@@ -503,6 +508,7 @@ async fn repeated_mutation_with_same_key_is_deduped() {
         .op_log(pb::OpLogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            limit: 0,
         })
         .await
         .expect("op_log before")
@@ -538,6 +544,7 @@ async fn repeated_mutation_with_same_key_is_deduped() {
         .op_log(pb::OpLogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            limit: 0,
         })
         .await
         .expect("op_log after")
@@ -548,5 +555,168 @@ async fn repeated_mutation_with_same_key_is_deduped() {
         ops_after - ops_before,
         1,
         "two identical mutations should add exactly one operation (before={ops_before}, after={ops_after})"
+    );
+}
+
+#[tokio::test]
+async fn log_honors_at_ref_and_limit() {
+    // Arrange: three writes on main → 3 commits. Tag after the 2nd write.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let _ = create_schema(
+        &mut c.schema,
+        "acme", "core", "main", "user.proto",
+        pb::SchemaFormat::Protobuf,
+        "syntax = \"proto3\";\nmessage User { string id = 1; }\n",
+        "create",
+    )
+    .await;
+    let add_email = c.schema.apply_mutation(pb::ApplyMutationRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        branch: "main".into(),
+        base_revision: String::new(),
+        idempotency_key: "k-email".into(),
+        force: false,
+        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+            pb::ProtobufMutation {
+                schema_path: "user.proto".into(),
+                operation: Some(pb::protobuf_mutation::Operation::AddField(
+                    pb::ProtoAddField {
+                        message_name: "User".into(),
+                        field_name: "email".into(),
+                        field_type: "string".into(),
+                        field_number: 2,
+                        repeated: false,
+                        doc_comment: String::new(),
+                    },
+                )),
+            },
+        )),
+    }).await.expect("add email").into_inner();
+    let tag_commit = add_email.new_commit.clone();
+    c.refs.create_tag(pb::CreateTagRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        name: "v1".into(),
+        target: Some(pb::VersionRef {
+            r#ref: Some(pb::version_ref::Ref::Commit(tag_commit.clone())),
+        }),
+        message: String::new(),
+    }).await.expect("create_tag");
+    let _ = c.schema.apply_mutation(pb::ApplyMutationRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        branch: "main".into(),
+        base_revision: String::new(),
+        idempotency_key: "k-phone".into(),
+        force: false,
+        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+            pb::ProtobufMutation {
+                schema_path: "user.proto".into(),
+                operation: Some(pb::protobuf_mutation::Operation::AddField(
+                    pb::ProtoAddField {
+                        message_name: "User".into(),
+                        field_name: "phone".into(),
+                        field_type: "string".into(),
+                        field_number: 3,
+                        repeated: false,
+                        doc_comment: String::new(),
+                    },
+                )),
+            },
+        )),
+    }).await.expect("add phone");
+
+    // Act: log at the tag should see only the first two commits (3rd write is
+    // after the tag); log on main with limit=1 should return exactly one entry.
+    let at_tag = c.history.log(pb::LogRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        at: Some(vref_tag("v1")),
+        limit: 0,
+    }).await.expect("log at tag").into_inner();
+    let limited = c.history.log(pb::LogRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        at: None,
+        limit: 1,
+    }).await.expect("log limited").into_inner();
+
+    // Assert: tag walk stops at the tagged commit; limit truncates.
+    assert_eq!(at_tag.entries.len(), 2, "log at v1 should see 2 commits, got {}", at_tag.entries.len());
+    assert_eq!(at_tag.entries[0].commit_id, tag_commit, "newest at v1 must be the tagged commit");
+    assert_eq!(limited.entries.len(), 1, "limit=1 should truncate to 1 entry");
+}
+
+#[tokio::test]
+async fn search_honors_at_ref() {
+    // Arrange: create a schema with `Account` on main; tag; then rename Account
+    // to Customer on main so Account no longer exists at HEAD.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let _ = create_schema(
+        &mut c.schema,
+        "acme", "core", "main", "u.proto",
+        pb::SchemaFormat::Protobuf,
+        "syntax = \"proto3\";\nmessage Account { string id = 1; }\n",
+        "k-create",
+    )
+    .await;
+    c.refs.create_tag(pb::CreateTagRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        name: "snap".into(),
+        target: Some(vref_branch("main")),
+        message: String::new(),
+    }).await.expect("create_tag");
+    // Rename Account → Customer on main.
+    c.schema.apply_mutation(pb::ApplyMutationRequest {
+        project: "acme".into(),
+        repo: "core".into(),
+        branch: "main".into(),
+        base_revision: String::new(),
+        idempotency_key: "k-rename".into(),
+        force: false,
+        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+            pb::ProtobufMutation {
+                schema_path: "u.proto".into(),
+                operation: Some(pb::protobuf_mutation::Operation::RenameMessage(
+                    pb::ProtoRenameMessage {
+                        old_name: "Account".into(),
+                        new_name: "Customer".into(),
+                    },
+                )),
+            },
+        )),
+    }).await.expect("rename");
+
+    // Act: search for `Account` at the tag (pre-rename) and at main (post-rename).
+    let at_tag = c.explore.search(pb::SearchRequest {
+        query: "Account".into(),
+        project: "acme".into(),
+        repo: "core".into(),
+        kind: 0,
+        limit: 0,
+        at: Some(vref_tag("snap")),
+    }).await.expect("search at tag").into_inner();
+    let at_main = c.explore.search(pb::SearchRequest {
+        query: "Account".into(),
+        project: "acme".into(),
+        repo: "core".into(),
+        kind: 0,
+        limit: 0,
+        at: None,
+    }).await.expect("search at main").into_inner();
+
+    // Assert: tag still has Account; main lost it to the rename.
+    assert!(
+        at_tag.results.iter().any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
+        "Account should be visible at the tag, got: {:?}",
+        at_tag.results.iter().filter_map(|r| r.declaration.as_ref().map(|d| &d.name)).collect::<Vec<_>>()
+    );
+    assert!(
+        !at_main.results.iter().any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
+        "Account should NOT be visible on main after rename"
     );
 }

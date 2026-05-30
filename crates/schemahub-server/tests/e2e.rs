@@ -143,6 +143,7 @@ async fn create_add_field_pull_oplog_undo_roundtrip() {
         .op_log(pb::OpLogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            limit: 0,
         })
         .await
         .expect("op_log")
@@ -373,6 +374,8 @@ async fn log_reports_real_commit_graph() {
         .log(pb::LogRequest {
             project: "acme".into(),
             repo: "core".into(),
+            at: None,
+            limit: 0,
         })
         .await
         .expect("log")

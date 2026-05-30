@@ -149,6 +149,9 @@ message SearchRequest {
   string   repo    = 3;
   DeclKind kind    = 4;  // filter by kind; UNSPECIFIED = all kinds
   uint32   limit   = 5;  // max results; default 50, max 200
+  // Ref to search at — branch / tag / commit. Defaults to the repo's default
+  // bookmark (cross-ref search; was previously hard-coded to `main`).
+  VersionRef at    = 6;
 }
 
 message SearchResponse {

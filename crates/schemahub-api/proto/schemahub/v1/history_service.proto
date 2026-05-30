@@ -36,6 +36,11 @@ service HistoryService {
 message LogRequest {
   string project = 1;
   string repo    = 2;
+  // Ref to walk from (newest→oldest). Branch / tag / commit. Defaults to the
+  // repo's default bookmark when omitted.
+  VersionRef at  = 3;
+  // Max commits to return. 0 = use server default (currently 100).
+  uint32 limit   = 4;
 }
 
 message LogEntry {
@@ -56,6 +61,8 @@ message LogResponse {
 message OpLogRequest {
   string project = 1;
   string repo    = 2;
+  // Max operations to return (newest-first ordering preserved). 0 = no limit.
+  uint32 limit   = 3;
 }
 
 message OperationRecord {

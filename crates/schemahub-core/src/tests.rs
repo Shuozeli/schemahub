@@ -523,7 +523,7 @@ fn op_log_records_each_write() {
     .expect("second write");
 
     // Act
-    let ops = core.op_log(PROJECT, REPO, None).expect("op log");
+    let ops = core.op_log(PROJECT, REPO, None, None).expect("op log");
 
     // Assert: at least the two writes are recorded.
     assert!(ops.len() >= 2, "expected >=2 ops, got {}", ops.len());
@@ -546,7 +546,7 @@ fn log_returns_real_commit_and_change_ids_distinct_from_op_ids() {
     let log = core
         .log(PROJECT, REPO, None, None, None)
         .expect("commit log");
-    let ops = core.op_log(PROJECT, REPO, None).expect("op log");
+    let ops = core.op_log(PROJECT, REPO, None, None).expect("op log");
 
     // Assert: log reports content-addressed commit ids and stable change ids,
     // and each commit's change id differs from its commit id and from any op id.

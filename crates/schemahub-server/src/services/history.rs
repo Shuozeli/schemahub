@@ -35,9 +35,24 @@ impl HistoryService for HistoryHandler {
     ) -> Result<Response<pb::LogResponse>, Status> {
         let token = token_from(&request);
         let r = request.into_inner();
+        // Honor the optional `at` ref (branch / tag / commit). When omitted,
+        // pass `None` so Core resolves the repo's configured default bookmark
+        // (which may not be "main"). `limit = 0` means "use Core's default"
+        // (currently 100).
+        let at_refspec = r
+            .at
+            .as_ref()
+            .map(|_| wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK));
+        let limit = if r.limit == 0 { None } else { Some(r.limit as usize) };
         let entries = self
             .core
-            .log(&r.project, &r.repo, None, None, token.as_deref())
+            .log(
+                &r.project,
+                &r.repo,
+                at_refspec.as_ref(),
+                limit,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
         let entries = entries
             .into_iter()
@@ -59,9 +74,10 @@ impl HistoryService for HistoryHandler {
     ) -> Result<Response<pb::OpLogResponse>, Status> {
         let token = token_from(&request);
         let r = request.into_inner();
+        let limit = if r.limit == 0 { None } else { Some(r.limit as usize) };
         let ops = self
             .core
-            .op_log(&r.project, &r.repo, token.as_deref())
+            .op_log(&r.project, &r.repo, limit, token.as_deref())
             .map_err(to_status)?;
         let operations = ops
             .into_iter()

@@ -34,18 +34,22 @@ pub enum OpAction {
     Log {
         /// project/repo
         repo: String,
+        /// Max operations to show (0 = no limit).
+        #[arg(long, default_value = "0")]
+        limit: u32,
     },
 }
 
 pub async fn run_op(args: OpArgs, channel: Channel) -> anyhow::Result<()> {
     match args.action {
-        OpAction::Log { repo } => {
+        OpAction::Log { repo, limit } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = HistoryServiceClient::new(channel);
             let resp = client
                 .op_log(OpLogRequest {
                     project,
                     repo: repo_name,
+                    limit,
                 })
                 .await
                 .context("OpLog RPC")?;

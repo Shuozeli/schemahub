@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use schemahub_core::Core;
 use schemahub_types::SchemaPath;
-use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
@@ -195,9 +194,9 @@ impl ExplorationService for ExplorationHandler {
                 "search requires project and repo (cross-repo search is v2)",
             ));
         }
-        // `SearchRequest` carries no `at` ref, so search always operates on the
-        // default bookmark (cross-ref search is v2).
-        let at = RefSpec::bookmark(DEFAULT_BOOKMARK);
+        // Honor the optional `at` ref (branch / tag / commit). When omitted,
+        // search at the repo's default bookmark — the previous behavior.
+        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
         let hits = self
             .core
             .search_detailed(&r.project, &r.repo, &at, &r.query, token.as_deref())

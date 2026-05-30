@@ -16,10 +16,15 @@ const DEFAULT_LOG_LIMIT: usize = 100;
 
 impl Core {
     /// The operation log for a repo (the audit record) — `vcs.list_operations`.
+    ///
+    /// `limit = Some(n)` returns the latest `n` operations (the VCS returns
+    /// oldest→newest, so we trim the front, preserving relative order). `None`
+    /// returns the full log.
     pub fn op_log(
         &self,
         project: &str,
         repo: &str,
+        limit: Option<usize>,
         token: Option<&str>,
     ) -> CoreResult<Vec<OperationRecord>> {
         authorize(
@@ -30,7 +35,14 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.list_operations(project, repo)?)
+        let mut ops = self.vcs.list_operations(project, repo)?;
+        if let Some(n) = limit {
+            if ops.len() > n {
+                let drop = ops.len() - n;
+                ops.drain(..drop);
+            }
+        }
+        Ok(ops)
     }
 
     /// Undo the last operation — `vcs.undo`. Returns the id of the operation that
