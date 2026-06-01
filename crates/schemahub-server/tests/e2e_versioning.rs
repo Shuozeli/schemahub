@@ -100,10 +100,22 @@ async fn branch_mutation_is_isolated_from_main() {
         .expect("apply_mutation on feature/x");
 
     // Assert: the new field shows at `feature/x` but NOT at `main`.
-    let on_feature =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("feature/x")).await;
-    let on_main =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
+    let on_feature = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("feature/x"),
+    )
+    .await;
+    let on_main = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
     assert!(
         on_feature.contains("email"),
         "feature/x should have the new field, got:\n{on_feature}"
@@ -164,11 +176,20 @@ async fn tag_pins_an_immutable_snapshot() {
         .await
         .expect("create_tag")
         .into_inner();
-    assert!(!tag.tag.unwrap().commit_hash.is_empty(), "tag should pin a commit");
+    assert!(
+        !tag.tag.unwrap().commit_hash.is_empty(),
+        "tag should pin a commit"
+    );
 
     // The tag must already resolve to the pre-mutation snapshot.
-    let at_tag_before =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_tag("v1.0.0")).await;
+    let at_tag_before = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_tag("v1.0.0"),
+    )
+    .await;
     assert!(
         at_tag_before.contains("message User"),
         "tag should resolve to the schema, got:\n{at_tag_before}"
@@ -176,16 +197,35 @@ async fn tag_pins_an_immutable_snapshot() {
 
     c.schema
         .apply_mutation(add_field_request(
-            "acme", "core", "main", "user.proto", "User", "email", 3, "k2",
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "email",
+            3,
+            "k2",
         ))
         .await
         .expect("apply_mutation on main");
 
     // Assert: the tag still shows the pre-mutation state; main shows the new field.
-    let at_tag_after =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_tag("v1.0.0")).await;
-    let at_main_after =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
+    let at_tag_after = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_tag("v1.0.0"),
+    )
+    .await;
+    let at_main_after = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
     assert!(
         !at_tag_after.contains("email"),
         "tag is immutable: it must NOT show the post-tag field, got:\n{at_tag_after}"
@@ -255,9 +295,18 @@ async fn merge_brings_branch_field_into_main() {
         .expect("apply_mutation on feature/y");
 
     // Sanity: main does not yet have the field.
-    let main_before =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
-    assert!(!main_before.contains("email"), "precondition: main lacks email");
+    let main_before = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
+    assert!(
+        !main_before.contains("email"),
+        "precondition: main lacks email"
+    );
 
     // Act: merge feature/y into main.
     let merge = c
@@ -280,8 +329,14 @@ async fn merge_brings_branch_field_into_main() {
         !merge.new_commit.is_empty(),
         "merge should return a non-empty commit id"
     );
-    let main_after =
-        pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
+    let main_after = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
     assert!(
         main_after.contains("email"),
         "main should have the merged-in field, got:\n{main_after}"
@@ -318,7 +373,14 @@ async fn diff_reports_changed_declaration_between_refs() {
         .expect("create_tag");
     c.schema
         .apply_mutation(add_field_request(
-            "acme", "core", "main", "user.proto", "User", "email", 3, "k2",
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "email",
+            3,
+            "k2",
         ))
         .await
         .expect("apply_mutation on main");
@@ -356,7 +418,10 @@ async fn diff_reports_changed_declaration_between_refs() {
     assert!(
         user_changes.iter().any(|ch| ch.change_type == "modified"),
         "User should be reported as modified, got: {:?}",
-        user_changes.iter().map(|c| &c.change_type).collect::<Vec<_>>()
+        user_changes
+            .iter()
+            .map(|c| &c.change_type)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -380,13 +445,27 @@ async fn history_log_and_repeated_undo_roll_back() {
     .await;
     c.schema
         .apply_mutation(add_field_request(
-            "acme", "core", "main", "user.proto", "User", "email", 3, "h2",
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "email",
+            3,
+            "h2",
         ))
         .await
         .expect("add email");
     c.schema
         .apply_mutation(add_field_request(
-            "acme", "core", "main", "user.proto", "User", "phone", 4, "h3",
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "phone",
+            4,
+            "h3",
         ))
         .await
         .expect("add phone");
@@ -433,8 +512,18 @@ async fn history_log_and_repeated_undo_roll_back() {
     );
 
     // Sanity: both fields present before undo.
-    let before = pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
-    assert!(before.contains("email") && before.contains("phone"), "got:\n{before}");
+    let before = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
+    assert!(
+        before.contains("email") && before.contains("phone"),
+        "got:\n{before}"
+    );
 
     // Act 2: undo twice (drops phone, then email).
     c.history
@@ -455,7 +544,14 @@ async fn history_log_and_repeated_undo_roll_back() {
         .expect("second undo");
 
     // Assert: the last two fields are gone; the initial state (id, name) remains.
-    let after = pull_source(&mut c.explore, "acme", "core", "user.proto", vref_branch("main")).await;
+    let after = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
     assert!(
         !after.contains("email") && !after.contains("phone"),
         "two undos should remove both added fields, got:\n{after}"
@@ -517,7 +613,16 @@ async fn repeated_mutation_with_same_key_is_deduped() {
         .len();
 
     // Act: send the SAME add-field mutation (same idempotency_key) twice.
-    let req = add_field_request("acme", "core", "main", "user.proto", "User", "email", 3, "dup");
+    let req = add_field_request(
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        "User",
+        "email",
+        3,
+        "dup",
+    );
     let first = c
         .schema
         .apply_mutation(req.clone())
@@ -565,88 +670,125 @@ async fn log_honors_at_ref_and_limit() {
     let mut c = clients(&url).await;
     let _ = create_schema(
         &mut c.schema,
-        "acme", "core", "main", "user.proto",
+        "acme",
+        "core",
+        "main",
+        "user.proto",
         pb::SchemaFormat::Protobuf,
         "syntax = \"proto3\";\nmessage User { string id = 1; }\n",
         "create",
     )
     .await;
-    let add_email = c.schema.apply_mutation(pb::ApplyMutationRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        branch: "main".into(),
-        base_revision: String::new(),
-        idempotency_key: "k-email".into(),
-        force: false,
-        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
-            pb::ProtobufMutation {
-                schema_path: "user.proto".into(),
-                operation: Some(pb::protobuf_mutation::Operation::AddField(
-                    pb::ProtoAddField {
-                        message_name: "User".into(),
-                        field_name: "email".into(),
-                        field_type: "string".into(),
-                        field_number: 2,
-                        repeated: false,
-                        doc_comment: String::new(),
-                    },
-                )),
-            },
-        )),
-    }).await.expect("add email").into_inner();
+    let add_email = c
+        .schema
+        .apply_mutation(pb::ApplyMutationRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            branch: "main".into(),
+            base_revision: String::new(),
+            idempotency_key: "k-email".into(),
+            force: false,
+            operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+                pb::ProtobufMutation {
+                    schema_path: "user.proto".into(),
+                    operation: Some(pb::protobuf_mutation::Operation::AddField(
+                        pb::ProtoAddField {
+                            message_name: "User".into(),
+                            field_name: "email".into(),
+                            field_type: "string".into(),
+                            field_number: 2,
+                            repeated: false,
+                            doc_comment: String::new(),
+                        },
+                    )),
+                },
+            )),
+        })
+        .await
+        .expect("add email")
+        .into_inner();
     let tag_commit = add_email.new_commit.clone();
-    c.refs.create_tag(pb::CreateTagRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        name: "v1".into(),
-        target: Some(pb::VersionRef {
-            r#ref: Some(pb::version_ref::Ref::Commit(tag_commit.clone())),
-        }),
-        message: String::new(),
-    }).await.expect("create_tag");
-    let _ = c.schema.apply_mutation(pb::ApplyMutationRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        branch: "main".into(),
-        base_revision: String::new(),
-        idempotency_key: "k-phone".into(),
-        force: false,
-        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
-            pb::ProtobufMutation {
-                schema_path: "user.proto".into(),
-                operation: Some(pb::protobuf_mutation::Operation::AddField(
-                    pb::ProtoAddField {
-                        message_name: "User".into(),
-                        field_name: "phone".into(),
-                        field_type: "string".into(),
-                        field_number: 3,
-                        repeated: false,
-                        doc_comment: String::new(),
-                    },
-                )),
-            },
-        )),
-    }).await.expect("add phone");
+    c.refs
+        .create_tag(pb::CreateTagRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "v1".into(),
+            target: Some(pb::VersionRef {
+                r#ref: Some(pb::version_ref::Ref::Commit(tag_commit.clone())),
+            }),
+            message: String::new(),
+        })
+        .await
+        .expect("create_tag");
+    let _ = c
+        .schema
+        .apply_mutation(pb::ApplyMutationRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            branch: "main".into(),
+            base_revision: String::new(),
+            idempotency_key: "k-phone".into(),
+            force: false,
+            operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+                pb::ProtobufMutation {
+                    schema_path: "user.proto".into(),
+                    operation: Some(pb::protobuf_mutation::Operation::AddField(
+                        pb::ProtoAddField {
+                            message_name: "User".into(),
+                            field_name: "phone".into(),
+                            field_type: "string".into(),
+                            field_number: 3,
+                            repeated: false,
+                            doc_comment: String::new(),
+                        },
+                    )),
+                },
+            )),
+        })
+        .await
+        .expect("add phone");
 
     // Act: log at the tag should see only the first two commits (3rd write is
     // after the tag); log on main with limit=1 should return exactly one entry.
-    let at_tag = c.history.log(pb::LogRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        at: Some(vref_tag("v1")),
-        limit: 0,
-    }).await.expect("log at tag").into_inner();
-    let limited = c.history.log(pb::LogRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        at: None,
-        limit: 1,
-    }).await.expect("log limited").into_inner();
+    let at_tag = c
+        .history
+        .log(pb::LogRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            at: Some(vref_tag("v1")),
+            limit: 0,
+        })
+        .await
+        .expect("log at tag")
+        .into_inner();
+    let limited = c
+        .history
+        .log(pb::LogRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            at: None,
+            limit: 1,
+        })
+        .await
+        .expect("log limited")
+        .into_inner();
 
     // Assert: tag walk stops at the tagged commit; limit truncates.
-    assert_eq!(at_tag.entries.len(), 2, "log at v1 should see 2 commits, got {}", at_tag.entries.len());
-    assert_eq!(at_tag.entries[0].commit_id, tag_commit, "newest at v1 must be the tagged commit");
-    assert_eq!(limited.entries.len(), 1, "limit=1 should truncate to 1 entry");
+    assert_eq!(
+        at_tag.entries.len(),
+        2,
+        "log at v1 should see 2 commits, got {}",
+        at_tag.entries.len()
+    );
+    assert_eq!(
+        at_tag.entries[0].commit_id, tag_commit,
+        "newest at v1 must be the tagged commit"
+    );
+    assert_eq!(
+        limited.entries.len(),
+        1,
+        "limit=1 should truncate to 1 entry"
+    );
 }
 
 #[tokio::test]
@@ -657,66 +799,95 @@ async fn search_honors_at_ref() {
     let mut c = clients(&url).await;
     let _ = create_schema(
         &mut c.schema,
-        "acme", "core", "main", "u.proto",
+        "acme",
+        "core",
+        "main",
+        "u.proto",
         pb::SchemaFormat::Protobuf,
         "syntax = \"proto3\";\nmessage Account { string id = 1; }\n",
         "k-create",
     )
     .await;
-    c.refs.create_tag(pb::CreateTagRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        name: "snap".into(),
-        target: Some(vref_branch("main")),
-        message: String::new(),
-    }).await.expect("create_tag");
+    c.refs
+        .create_tag(pb::CreateTagRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "snap".into(),
+            target: Some(vref_branch("main")),
+            message: String::new(),
+        })
+        .await
+        .expect("create_tag");
     // Rename Account → Customer on main.
-    c.schema.apply_mutation(pb::ApplyMutationRequest {
-        project: "acme".into(),
-        repo: "core".into(),
-        branch: "main".into(),
-        base_revision: String::new(),
-        idempotency_key: "k-rename".into(),
-        force: false,
-        operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
-            pb::ProtobufMutation {
-                schema_path: "u.proto".into(),
-                operation: Some(pb::protobuf_mutation::Operation::RenameMessage(
-                    pb::ProtoRenameMessage {
-                        old_name: "Account".into(),
-                        new_name: "Customer".into(),
-                    },
-                )),
-            },
-        )),
-    }).await.expect("rename");
+    c.schema
+        .apply_mutation(pb::ApplyMutationRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            branch: "main".into(),
+            base_revision: String::new(),
+            idempotency_key: "k-rename".into(),
+            force: false,
+            operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
+                pb::ProtobufMutation {
+                    schema_path: "u.proto".into(),
+                    operation: Some(pb::protobuf_mutation::Operation::RenameMessage(
+                        pb::ProtoRenameMessage {
+                            old_name: "Account".into(),
+                            new_name: "Customer".into(),
+                        },
+                    )),
+                },
+            )),
+        })
+        .await
+        .expect("rename");
 
     // Act: search for `Account` at the tag (pre-rename) and at main (post-rename).
-    let at_tag = c.explore.search(pb::SearchRequest {
-        query: "Account".into(),
-        project: "acme".into(),
-        repo: "core".into(),
-        kind: 0,
-        limit: 0,
-        at: Some(vref_tag("snap")),
-    }).await.expect("search at tag").into_inner();
-    let at_main = c.explore.search(pb::SearchRequest {
-        query: "Account".into(),
-        project: "acme".into(),
-        repo: "core".into(),
-        kind: 0,
-        limit: 0,
-        at: None,
-    }).await.expect("search at main").into_inner();
+    let at_tag = c
+        .explore
+        .search(pb::SearchRequest {
+            query: "Account".into(),
+            project: "acme".into(),
+            repo: "core".into(),
+            kind: 0,
+            limit: 0,
+            at: Some(vref_tag("snap")),
+        })
+        .await
+        .expect("search at tag")
+        .into_inner();
+    let at_main = c
+        .explore
+        .search(pb::SearchRequest {
+            query: "Account".into(),
+            project: "acme".into(),
+            repo: "core".into(),
+            kind: 0,
+            limit: 0,
+            at: None,
+        })
+        .await
+        .expect("search at main")
+        .into_inner();
 
     // Assert: tag still has Account; main lost it to the rename.
     assert!(
-        at_tag.results.iter().any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
+        at_tag
+            .results
+            .iter()
+            .any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
         "Account should be visible at the tag, got: {:?}",
-        at_tag.results.iter().filter_map(|r| r.declaration.as_ref().map(|d| &d.name)).collect::<Vec<_>>()
+        at_tag
+            .results
+            .iter()
+            .filter_map(|r| r.declaration.as_ref().map(|d| &d.name))
+            .collect::<Vec<_>>()
     );
     assert!(
-        !at_main.results.iter().any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
+        !at_main
+            .results
+            .iter()
+            .any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
         "Account should NOT be visible on main after rename"
     );
 }

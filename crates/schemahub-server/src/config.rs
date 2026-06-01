@@ -140,7 +140,13 @@ impl ProjectSection {
     /// Resolve the configured visibility string. Unknown / missing values
     /// fall back to Private (fail-closed).
     pub fn parsed_visibility(&self) -> Visibility {
-        match self.visibility.as_deref().unwrap_or("private").to_ascii_lowercase().as_str() {
+        match self
+            .visibility
+            .as_deref()
+            .unwrap_or("private")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "public" => Visibility::Public,
             _ => Visibility::Private,
         }

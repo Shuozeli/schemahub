@@ -435,10 +435,7 @@ fn multi_file_transaction_commits_both_files_in_one_commit() {
     };
     let req = TransactionRequest {
         bookmark: "feature/multi".to_string(),
-        mutations: vec![
-            proto_op_in("a.proto", "A"),
-            proto_op_in("b.proto", "B"),
-        ],
+        mutations: vec![proto_op_in("a.proto", "A"), proto_op_in("b.proto", "B")],
         author: "alice".to_string(),
         message: "tx".to_string(),
         force: false,
@@ -475,8 +472,14 @@ fn multi_file_transaction_commits_both_files_in_one_commit() {
             None,
         )
         .expect("list b.proto");
-    assert_eq!(a.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["A"]);
-    assert_eq!(b.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["B"]);
+    assert_eq!(
+        a.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        vec!["A"]
+    );
+    assert_eq!(
+        b.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        vec!["B"]
+    );
 }
 
 #[test]
@@ -551,8 +554,7 @@ fn log_returns_real_commit_and_change_ids_distinct_from_op_ids() {
     // Assert: log reports content-addressed commit ids and stable change ids,
     // and each commit's change id differs from its commit id and from any op id.
     assert!(log.len() >= 2, "expected >=2 commits, got {}", log.len());
-    let op_ids: std::collections::HashSet<&str> =
-        ops.iter().map(|o| o.op_id.as_str()).collect();
+    let op_ids: std::collections::HashSet<&str> = ops.iter().map(|o| o.op_id.as_str()).collect();
     for entry in &log {
         assert!(!entry.commit_id.is_empty(), "commit_id must be set");
         assert!(!entry.change_id.is_empty(), "change_id must be set");

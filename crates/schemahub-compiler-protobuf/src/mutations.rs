@@ -84,11 +84,20 @@ impl WorkingState {
                 continue;
             }
             if let Some(m) = self.messages.get(name) {
-                upserts.push((name.clone(), DeclBlob::new(encode_decl(&DeclPayload::Message(m.clone())))));
+                upserts.push((
+                    name.clone(),
+                    DeclBlob::new(encode_decl(&DeclPayload::Message(m.clone()))),
+                ));
             } else if let Some(e) = self.enums.get(name) {
-                upserts.push((name.clone(), DeclBlob::new(encode_decl(&DeclPayload::Enum(e.clone())))));
+                upserts.push((
+                    name.clone(),
+                    DeclBlob::new(encode_decl(&DeclPayload::Enum(e.clone()))),
+                ));
             } else if let Some(s) = self.services.get(name) {
-                upserts.push((name.clone(), DeclBlob::new(encode_decl(&DeclPayload::Service(s.clone())))));
+                upserts.push((
+                    name.clone(),
+                    DeclBlob::new(encode_decl(&DeclPayload::Service(s.clone()))),
+                ));
             }
         }
         let removes: Vec<String> = self
@@ -415,14 +424,21 @@ impl WorkingState {
 
     fn add_enum_value(&mut self, o: &OpAddEnumValue) -> Result<(), MutationError> {
         let e = self.enum_mut(&o.enum_name)?;
-        if e.value.iter().any(|v| v.name.as_deref() == Some(o.value_name.as_str())) {
+        if e.value
+            .iter()
+            .any(|v| v.name.as_deref() == Some(o.value_name.as_str()))
+        {
             return Err(MutationError::InvalidOperation(format!(
                 "enum value '{}' already exists",
                 o.value_name
             )));
         }
         if e.value.iter().any(|v| v.number == Some(o.number)) {
-            let allow_alias = e.options.as_ref().and_then(|x| x.allow_alias).unwrap_or(false);
+            let allow_alias = e
+                .options
+                .as_ref()
+                .and_then(|x| x.allow_alias)
+                .unwrap_or(false);
             if !allow_alias {
                 return Err(MutationError::InvalidOperation(format!(
                     "enum value number {} already in use (allow_alias not set)",
@@ -523,7 +539,10 @@ impl WorkingState {
 
     fn add_rpc(&mut self, o: &OpAddRpc) -> Result<(), MutationError> {
         let s = self.service_mut(&o.service_name)?;
-        if s.method.iter().any(|m| m.name.as_deref() == Some(o.rpc_name.as_str())) {
+        if s.method
+            .iter()
+            .any(|m| m.name.as_deref() == Some(o.rpc_name.as_str()))
+        {
             return Err(MutationError::InvalidOperation(format!(
                 "rpc '{}' already exists",
                 o.rpc_name
@@ -595,12 +614,15 @@ impl WorkingState {
 
     fn update_import(&mut self, o: &OpUpdateImport) -> Result<(), MutationError> {
         if o.remove {
-            if let Some(pos) = self.meta.dependency.iter().position(|d| d == &o.import_path) {
+            if let Some(pos) = self
+                .meta
+                .dependency
+                .iter()
+                .position(|d| d == &o.import_path)
+            {
                 self.meta.dependency.remove(pos);
                 // Re-index public/weak dependency indices that pointed past pos.
-                self.meta
-                    .public_dependency
-                    .retain(|&i| i != pos as i32);
+                self.meta.public_dependency.retain(|&i| i != pos as i32);
                 self.meta.weak_dependency.retain(|&i| i != pos as i32);
                 for i in self.meta.public_dependency.iter_mut() {
                     if *i > pos as i32 {
@@ -632,9 +654,7 @@ fn is_number_reserved(msg: &DescriptorProto, number: i32) -> bool {
 }
 
 /// Map a cardinality keyword to `(label, proto3_optional)`.
-fn cardinality_to_label(
-    card: &str,
-) -> Result<(Option<FieldLabel>, bool), MutationError> {
+fn cardinality_to_label(card: &str) -> Result<(Option<FieldLabel>, bool), MutationError> {
     match card {
         "" | "singular" => Ok((None, false)),
         "optional" => Ok((Some(FieldLabel::Optional), true)),

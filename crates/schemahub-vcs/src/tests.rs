@@ -26,8 +26,14 @@ fn seed_two_decls(vcs: &Vcs) -> String {
     let effect = MutationEffect {
         meta: Some(MetaBlob::new(b"package test;".to_vec())),
         upserts: vec![
-            ("UserRequest".to_string(), DeclBlob::new(b"msg req v1".to_vec())),
-            ("UserStatus".to_string(), DeclBlob::new(b"enum status v1".to_vec())),
+            (
+                "UserRequest".to_string(),
+                DeclBlob::new(b"msg req v1".to_vec()),
+            ),
+            (
+                "UserStatus".to_string(),
+                DeclBlob::new(b"enum status v1".to_vec()),
+            ),
         ],
         removes: vec![],
     };
@@ -157,9 +163,7 @@ fn unchanged_sibling_file_object_is_not_duplicated() {
     let vcs = Vcs::new(db.clone());
     seed_two_decls(&vcs);
     // The UserStatus blob bytes ("enum status v1").
-    let status_id = db
-        .put_object(ObjectKind::File, b"enum status v1")
-        .unwrap();
+    let status_id = db.put_object(ObjectKind::File, b"enum status v1").unwrap();
 
     // Act: edit UserRequest only.
     vcs.commit_write(
@@ -685,8 +689,14 @@ fn create_and_list_tag() {
     let base = seed_two_decls(&vcs);
 
     // Act
-    vcs.create_tag("proj", "repo", "v1.0.0", &RefSpec::commit(base.clone()), "alice")
-        .unwrap();
+    vcs.create_tag(
+        "proj",
+        "repo",
+        "v1.0.0",
+        &RefSpec::commit(base.clone()),
+        "alice",
+    )
+    .unwrap();
 
     // Assert
     let tags = vcs.list_tags("proj", "repo").unwrap();
@@ -700,8 +710,14 @@ fn merge_disjoint_decl_edits_is_clean() {
     // Arrange: base on main, branch off, each side edits a different decl.
     let vcs = mem_vcs();
     let base = seed_two_decls(&vcs);
-    vcs.create_bookmark("proj", "repo", "feat", &RefSpec::commit(base.clone()), "alice")
-        .unwrap();
+    vcs.create_bookmark(
+        "proj",
+        "repo",
+        "feat",
+        &RefSpec::commit(base.clone()),
+        "alice",
+    )
+    .unwrap();
     // main edits UserRequest
     vcs.commit_write(
         "proj",
@@ -735,8 +751,14 @@ fn merge_disjoint_decl_edits_is_clean() {
     let schema = vcs
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
-    assert_eq!(schema.decls.get("UserRequest").unwrap().as_bytes(), b"main req");
-    assert_eq!(schema.decls.get("UserStatus").unwrap().as_bytes(), b"feat status");
+    assert_eq!(
+        schema.decls.get("UserRequest").unwrap().as_bytes(),
+        b"main req"
+    );
+    assert_eq!(
+        schema.decls.get("UserStatus").unwrap().as_bytes(),
+        b"feat status"
+    );
 }
 
 #[test]
@@ -744,8 +766,14 @@ fn merge_same_decl_edits_produces_conflict_not_error() {
     // Arrange
     let vcs = mem_vcs();
     let base = seed_two_decls(&vcs);
-    vcs.create_bookmark("proj", "repo", "feat", &RefSpec::commit(base.clone()), "alice")
-        .unwrap();
+    vcs.create_bookmark(
+        "proj",
+        "repo",
+        "feat",
+        &RefSpec::commit(base.clone()),
+        "alice",
+    )
+    .unwrap();
     vcs.commit_write(
         "proj",
         "repo",
@@ -963,7 +991,8 @@ fn delete_bookmark_removes_it_from_the_view() {
         .unwrap();
 
     // Act
-    vcs.delete_bookmark("proj", "repo", "feature/y", "alice").unwrap();
+    vcs.delete_bookmark("proj", "repo", "feature/y", "alice")
+        .unwrap();
 
     // Assert
     let names: Vec<String> = vcs

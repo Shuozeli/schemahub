@@ -25,7 +25,14 @@ async fn smoke_create_and_pull_protobuf() {
         "k1",
     )
     .await;
-    let pulled = pull_source(&mut c.explore, "demo", "api", "ping.proto", vref_branch("main")).await;
+    let pulled = pull_source(
+        &mut c.explore,
+        "demo",
+        "api",
+        "ping.proto",
+        vref_branch("main"),
+    )
+    .await;
 
     // Assert
     assert!(pulled.contains("message Ping"), "got:\n{pulled}");

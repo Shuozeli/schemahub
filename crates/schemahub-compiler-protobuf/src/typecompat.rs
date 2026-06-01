@@ -83,12 +83,18 @@ pub fn classify_type_change_typed(
         ("enum", "int64"),
         ("enum", "uint64"),
     ];
-    const BACKWARD_ONLY: &[(&str, &str)] =
-        &[("int64", "int32"), ("sint64", "sint32"), ("uint64", "uint32")];
+    const BACKWARD_ONLY: &[(&str, &str)] = &[
+        ("int64", "int32"),
+        ("sint64", "sint32"),
+        ("uint64", "uint32"),
+    ];
     if FULLY.iter().any(|(a, b)| from_key == *a && to_key == *b) {
         return TypeChangeCompat::FullyCompat;
     }
-    if BACKWARD_ONLY.iter().any(|(a, b)| from_key == *a && to_key == *b) {
+    if BACKWARD_ONLY
+        .iter()
+        .any(|(a, b)| from_key == *a && to_key == *b)
+    {
         return TypeChangeCompat::BackwardOnly;
     }
     TypeChangeCompat::Breaking
@@ -121,9 +127,9 @@ pub fn type_change_allowed_typed(
         ));
     }
     match classify_type_change_typed(from, from_ty, to, to_ty) {
-        TypeChangeCompat::Breaking => {
-            Err(format!("type change '{from}'→'{to}' is not in the allowlist"))
-        }
+        TypeChangeCompat::Breaking => Err(format!(
+            "type change '{from}'→'{to}' is not in the allowlist"
+        )),
         _ => Ok(()),
     }
 }

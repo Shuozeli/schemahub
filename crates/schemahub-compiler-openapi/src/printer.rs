@@ -321,7 +321,11 @@ fn print_media_type_entry(entry: &MediaTypeEntry, indent: usize) -> String {
 fn print_schema_or_ref(s: &SchemaOrRef, indent: usize) -> String {
     match s {
         SchemaOrRef::Ref(r) => {
-            format!("{}$ref: '#/components/schemas/{}'\n", sp(indent), r.local_name)
+            format!(
+                "{}$ref: '#/components/schemas/{}'\n",
+                sp(indent),
+                r.local_name
+            )
         }
         SchemaOrRef::Inline(def) => print_schema_def(def, indent),
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use schemahub_types::{
-    Compiler, CompatibilityDirection, CompatibilityRules, ConflictSides, DeclBlob, DeclChange,
+    CompatibilityDirection, CompatibilityRules, Compiler, ConflictSides, DeclBlob, DeclChange,
     DeclKind, Language, Mutation, SchemaClosure, SchemaObjects, SchemaPath,
 };
 
@@ -135,7 +135,10 @@ fn to_objects(parsed: ParsedSchema) -> SchemaObjects {
     for (k, v) in parsed.decls {
         decls.insert(k, v);
     }
-    SchemaObjects { meta: parsed.meta, decls }
+    SchemaObjects {
+        meta: parsed.meta,
+        decls,
+    }
 }
 
 fn make_mutation(op: &OpenApiOp) -> Mutation {
@@ -159,8 +162,15 @@ fn parse_minimal_produces_metadata_and_path_decl() {
     // Assert
     assert!(!parsed.meta.is_empty(), "metadata blob must be populated");
     let keys: Vec<&str> = parsed.decls.iter().map(|(k, _)| k.as_str()).collect();
-    assert!(keys.contains(&"path:/users"), "missing path:/users: {keys:?}");
-    assert_eq!(keys.len(), 1, "minimal doc should have exactly one decl: {keys:?}");
+    assert!(
+        keys.contains(&"path:/users"),
+        "missing path:/users: {keys:?}"
+    );
+    assert_eq!(
+        keys.len(),
+        1,
+        "minimal doc should have exactly one decl: {keys:?}"
+    );
 }
 
 #[test]
@@ -223,7 +233,10 @@ fn round_trip_full_document_is_equivalent() {
     let keys_b: Vec<&String> = objects_b.decls.keys().collect();
     assert_eq!(keys_a, keys_b, "decl keys must round-trip");
     for (k, blob_a) in &objects_a.decls {
-        let blob_b = objects_b.decls.get(k).expect("decl present after round-trip");
+        let blob_b = objects_b
+            .decls
+            .get(k)
+            .expect("decl present after round-trip");
         assert_eq!(
             blob_a.as_bytes(),
             blob_b.as_bytes(),
@@ -242,11 +255,26 @@ fn round_trip_preserves_refs_request_body_and_responses() {
     let printed = compiler.print(&objects).unwrap();
 
     // Assert: canonical $ref forms and key structures survive.
-    assert!(printed.contains("$ref: '#/components/schemas/User'"), "schema $ref\n{printed}");
-    assert!(printed.contains("$ref: '#/components/responses/NotFound'"), "response $ref\n{printed}");
-    assert!(printed.contains("requestBody:"), "requestBody in operation\n{printed}");
-    assert!(printed.contains("\"404\":"), "status code quoted\n{printed}");
-    assert!(printed.contains("- name: id"), "path param inline form\n{printed}");
+    assert!(
+        printed.contains("$ref: '#/components/schemas/User'"),
+        "schema $ref\n{printed}"
+    );
+    assert!(
+        printed.contains("$ref: '#/components/responses/NotFound'"),
+        "response $ref\n{printed}"
+    );
+    assert!(
+        printed.contains("requestBody:"),
+        "requestBody in operation\n{printed}"
+    );
+    assert!(
+        printed.contains("\"404\":"),
+        "status code quoted\n{printed}"
+    );
+    assert!(
+        printed.contains("- name: id"),
+        "path param inline form\n{printed}"
+    );
 }
 
 #[test]
@@ -260,7 +288,10 @@ fn print_minimal_omits_absent_sections() {
 
     // Assert
     assert!(printed.contains("paths:"), "paths present\n{printed}");
-    assert!(!printed.contains("components:"), "components must be absent\n{printed}");
+    assert!(
+        !printed.contains("components:"),
+        "components must be absent\n{printed}"
+    );
 }
 
 // ── P1: read / explore ────────────────────────────────────────────────────────
@@ -308,8 +339,14 @@ fn decl_detail_renders_named_declaration() {
 
     // Assert
     let text = std::str::from_utf8(detail.as_bytes()).unwrap();
-    assert!(text.contains("/users"), "detail should mention path\n{text}");
-    assert!(text.contains("operationId: listUsers"), "detail should mention op\n{text}");
+    assert!(
+        text.contains("/users"),
+        "detail should mention path\n{text}"
+    );
+    assert!(
+        text.contains("operationId: listUsers"),
+        "detail should mention op\n{text}"
+    );
 }
 
 #[test]
@@ -322,7 +359,10 @@ fn imports_on_metadata_is_empty() {
     let imports = compiler.imports(&parsed.meta).unwrap();
 
     // Assert: external $ref imports are v2-modeled; none at document level.
-    assert!(imports.is_empty(), "expected no document-level imports: {imports:?}");
+    assert!(
+        imports.is_empty(),
+        "expected no document-level imports: {imports:?}"
+    );
 }
 
 #[test]
@@ -337,7 +377,10 @@ fn type_refs_lists_local_schema_references() {
 
     // Assert: /users references schema:User (response + requestBody).
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"schema:User"), "expected schema:User ref: {names:?}");
+    assert!(
+        names.contains(&"schema:User"),
+        "expected schema:User ref: {names:?}"
+    );
 }
 
 #[test]
@@ -352,7 +395,10 @@ fn type_refs_resolves_response_ref() {
 
     // Assert: /users/{id} GET 404 references response:NotFound.
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"response:NotFound"), "expected response:NotFound: {names:?}");
+    assert!(
+        names.contains(&"response:NotFound"),
+        "expected response:NotFound: {names:?}"
+    );
 }
 
 // ── P1: diff ──────────────────────────────────────────────────────────────────
@@ -391,10 +437,16 @@ fn diff_decl_detects_modified_path() {
 // ── P2: compatibility ─────────────────────────────────────────────────────────
 
 fn backward() -> CompatibilityRules {
-    CompatibilityRules { direction: CompatibilityDirection::Backward, disabled: false }
+    CompatibilityRules {
+        direction: CompatibilityDirection::Backward,
+        disabled: false,
+    }
 }
 fn forward() -> CompatibilityRules {
-    CompatibilityRules { direction: CompatibilityDirection::Forward, disabled: false }
+    CompatibilityRules {
+        direction: CompatibilityDirection::Forward,
+        disabled: false,
+    }
 }
 
 /// Build a single path-item DeclBlob from a one-path OpenAPI document.
@@ -434,7 +486,10 @@ paths:
     let result = compiler.check_compatibility(&old, &new, &forward());
 
     // Assert
-    assert!(result.is_ok(), "adding optional parameter must be compatible: {result:?}");
+    assert!(
+        result.is_ok(),
+        "adding optional parameter must be compatible: {result:?}"
+    );
 }
 
 #[test]
@@ -467,7 +522,10 @@ paths:
     let result = compiler.check_compatibility(&old, &new, &forward());
 
     // Assert
-    assert!(result.is_err(), "adding required parameter must break FORWARD");
+    assert!(
+        result.is_err(),
+        "adding required parameter must break FORWARD"
+    );
 }
 
 #[test]
@@ -564,14 +622,25 @@ components:
         id:
           type: integer
 "#;
-    let old = to_objects(compiler.parse(v1).unwrap()).decls.get("schema:User").cloned().unwrap();
-    let new = to_objects(compiler.parse(v2).unwrap()).decls.get("schema:User").cloned().unwrap();
+    let old = to_objects(compiler.parse(v1).unwrap())
+        .decls
+        .get("schema:User")
+        .cloned()
+        .unwrap();
+    let new = to_objects(compiler.parse(v2).unwrap())
+        .decls
+        .get("schema:User")
+        .cloned()
+        .unwrap();
 
     // Act
     let result = compiler.check_compatibility(&old, &new, &backward());
 
     // Assert
-    assert!(result.is_err(), "changing a property type must break compatibility");
+    assert!(
+        result.is_err(),
+        "changing a property type must break compatibility"
+    );
 }
 
 #[test]
@@ -598,7 +667,10 @@ paths:
 "#;
     let old = path_blob(MINIMAL, "path:/users");
     let new = path_blob(with_post, "path:/users");
-    let rules = CompatibilityRules { direction: CompatibilityDirection::Disabled, disabled: true };
+    let rules = CompatibilityRules {
+        direction: CompatibilityDirection::Disabled,
+        disabled: true,
+    };
 
     // Act
     let result = compiler.check_compatibility(&old, &new, &rules);
@@ -614,16 +686,26 @@ fn mutation_push_document_replaces_decls() {
     // Arrange
     let compiler = OpenApiCompiler::new();
     let objects = to_objects(compiler.parse(MINIMAL).unwrap());
-    let op = OpenApiOp::PushDocument { source: FULL.to_string() };
+    let op = OpenApiOp::PushDocument {
+        source: FULL.to_string(),
+    };
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &make_mutation(&op)).unwrap();
+    let effect = compiler
+        .apply_mutation(&objects, &make_mutation(&op))
+        .unwrap();
 
     // Assert: replaces meta + upserts the full decl set.
     assert!(effect.meta.is_some(), "PushDocument must produce new meta");
     let upsert_keys: Vec<&str> = effect.upserts.iter().map(|(k, _)| k.as_str()).collect();
-    assert!(upsert_keys.contains(&"schema:User"), "expected schema:User upsert: {upsert_keys:?}");
-    assert!(upsert_keys.contains(&"path:/users/{id}"), "expected new path: {upsert_keys:?}");
+    assert!(
+        upsert_keys.contains(&"schema:User"),
+        "expected schema:User upsert: {upsert_keys:?}"
+    );
+    assert!(
+        upsert_keys.contains(&"path:/users/{id}"),
+        "expected new path: {upsert_keys:?}"
+    );
 }
 
 #[test]
@@ -638,7 +720,9 @@ fn mutation_add_path_upserts_new_path() {
     };
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &make_mutation(&op)).unwrap();
+    let effect = compiler
+        .apply_mutation(&objects, &make_mutation(&op))
+        .unwrap();
 
     // Assert
     assert_eq!(effect.upserts.len(), 1);
@@ -668,10 +752,14 @@ fn mutation_remove_path_emits_remove() {
     // Arrange
     let compiler = OpenApiCompiler::new();
     let objects = to_objects(compiler.parse(MINIMAL).unwrap());
-    let op = OpenApiOp::RemovePath { path_pattern: "/users".into() };
+    let op = OpenApiOp::RemovePath {
+        path_pattern: "/users".into(),
+    };
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &make_mutation(&op)).unwrap();
+    let effect = compiler
+        .apply_mutation(&objects, &make_mutation(&op))
+        .unwrap();
 
     // Assert
     assert_eq!(effect.removes, vec!["path:/users".to_string()]);
@@ -682,7 +770,9 @@ fn mutation_remove_path_not_found_errors() {
     // Arrange
     let compiler = OpenApiCompiler::new();
     let objects = to_objects(compiler.parse(MINIMAL).unwrap());
-    let op = OpenApiOp::RemovePath { path_pattern: "/missing".into() };
+    let op = OpenApiOp::RemovePath {
+        path_pattern: "/missing".into(),
+    };
 
     // Act
     let result = compiler.apply_mutation(&objects, &make_mutation(&op));
@@ -705,7 +795,9 @@ fn mutation_add_operation_appends_method() {
     };
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &make_mutation(&op)).unwrap();
+    let effect = compiler
+        .apply_mutation(&objects, &make_mutation(&op))
+        .unwrap();
 
     // Assert: the path:/users blob is upserted with a POST operation.
     let (key, blob) = &effect.upserts[0];
@@ -751,7 +843,9 @@ fn mutation_add_component_schema_upserts() {
     };
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &make_mutation(&op)).unwrap();
+    let effect = compiler
+        .apply_mutation(&objects, &make_mutation(&op))
+        .unwrap();
 
     // Assert
     assert_eq!(effect.upserts[0].0, "schema:Order");
@@ -847,7 +941,10 @@ fn validate_resolution_accepts_valid_decl() {
     let result = compiler.validate_resolution(&blob);
 
     // Assert
-    assert!(result.is_ok(), "a valid decl blob must validate: {result:?}");
+    assert!(
+        result.is_ok(),
+        "a valid decl blob must validate: {result:?}"
+    );
 }
 
 #[test]
@@ -878,11 +975,17 @@ fn generate_descriptors_emits_resolved_yaml() {
 
     // Assert
     let yaml = std::str::from_utf8(&bytes).unwrap();
-    assert!(yaml.contains("openapi:"), "descriptor must be a full document\n{yaml}");
+    assert!(
+        yaml.contains("openapi:"),
+        "descriptor must be a full document\n{yaml}"
+    );
     assert!(yaml.contains("components:"), "components section\n{yaml}");
     // Re-parse the descriptor to confirm it is a valid OpenAPI document.
     let reparsed = compiler.parse(yaml);
-    assert!(reparsed.is_ok(), "generated descriptor must re-parse: {reparsed:?}");
+    assert!(
+        reparsed.is_ok(),
+        "generated descriptor must re-parse: {reparsed:?}"
+    );
 }
 
 #[test]
@@ -896,7 +999,10 @@ fn generate_code_is_unsupported() {
 
     // Assert
     assert!(
-        matches!(result, Err(schemahub_types::CodegenError::UnsupportedLanguage(_))),
+        matches!(
+            result,
+            Err(schemahub_types::CodegenError::UnsupportedLanguage(_))
+        ),
         "OpenAPI codegen must be unsupported"
     );
 }

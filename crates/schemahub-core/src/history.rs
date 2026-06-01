@@ -47,7 +47,13 @@ impl Core {
 
     /// Undo the last operation — `vcs.undo`. Returns the id of the operation that
     /// was undone. Requires `Write` (it mutates the repo's view).
-    pub fn undo(&self, project: &str, repo: &str, author: &str, token: Option<&str>) -> CoreResult<String> {
+    pub fn undo(
+        &self,
+        project: &str,
+        repo: &str,
+        author: &str,
+        token: Option<&str>,
+    ) -> CoreResult<String> {
         authorize(
             self.authn.as_ref(),
             self.authz.as_ref(),
@@ -138,7 +144,9 @@ impl Core {
                         changes.push(compiler.diff_decl(o, n)?);
                     }
                 }
-                (None, Some(_)) => changes.push(DeclChange::DeclarationAdded { name: name.clone() }),
+                (None, Some(_)) => {
+                    changes.push(DeclChange::DeclarationAdded { name: name.clone() })
+                }
                 (Some(_), None) => {
                     changes.push(DeclChange::DeclarationRemoved { name: name.clone() })
                 }

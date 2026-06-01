@@ -13,7 +13,11 @@ fn build_set(closure: &SchemaClosure) -> Result<FileDescriptorSet, String> {
     // Deterministic order by schema path.
     let mut entries: Vec<_> = closure.entries.iter().collect();
     entries.sort_by(|a, b| {
-        (&a.0.project, &a.0.repo, &a.0.schema_name).cmp(&(&b.0.project, &b.0.repo, &b.0.schema_name))
+        (&a.0.project, &a.0.repo, &a.0.schema_name).cmp(&(
+            &b.0.project,
+            &b.0.repo,
+            &b.0.schema_name,
+        ))
     });
 
     let mut set = FileDescriptorSet::default();

@@ -77,11 +77,8 @@ pub fn generate_code(closure: &SchemaClosure, lang: Language) -> Result<String, 
     })?;
 
     match lang {
-        Language::Rust => {
-            generate_rust(&resolved, &CodeGenOptions::default()).map_err(|e| {
-                CodegenError::Other(e.to_string())
-            })
-        }
+        Language::Rust => generate_rust(&resolved, &CodeGenOptions::default())
+            .map_err(|e| CodegenError::Other(e.to_string())),
         Language::TypeScript => generate_typescript(&resolved, &TsCodeGenOptions::default())
             .map_err(|e| CodegenError::Other(e.to_string())),
         // Dart is supported by the sibling but not exposed in `Language`; reachable

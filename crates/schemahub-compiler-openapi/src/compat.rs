@@ -22,9 +22,7 @@
 //! | Schema property type changed    |   FAIL   |   FAIL  | FAIL |
 
 use schemahub_types::blob::DeclBlob;
-use schemahub_types::compat::{
-    CompatibilityDirection, CompatibilityRules, CompatibilityViolation,
-};
+use schemahub_types::compat::{CompatibilityDirection, CompatibilityRules, CompatibilityViolation};
 
 use crate::ast::{
     ComponentSchemaBlob, DeclPayload, HttpMethod, JsonSchemaDef, OperationDef, ParameterDef,
@@ -119,7 +117,10 @@ fn check_path_item(
                 v.push(CompatibilityViolation {
                     declaration_name: name.to_string(),
                     field_name: Some(m.to_str().to_string()),
-                    message: format!("adding operation '{}' breaks {dir:?} compatibility", m.to_str()),
+                    message: format!(
+                        "adding operation '{}' breaks {dir:?} compatibility",
+                        m.to_str()
+                    ),
                 });
             }
         }
@@ -131,7 +132,10 @@ fn check_path_item(
                 v.push(CompatibilityViolation {
                     declaration_name: name.to_string(),
                     field_name: Some(m.to_str().to_string()),
-                    message: format!("removing operation '{}' breaks {dir:?} compatibility", m.to_str()),
+                    message: format!(
+                        "removing operation '{}' breaks {dir:?} compatibility",
+                        m.to_str()
+                    ),
                 });
             }
         }

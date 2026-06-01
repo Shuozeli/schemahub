@@ -7,9 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use protoc_rs_schema::{
-    DescriptorProto, EnumDescriptorProto, FileDescriptorProto,
-};
+use protoc_rs_schema::{DescriptorProto, EnumDescriptorProto, FileDescriptorProto};
 use schemahub_types::{Compiler, SchemaObjects};
 
 use schemahub_compiler_protobuf::ProtobufCompiler;
@@ -238,7 +236,10 @@ fn roundtrip_preserves_map_fields() {
     let reparsed = parse_fd(&printed);
 
     // Assert
-    assert!(printed.contains("map<string, int32> m = 1"), "got:\n{printed}");
+    assert!(
+        printed.contains("map<string, int32> m = 1"),
+        "got:\n{printed}"
+    );
     // Map entry remains a synthetic nested message.
     assert_eq!(reparsed.message_type[0].nested_type.len(), 1);
 }
@@ -382,10 +383,22 @@ message M {
     assert!(printed.contains("required int32 a"), "got:\n{printed}");
     assert!(printed.contains("optional string s"), "got:\n{printed}");
     // ...and the defaults survive (the actual bug: these are dropped).
-    assert!(printed.contains("default = \"hi\""), "string default lost:\n{printed}");
-    assert!(printed.contains("default = 7"), "int default lost:\n{printed}");
-    assert!(printed.contains("default = true"), "bool default lost:\n{printed}");
-    assert!(printed.contains("default = E_ON"), "enum default lost:\n{printed}");
+    assert!(
+        printed.contains("default = \"hi\""),
+        "string default lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("default = 7"),
+        "int default lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("default = true"),
+        "bool default lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("default = E_ON"),
+        "enum default lost:\n{printed}"
+    );
     // And it should be a full semantic round-trip.
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
@@ -427,7 +440,10 @@ message M {
     let printed = parse_print(source);
 
     // Assert: the `group` keyword should survive (it does not — bug).
-    assert!(printed.contains("group Result"), "group form lost:\n{printed}");
+    assert!(
+        printed.contains("group Result"),
+        "group form lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -452,8 +468,14 @@ extend Foo {
     let printed = parse_print(source);
 
     // Assert: both the extensions range and the extend block should survive.
-    assert!(printed.contains("extensions 100 to 200"), "extensions range lost:\n{printed}");
-    assert!(printed.contains("extend Foo"), "extend block lost:\n{printed}");
+    assert!(
+        printed.contains("extensions 100 to 200"),
+        "extensions range lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("extend Foo"),
+        "extend block lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -473,8 +495,14 @@ message M {
     let printed = parse_print(source);
 
     // Assert: the `edition` line is preserved (not downgraded to `syntax`).
-    assert!(printed.contains("edition = \"2023\""), "edition line lost:\n{printed}");
-    assert!(!printed.contains("syntax ="), "edition downgraded to syntax:\n{printed}");
+    assert!(
+        printed.contains("edition = \"2023\""),
+        "edition line lost:\n{printed}"
+    );
+    assert!(
+        !printed.contains("syntax ="),
+        "edition downgraded to syntax:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -499,10 +527,19 @@ enum Status {
     let printed = parse_print(source);
 
     // Assert: allow_alias, both aliased value names, and reserved survive.
-    assert!(printed.contains("allow_alias = true"), "allow_alias lost:\n{printed}");
+    assert!(
+        printed.contains("allow_alias = true"),
+        "allow_alias lost:\n{printed}"
+    );
     assert!(printed.contains("STATUS_ACTIVE = 1"), "got:\n{printed}");
-    assert!(printed.contains("STATUS_RUNNING = 1"), "alias value lost:\n{printed}");
-    assert!(printed.contains("reserved \"OLD\""), "enum reserved name lost:\n{printed}");
+    assert!(
+        printed.contains("STATUS_RUNNING = 1"),
+        "alias value lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("reserved \"OLD\""),
+        "enum reserved name lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -523,7 +560,10 @@ message M {
     let printed = parse_print(source);
 
     // Assert
-    assert!(printed.contains("option deprecated = true"), "message option lost:\n{printed}");
+    assert!(
+        printed.contains("option deprecated = true"),
+        "message option lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -542,7 +582,10 @@ enum E {
     let printed = parse_print(source);
 
     // Assert
-    assert!(printed.contains("option deprecated = true"), "enum option lost:\n{printed}");
+    assert!(
+        printed.contains("option deprecated = true"),
+        "enum option lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -579,7 +622,10 @@ message M {
 
     // Assert: both options should survive; json_name is dropped (bug).
     assert!(printed.contains("deprecated = true"), "got:\n{printed}");
-    assert!(printed.contains("json_name = \"x\""), "json_name option lost:\n{printed}");
+    assert!(
+        printed.contains("json_name = \"x\""),
+        "json_name option lost:\n{printed}"
+    );
 }
 
 // --- 6. deep + recursive nesting ----------------------------------------------
@@ -710,10 +756,22 @@ message M {
     let printed = parse_print(source);
 
     // Assert: both print as `map<...>`, NOT as the synthetic entry message.
-    assert!(printed.contains("map<string, Address> by_id = 1"), "got:\n{printed}");
-    assert!(printed.contains("map<int32, int32> counts = 2"), "got:\n{printed}");
-    assert!(!printed.contains("ByIdEntry"), "synthetic map entry leaked:\n{printed}");
-    assert!(!printed.contains("CountsEntry"), "synthetic map entry leaked:\n{printed}");
+    assert!(
+        printed.contains("map<string, Address> by_id = 1"),
+        "got:\n{printed}"
+    );
+    assert!(
+        printed.contains("map<int32, int32> counts = 2"),
+        "got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("ByIdEntry"),
+        "synthetic map entry leaked:\n{printed}"
+    );
+    assert!(
+        !printed.contains("CountsEntry"),
+        "synthetic map entry leaked:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -737,7 +795,10 @@ message M {
     // Assert: the printer materializes `max` as the numeric max field number
     // (536870911); this still reparses to the SAME reserved range, so the
     // round-trip is semantically faithful.
-    assert!(printed.contains("reserved 100 to"), "reserved-to-max lost:\n{printed}");
+    assert!(
+        printed.contains("reserved 100 to"),
+        "reserved-to-max lost:\n{printed}"
+    );
     let m = &reparsed.message_type[0];
     assert!(
         m.reserved_range
@@ -767,8 +828,14 @@ message M {
     let printed = parse_print(source);
 
     // Assert: leading comments on the message and the field are preserved.
-    assert!(printed.contains("// leading comment on M"), "msg comment lost:\n{printed}");
-    assert!(printed.contains("// leading comment on field a"), "field comment lost:\n{printed}");
+    assert!(
+        printed.contains("// leading comment on M"),
+        "msg comment lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("// leading comment on field a"),
+        "field comment lost:\n{printed}"
+    );
 }
 
 #[test]
@@ -814,7 +881,10 @@ message M {
 
     // Assert: BOTH the leading and the detached comment now survive (the printer
     // emits `leading_detached_comments` as a separate block before the decl).
-    assert!(printed.contains("// leading comment on M"), "leading comment lost:\n{printed}");
+    assert!(
+        printed.contains("// leading comment on M"),
+        "leading comment lost:\n{printed}"
+    );
     assert!(
         printed.contains("// detached comment"),
         "detached comment dropped:\n{printed}"
@@ -844,9 +914,18 @@ message M {
 
     // Assert: the QUALIFIED names survive (the historical truncation bug turned
     // these into bare `Any`/`Duration`/`Timestamp`).
-    assert!(printed.contains("google.protobuf.Any any = 1"), "Any truncated:\n{printed}");
-    assert!(printed.contains("google.protobuf.Duration dur = 2"), "Duration truncated:\n{printed}");
-    assert!(printed.contains("google.protobuf.Timestamp ts = 3"), "Timestamp truncated:\n{printed}");
+    assert!(
+        printed.contains("google.protobuf.Any any = 1"),
+        "Any truncated:\n{printed}"
+    );
+    assert!(
+        printed.contains("google.protobuf.Duration dur = 2"),
+        "Duration truncated:\n{printed}"
+    );
+    assert!(
+        printed.contains("google.protobuf.Timestamp ts = 3"),
+        "Timestamp truncated:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }
 
@@ -888,13 +967,17 @@ fn roundtrip_enum_with_only_zero_value() {
 fn roundtrip_unicode_in_comment() {
     // Arrange: raw UTF-8 (the parser rejects `\u`-style escapes, so we use
     // literal multibyte characters) in a leading comment.
-    let source = "syntax = \"proto3\";\n\n// café 日本語 \u{1f600} emoji\nmessage M {\n  int32 a = 1;\n}\n";
+    let source =
+        "syntax = \"proto3\";\n\n// café 日本語 \u{1f600} emoji\nmessage M {\n  int32 a = 1;\n}\n";
 
     // Act
     let printed = parse_print(source);
 
     // Assert: the unicode comment survives byte-for-byte.
-    assert!(printed.contains("// café 日本語 \u{1f600} emoji"), "unicode comment lost:\n{printed}");
+    assert!(
+        printed.contains("// café 日本語 \u{1f600} emoji"),
+        "unicode comment lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &parse_fd(&printed));
 }
 
@@ -907,6 +990,9 @@ fn roundtrip_unicode_in_string_default() {
     let printed = parse_print(source);
 
     // Assert: the unicode default should survive.
-    assert!(printed.contains("default = \"héllo 日本語\""), "unicode default lost:\n{printed}");
+    assert!(
+        printed.contains("default = \"héllo 日本語\""),
+        "unicode default lost:\n{printed}"
+    );
     assert_semantically_equal(&parse_fd(source), &roundtrip_fd(source));
 }

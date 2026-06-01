@@ -14,12 +14,18 @@ pub enum Identity {
 impl Identity {
     /// Construct a User identity with no display name.
     pub fn user(id: impl Into<String>) -> Self {
-        Identity::User { id: id.into(), display: None }
+        Identity::User {
+            id: id.into(),
+            display: None,
+        }
     }
 
     /// Construct a User identity with a display name.
     pub fn user_with_display(id: impl Into<String>, display: impl Into<String>) -> Self {
-        Identity::User { id: id.into(), display: Some(display.into()) }
+        Identity::User {
+            id: id.into(),
+            display: Some(display.into()),
+        }
     }
 
     /// Return the opaque identity id when authenticated, else `None`.
@@ -49,7 +55,9 @@ pub enum Action {
 
 /// Project-scoped role. Higher values include strictly more permissions
 /// (see [`Action`] → minimum-Role mapping in `RoleBasedAuthz`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Role {
     Reader,
     Writer,
@@ -87,11 +95,17 @@ pub struct ResourcePath {
 
 impl ResourcePath {
     pub fn project(project: impl Into<String>) -> Self {
-        Self { project: project.into(), repo: None }
+        Self {
+            project: project.into(),
+            repo: None,
+        }
     }
 
     pub fn repo(project: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self { project: project.into(), repo: Some(repo.into()) }
+        Self {
+            project: project.into(),
+            repo: Some(repo.into()),
+        }
     }
 }
 
@@ -125,7 +139,12 @@ impl AuthnProvider for NoopAuthn {
 pub struct NoopAuthz;
 
 impl AuthzPolicy for NoopAuthz {
-    fn check(&self, _caller: &Identity, _action: Action, _resource: &ResourcePath) -> Result<(), AuthzError> {
+    fn check(
+        &self,
+        _caller: &Identity,
+        _action: Action,
+        _resource: &ResourcePath,
+    ) -> Result<(), AuthzError> {
         Ok(())
     }
 }

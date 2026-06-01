@@ -95,15 +95,24 @@ fn check_message(
     let decl = old.name.clone().unwrap_or_default();
     let mut v = Vec::new();
 
-    let old_by_num: HashMap<i32, &FieldDescriptorProto> =
-        old.field.iter().filter_map(|f| f.number.map(|n| (n, f))).collect();
-    let new_by_num: HashMap<i32, &FieldDescriptorProto> =
-        new.field.iter().filter_map(|f| f.number.map(|n| (n, f))).collect();
+    let old_by_num: HashMap<i32, &FieldDescriptorProto> = old
+        .field
+        .iter()
+        .filter_map(|f| f.number.map(|n| (n, f)))
+        .collect();
+    let new_by_num: HashMap<i32, &FieldDescriptorProto> = new
+        .field
+        .iter()
+        .filter_map(|f| f.number.map(|n| (n, f)))
+        .collect();
 
     // Removed fields (by number) → BACKWARD ✓, FORWARD ✗, FULL ✗.
     for (num, f) in &old_by_num {
         if !new_by_num.contains_key(num)
-            && matches!(dir, CompatibilityDirection::Forward | CompatibilityDirection::Full)
+            && matches!(
+                dir,
+                CompatibilityDirection::Forward | CompatibilityDirection::Full
+            )
         {
             v.push(CompatibilityViolation {
                 declaration_name: decl.clone(),
@@ -125,8 +134,10 @@ fn check_message(
             match classify_type_change_typed(&from, of.r#type, &to, nf.r#type) {
                 TypeChangeCompat::FullyCompat => {}
                 TypeChangeCompat::BackwardOnly => {
-                    if matches!(dir, CompatibilityDirection::Forward | CompatibilityDirection::Full)
-                    {
+                    if matches!(
+                        dir,
+                        CompatibilityDirection::Forward | CompatibilityDirection::Full
+                    ) {
                         v.push(CompatibilityViolation {
                             declaration_name: decl.clone(),
                             field_name: nf.name.clone(),
@@ -140,9 +151,7 @@ fn check_message(
                     v.push(CompatibilityViolation {
                         declaration_name: decl.clone(),
                         field_name: nf.name.clone(),
-                        message: format!(
-                            "field {num} type '{from}'→'{to}' is breaking"
-                        ),
+                        message: format!("field {num} type '{from}'→'{to}' is breaking"),
                     });
                 }
             }
@@ -202,7 +211,10 @@ fn check_enum(
     // Remove enum value → BACKWARD ✗, FORWARD ✓, FULL ✗.
     for (num, name) in &old_nums {
         if !new_nums.contains_key(num)
-            && matches!(dir, CompatibilityDirection::Backward | CompatibilityDirection::Full)
+            && matches!(
+                dir,
+                CompatibilityDirection::Backward | CompatibilityDirection::Full
+            )
         {
             v.push(CompatibilityViolation {
                 declaration_name: decl.clone(),
@@ -214,7 +226,10 @@ fn check_enum(
     // Add enum value → BACKWARD ✓, FORWARD ✗, FULL ✗.
     for (num, name) in &new_nums {
         if !old_nums.contains_key(num)
-            && matches!(dir, CompatibilityDirection::Forward | CompatibilityDirection::Full)
+            && matches!(
+                dir,
+                CompatibilityDirection::Forward | CompatibilityDirection::Full
+            )
         {
             v.push(CompatibilityViolation {
                 declaration_name: decl.clone(),
@@ -235,15 +250,24 @@ fn check_service(
 ) -> Vec<CompatibilityViolation> {
     let decl = old.name.clone().unwrap_or_default();
     let mut v = Vec::new();
-    let old_rpcs: HashMap<&str, &protoc_rs_schema::MethodDescriptorProto> =
-        old.method.iter().filter_map(|m| m.name.as_deref().map(|n| (n, m))).collect();
-    let new_rpcs: HashMap<&str, &protoc_rs_schema::MethodDescriptorProto> =
-        new.method.iter().filter_map(|m| m.name.as_deref().map(|n| (n, m))).collect();
+    let old_rpcs: HashMap<&str, &protoc_rs_schema::MethodDescriptorProto> = old
+        .method
+        .iter()
+        .filter_map(|m| m.name.as_deref().map(|n| (n, m)))
+        .collect();
+    let new_rpcs: HashMap<&str, &protoc_rs_schema::MethodDescriptorProto> = new
+        .method
+        .iter()
+        .filter_map(|m| m.name.as_deref().map(|n| (n, m)))
+        .collect();
 
     // Remove RPC → BACKWARD ✗, FORWARD ✓, FULL ✗.
     for name in old_rpcs.keys() {
         if !new_rpcs.contains_key(name)
-            && matches!(dir, CompatibilityDirection::Backward | CompatibilityDirection::Full)
+            && matches!(
+                dir,
+                CompatibilityDirection::Backward | CompatibilityDirection::Full
+            )
         {
             v.push(CompatibilityViolation {
                 declaration_name: decl.clone(),
@@ -255,7 +279,10 @@ fn check_service(
     // Add RPC → BACKWARD ✓, FORWARD ✗, FULL ✗.
     for name in new_rpcs.keys() {
         if !old_rpcs.contains_key(name)
-            && matches!(dir, CompatibilityDirection::Forward | CompatibilityDirection::Full)
+            && matches!(
+                dir,
+                CompatibilityDirection::Forward | CompatibilityDirection::Full
+            )
         {
             v.push(CompatibilityViolation {
                 declaration_name: decl.clone(),

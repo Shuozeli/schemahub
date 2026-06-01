@@ -53,8 +53,8 @@ impl Store {
     pub(crate) fn new(db: Arc<dyn ObjectDb>) -> Self {
         // jj's default config supplies empty user.name/email and operation
         // hostname/username, which is all `UserSettings` requires.
-        let settings = UserSettings::from_config(StackedConfig::with_defaults())
-            .expect("jj default settings");
+        let settings =
+            UserSettings::from_config(StackedConfig::with_defaults()).expect("jj default settings");
         let index_root = std::env::temp_dir().join(format!(
             "schemahub-vcs-index-{}",
             uuid::Uuid::new_v4().simple()
@@ -79,13 +79,20 @@ impl Store {
     pub(crate) fn loader(&self, repo_key: &str) -> VcsResult<RepoLoader> {
         let backend = DbBackend::new(self.db.clone());
         let root_commit_id = backend.root_commit_id().clone();
-        let merge_options =
-            MergeOptions::from_settings(&self.settings).map_err(|e| VcsError::Other(e.to_string()))?;
-        let jj_store = JjStore::new(Box::new(backend), Signer::from_settings(&self.settings).map_err(|e| VcsError::Other(e.to_string()))?, merge_options);
+        let merge_options = MergeOptions::from_settings(&self.settings)
+            .map_err(|e| VcsError::Other(e.to_string()))?;
+        let jj_store = JjStore::new(
+            Box::new(backend),
+            Signer::from_settings(&self.settings).map_err(|e| VcsError::Other(e.to_string()))?,
+            merge_options,
+        );
 
         let root_data = RootOperationData { root_commit_id };
-        let op_store: Arc<dyn jj_lib::op_store::OpStore> =
-            Arc::new(DbOpStore::new(self.db.clone(), repo_key.to_string(), root_data));
+        let op_store: Arc<dyn jj_lib::op_store::OpStore> = Arc::new(DbOpStore::new(
+            self.db.clone(),
+            repo_key.to_string(),
+            root_data,
+        ));
         let op_heads_store: Arc<dyn jj_lib::op_heads_store::OpHeadsStore> =
             Arc::new(DbOpHeadsStore::new(self.db.clone(), repo_key.to_string()));
 
@@ -133,7 +140,13 @@ impl Store {
 fn sanitize(repo_key: &str) -> String {
     repo_key
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

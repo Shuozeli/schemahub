@@ -147,7 +147,14 @@ fn round_trip_preserves_cross_kind_declaration_order() {
     let printed_order = ordered_decl_names(&printed);
     assert_eq!(
         printed_order,
-        vec!["Color", "Any", "Vec3", "Monster", "Weapon", "MonsterService"],
+        vec![
+            "Color",
+            "Any",
+            "Vec3",
+            "Monster",
+            "Weapon",
+            "MonsterService"
+        ],
         "cross-kind declaration order not preserved.\nprinted:\n{printed}"
     );
 }
@@ -179,7 +186,10 @@ fn round_trip_preserves_table_attributes_and_deprecated() {
         .iter()
         .find(|f| f.name.as_deref() == Some("old_field"))
         .expect("old_field present");
-    assert!(old_field.is_deprecated, "old_field should remain deprecated");
+    assert!(
+        old_field.is_deprecated,
+        "old_field should remain deprecated"
+    );
 }
 
 #[test]
@@ -242,7 +252,9 @@ fn summarize_reports_kind_and_doc() {
     let objects = parse_to_objects(SAMPLE);
 
     // Act
-    let summary = c.summarize_decl(objects.decls.get("Color").unwrap()).unwrap();
+    let summary = c
+        .summarize_decl(objects.decls.get("Color").unwrap())
+        .unwrap();
 
     // Assert
     assert_eq!(summary.name, "Color");
@@ -297,7 +309,10 @@ fn diff_reports_modification() {
 // ── P2: compatibility (one per rule row) ──────────────────────────────────────
 
 fn table_blob(src: &str, name: &str) -> DeclBlob {
-    parse_to_objects(src).decls.remove(name).expect("decl present")
+    parse_to_objects(src)
+        .decls
+        .remove(name)
+        .expect("decl present")
 }
 
 #[test]
@@ -383,7 +398,10 @@ fn compat_enum_value_add_backward_ok_full_breaks() {
     let full = c.check_compatibility(&old, &new, &CompatibilityRules::full());
 
     // Assert
-    assert!(backward.is_ok(), "add enum value is BACKWARD ok: {backward:?}");
+    assert!(
+        backward.is_ok(),
+        "add enum value is BACKWARD ok: {backward:?}"
+    );
     assert!(full.is_err(), "add enum value breaks FULL");
 }
 
@@ -554,7 +572,9 @@ fn mutation_create_rename_delete_table() {
         )
         .expect("create");
     assert_eq!(effect.upserts[0].0, "T");
-    objects.decls.insert("T".to_string(), effect.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("T".to_string(), effect.upserts[0].1.clone());
 
     // Act: rename
     let effect = c
@@ -648,7 +668,11 @@ fn mutations_batch_applies_in_order() {
     let DeclPayload::Object(obj) = payload else {
         panic!("not object")
     };
-    let b = obj.fields.iter().find(|f| f.name.as_deref() == Some("b")).unwrap();
+    let b = obj
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("b"))
+        .unwrap();
     assert!(b.is_deprecated);
 }
 
@@ -781,7 +805,10 @@ fn round_trip_preserves_fixed_size_array_field() {
 
     // Assert: the array type, element type, and fixed length all survive.
     let ty = obj.fields[0].type_.as_ref().expect("field type");
-    assert_eq!(ty.base_type, Some(flatc_rs_schema::BaseType::BASE_TYPE_ARRAY));
+    assert_eq!(
+        ty.base_type,
+        Some(flatc_rs_schema::BaseType::BASE_TYPE_ARRAY)
+    );
     assert_eq!(
         ty.element_type,
         Some(flatc_rs_schema::BaseType::BASE_TYPE_FLOAT)
@@ -820,11 +847,31 @@ fn round_trip_preserves_scalar_and_enum_field_defaults() {
     let t = object_of(&printed, "T");
 
     // Assert: each default survives in the field AST.
-    let mana = t.fields.iter().find(|f| f.name.as_deref() == Some("mana")).unwrap();
-    assert_eq!(mana.default_integer, Some(150), "int default lost:\n{printed}");
-    let speed = t.fields.iter().find(|f| f.name.as_deref() == Some("speed")).unwrap();
-    assert_eq!(speed.default_real, Some(1.5), "float default lost:\n{printed}");
-    let color = t.fields.iter().find(|f| f.name.as_deref() == Some("color")).unwrap();
+    let mana = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("mana"))
+        .unwrap();
+    assert_eq!(
+        mana.default_integer,
+        Some(150),
+        "int default lost:\n{printed}"
+    );
+    let speed = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("speed"))
+        .unwrap();
+    assert_eq!(
+        speed.default_real,
+        Some(1.5),
+        "float default lost:\n{printed}"
+    );
+    let color = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("color"))
+        .unwrap();
     assert_eq!(
         color.default_string.as_deref(),
         Some("Green"),
@@ -844,10 +891,26 @@ fn round_trip_preserves_bool_field_default_value() {
     let t = object_of(&printed, "T");
 
     // Assert: the default *values* round-trip (spelling is normalized to int).
-    let active = t.fields.iter().find(|f| f.name.as_deref() == Some("active")).unwrap();
-    assert_eq!(active.default_integer, Some(1), "true default lost:\n{printed}");
-    let flag = t.fields.iter().find(|f| f.name.as_deref() == Some("flag")).unwrap();
-    assert_eq!(flag.default_integer, Some(0), "false default lost:\n{printed}");
+    let active = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("active"))
+        .unwrap();
+    assert_eq!(
+        active.default_integer,
+        Some(1),
+        "true default lost:\n{printed}"
+    );
+    let flag = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("flag"))
+        .unwrap();
+    assert_eq!(
+        flag.default_integer,
+        Some(0),
+        "false default lost:\n{printed}"
+    );
 }
 
 #[test]
@@ -860,7 +923,11 @@ fn round_trip_preserves_key_and_explicit_field_ids() {
     let t = object_of(&printed, "T");
 
     // Assert: slot ids survive and the key attribute is retained.
-    let id_field = t.fields.iter().find(|f| f.name.as_deref() == Some("id")).unwrap();
+    let id_field = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("id"))
+        .unwrap();
     assert_eq!(id_field.id, Some(0));
     let key_present = id_field.is_key
         || id_field
@@ -869,7 +936,11 @@ fn round_trip_preserves_key_and_explicit_field_ids() {
             .map(|a| a.has("key"))
             .unwrap_or(false);
     assert!(key_present, "key attribute lost:\n{printed}");
-    let name_field = t.fields.iter().find(|f| f.name.as_deref() == Some("name")).unwrap();
+    let name_field = t
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("name"))
+        .unwrap();
     assert_eq!(name_field.id, Some(1), "explicit id lost:\n{printed}");
 }
 
@@ -884,11 +955,18 @@ fn round_trip_preserves_bit_flags_enum_attribute() {
 
     // Assert: the bit_flags attribute and all members (in order) survive.
     assert!(
-        e.attributes.as_ref().map(|a| a.has("bit_flags")).unwrap_or(false),
+        e.attributes
+            .as_ref()
+            .map(|a| a.has("bit_flags"))
+            .unwrap_or(false),
         "bit_flags attribute lost:\n{printed}"
     );
     let names: Vec<&str> = e.values.iter().filter_map(|v| v.name.as_deref()).collect();
-    assert_eq!(names, vec!["A", "B", "C"], "bit_flags members lost:\n{printed}");
+    assert_eq!(
+        names,
+        vec!["A", "B", "C"],
+        "bit_flags members lost:\n{printed}"
+    );
 }
 
 #[test]
@@ -901,8 +979,11 @@ fn round_trip_preserves_non_sequential_enum_values() {
     let e = enum_of(&printed, "E");
 
     // Assert: the exact numeric values survive.
-    let pairs: Vec<(Option<&str>, Option<i64>)> =
-        e.values.iter().map(|v| (v.name.as_deref(), v.value)).collect();
+    let pairs: Vec<(Option<&str>, Option<i64>)> = e
+        .values
+        .iter()
+        .map(|v| (v.name.as_deref(), v.value))
+        .collect();
     assert_eq!(
         pairs,
         vec![
@@ -935,7 +1016,11 @@ fn round_trip_preserves_positional_union_with_multiple_members() {
                 .or(v.name.as_deref())
         })
         .collect();
-    assert_eq!(members, vec!["A", "B", "C"], "union members lost:\n{printed}");
+    assert_eq!(
+        members,
+        vec!["A", "B", "C"],
+        "union members lost:\n{printed}"
+    );
     assert!(u.is_union, "U should remain a union");
 }
 
@@ -994,8 +1079,14 @@ fn round_trip_preserves_all_file_metadata() {
     let printed = round_trip(src);
 
     // Assert: every file-level directive is reproduced.
-    assert!(printed.contains("include \"x.fbs\""), "include lost:\n{printed}");
-    assert!(printed.contains("root_type Monster"), "root_type lost:\n{printed}");
+    assert!(
+        printed.contains("include \"x.fbs\""),
+        "include lost:\n{printed}"
+    );
+    assert!(
+        printed.contains("root_type Monster"),
+        "root_type lost:\n{printed}"
+    );
     assert!(
         printed.contains("file_identifier \"ABCD\""),
         "file_identifier lost:\n{printed}"
@@ -1022,7 +1113,11 @@ fn round_trip_preserves_custom_and_align_attribute_usage() {
 
     // Assert: the custom field attribute keeps its key and value.
     let attrs = t.fields[0].attributes.as_ref().expect("field attributes");
-    assert_eq!(attrs.get("priority"), Some("5"), "custom attr lost:\n{printed}");
+    assert_eq!(
+        attrs.get("priority"),
+        Some("5"),
+        "custom attr lost:\n{printed}"
+    );
     // And force_align survives on the struct.
     let s_attrs = s.attributes.as_ref().expect("struct attributes");
     assert_eq!(
@@ -1068,13 +1163,27 @@ fn round_trip_preserves_vector_of_tables_and_scalars() {
     let c = object_of(&printed, "C");
 
     // Assert: both vectors survive with the right element types.
-    let items = c.fields.iter().find(|f| f.name.as_deref() == Some("items")).unwrap();
+    let items = c
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("items"))
+        .unwrap();
     let items_ty = items.type_.as_ref().unwrap();
-    assert_eq!(items_ty.base_type, Some(flatc_rs_schema::BaseType::BASE_TYPE_VECTOR));
+    assert_eq!(
+        items_ty.base_type,
+        Some(flatc_rs_schema::BaseType::BASE_TYPE_VECTOR)
+    );
     assert_eq!(items_ty.unresolved_name.as_deref(), Some("Item"));
-    let nums = c.fields.iter().find(|f| f.name.as_deref() == Some("nums")).unwrap();
+    let nums = c
+        .fields
+        .iter()
+        .find(|f| f.name.as_deref() == Some("nums"))
+        .unwrap();
     let nums_ty = nums.type_.as_ref().unwrap();
-    assert_eq!(nums_ty.base_type, Some(flatc_rs_schema::BaseType::BASE_TYPE_VECTOR));
+    assert_eq!(
+        nums_ty.base_type,
+        Some(flatc_rs_schema::BaseType::BASE_TYPE_VECTOR)
+    );
     assert_eq!(
         nums_ty.element_type,
         Some(flatc_rs_schema::BaseType::BASE_TYPE_INT),
@@ -1101,7 +1210,9 @@ fn mutation_create_rename_delete_enum() {
             }),
         )
         .expect("create enum");
-    objects.decls.insert("E".to_string(), created.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("E".to_string(), created.upserts[0].1.clone());
 
     // Act: rename
     let renamed = c
@@ -1114,7 +1225,9 @@ fn mutation_create_rename_delete_enum() {
         )
         .expect("rename enum");
     objects.decls.remove("E");
-    objects.decls.insert("F".to_string(), renamed.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("F".to_string(), renamed.upserts[0].1.clone());
 
     // Act: delete
     let deleted = c
@@ -1149,7 +1262,9 @@ fn mutation_create_rename_delete_union_with_members() {
             }),
         )
         .expect("create union");
-    objects.decls.insert("U".to_string(), created.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("U".to_string(), created.upserts[0].1.clone());
 
     // Assert: a fresh union carries the synthetic NONE sentinel and is_union.
     let DeclPayload::Enum(u0) = decode_decl(&created.upserts[0].1).unwrap() else {
@@ -1169,11 +1284,16 @@ fn mutation_create_rename_delete_union_with_members() {
             }),
         )
         .expect("add union member");
-    objects.decls.insert("U".to_string(), added.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("U".to_string(), added.upserts[0].1.clone());
     let DeclPayload::Enum(u1) = decode_decl(&added.upserts[0].1).unwrap() else {
         panic!("not enum")
     };
-    assert!(u1.values.iter().any(|v| v.name.as_deref() == Some("Weapon")));
+    assert!(u1
+        .values
+        .iter()
+        .any(|v| v.name.as_deref() == Some("Weapon")));
 
     let removed = c
         .apply_mutation(
@@ -1184,7 +1304,9 @@ fn mutation_create_rename_delete_union_with_members() {
             }),
         )
         .expect("remove union member");
-    objects.decls.insert("U".to_string(), removed.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("U".to_string(), removed.upserts[0].1.clone());
 
     // Act: rename then delete the union.
     let renamed = c
@@ -1197,7 +1319,9 @@ fn mutation_create_rename_delete_union_with_members() {
         )
         .expect("rename union");
     objects.decls.remove("U");
-    objects.decls.insert("V".to_string(), renamed.upserts[0].1.clone());
+    objects
+        .decls
+        .insert("V".to_string(), renamed.upserts[0].1.clone());
     let deleted = c
         .apply_mutation(
             &objects,
@@ -1212,7 +1336,9 @@ fn mutation_create_rename_delete_union_with_members() {
         panic!("not enum")
     };
     assert!(
-        !u2.values.iter().any(|v| v.name.as_deref() == Some("Weapon")),
+        !u2.values
+            .iter()
+            .any(|v| v.name.as_deref() == Some("Weapon")),
         "member should be removed"
     );
     assert!(renamed.removes.contains(&"U".to_string()));
@@ -1282,7 +1408,10 @@ fn mutation_change_type_on_struct_field_is_rejected() {
     let result = c.apply_mutation(&objects, &op);
 
     // Assert
-    assert!(result.is_err(), "changing a struct field type must be rejected");
+    assert!(
+        result.is_err(),
+        "changing a struct field type must be rejected"
+    );
 }
 
 #[test]
@@ -1355,7 +1484,10 @@ fn compat_add_union_member_backward_ok_forward_full_break() {
     let full = c.check_compatibility(&old, &new, &CompatibilityRules::full());
 
     // Assert: add value rule — backward ok, forward & full break.
-    assert!(backward.is_ok(), "add union member is BACKWARD ok: {backward:?}");
+    assert!(
+        backward.is_ok(),
+        "add union member is BACKWARD ok: {backward:?}"
+    );
     assert!(forward.is_err(), "add union member breaks FORWARD");
     assert!(full.is_err(), "add union member breaks FULL");
 }
@@ -1381,7 +1513,10 @@ fn compat_add_field_at_end_under_each_direction() {
                 disabled: false,
             },
         );
-        assert!(result.is_ok(), "append-at-end should be ok for {dir:?}: {result:?}");
+        assert!(
+            result.is_ok(),
+            "append-at-end should be ok for {dir:?}: {result:?}"
+        );
     }
 }
 
@@ -1406,7 +1541,10 @@ fn compat_deprecate_field_under_each_direction() {
                 disabled: false,
             },
         );
-        assert!(result.is_ok(), "deprecate should be ok for {dir:?}: {result:?}");
+        assert!(
+            result.is_ok(),
+            "deprecate should be ok for {dir:?}: {result:?}"
+        );
     }
 }
 
@@ -1416,7 +1554,10 @@ fn compat_add_bit_flags_enum_value_backward_ok_forward_breaks() {
     // numeric value, so explicit values are used here to make the addition visible.
     let c = compiler();
     let old = table_blob("enum Mode : ubyte (bit_flags) { A = 1, B = 2 }", "Mode");
-    let new = table_blob("enum Mode : ubyte (bit_flags) { A = 1, B = 2, C = 4 }", "Mode");
+    let new = table_blob(
+        "enum Mode : ubyte (bit_flags) { A = 1, B = 2, C = 4 }",
+        "Mode",
+    );
 
     // Act
     let backward = c.check_compatibility(
@@ -1437,6 +1578,9 @@ fn compat_add_bit_flags_enum_value_backward_ok_forward_breaks() {
     );
 
     // Assert: add value rule applies to bit_flags enums too.
-    assert!(backward.is_ok(), "add bit_flags value is BACKWARD ok: {backward:?}");
+    assert!(
+        backward.is_ok(),
+        "add bit_flags value is BACKWARD ok: {backward:?}"
+    );
     assert!(forward.is_err(), "add bit_flags value breaks FORWARD");
 }

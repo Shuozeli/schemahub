@@ -165,9 +165,9 @@ impl Core {
             &schema.repo,
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let objs =
-            self.vcs
-                .load_schema(&schema.project, &schema.repo, &schema.schema_name, at)?;
+        let objs = self
+            .vcs
+            .load_schema(&schema.project, &schema.repo, &schema.schema_name, at)?;
         Ok(compiler.print(&objs)?)
     }
 
@@ -192,7 +192,9 @@ impl Core {
         let needle = query.to_lowercase();
         let mut hits = Vec::new();
         for schema_name in self.vcs.list_schemas(project, repo, at)? {
-            let names = self.vcs.list_declarations(project, repo, &schema_name, at)?;
+            let names = self
+                .vcs
+                .list_declarations(project, repo, &schema_name, at)?;
             for decl_name in names {
                 if decl_name.to_lowercase().contains(&needle) {
                     hits.push(SearchHit {
@@ -229,7 +231,10 @@ impl Core {
                 Ok(c) => c,
                 Err(_) => continue, // unknown format file in the repo — skip it
             };
-            for decl_name in self.vcs.list_declarations(project, repo, &schema_name, at)? {
+            for decl_name in self
+                .vcs
+                .list_declarations(project, repo, &schema_name, at)?
+            {
                 if !decl_name.to_lowercase().contains(&needle) {
                     continue;
                 }

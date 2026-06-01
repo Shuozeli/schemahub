@@ -10,7 +10,11 @@ pub struct SchemaPath {
 }
 
 impl SchemaPath {
-    pub fn new(project: impl Into<String>, repo: impl Into<String>, schema_name: impl Into<String>) -> Self {
+    pub fn new(
+        project: impl Into<String>,
+        repo: impl Into<String>,
+        schema_name: impl Into<String>,
+    ) -> Self {
         Self {
             project: project.into(),
             repo: repo.into(),

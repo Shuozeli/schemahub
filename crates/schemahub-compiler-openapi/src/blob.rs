@@ -37,7 +37,9 @@ pub fn decode_decl(blob: &DeclBlob) -> Result<OpenApiDecl, BlobError> {
 
 /// Serialize document metadata into a [`MetaBlob`].
 pub fn encode_meta(meta: &DocumentMetadataBlob) -> MetaBlob {
-    MetaBlob::new(serde_json::to_vec(meta).expect("DocumentMetadataBlob serialization is infallible"))
+    MetaBlob::new(
+        serde_json::to_vec(meta).expect("DocumentMetadataBlob serialization is infallible"),
+    )
 }
 
 /// Deserialize a [`MetaBlob`] into a [`DocumentMetadataBlob`].

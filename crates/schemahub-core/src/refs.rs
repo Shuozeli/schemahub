@@ -29,7 +29,9 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.create_bookmark(project, repo, name, from, author)?)
+        Ok(self
+            .vcs
+            .create_bookmark(project, repo, name, from, author)?)
     }
 
     /// Move a bookmark to the commit `to` resolves to.

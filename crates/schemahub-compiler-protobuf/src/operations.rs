@@ -363,7 +363,9 @@ impl ProtoOp {
             tag::ADD_RPC => ProtoOp::AddRpc(OpAddRpc::decode(p).map_err(bad)?),
             tag::REMOVE_RPC => ProtoOp::RemoveRpc(OpRemoveRpc::decode(p).map_err(bad)?),
             tag::RENAME_RPC => ProtoOp::RenameRpc(OpRenameRpc::decode(p).map_err(bad)?),
-            tag::CHANGE_RPC_TYPE => ProtoOp::ChangeRpcType(OpChangeRpcType::decode(p).map_err(bad)?),
+            tag::CHANGE_RPC_TYPE => {
+                ProtoOp::ChangeRpcType(OpChangeRpcType::decode(p).map_err(bad)?)
+            }
             tag::UPDATE_IMPORT => ProtoOp::UpdateImport(OpUpdateImport::decode(p).map_err(bad)?),
             other => {
                 return Err(MutationError::InvalidOperationBytes(format!(

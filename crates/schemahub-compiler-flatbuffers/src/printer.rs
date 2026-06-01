@@ -231,7 +231,10 @@ fn print_union_members(out: &mut String, values: &[EnumVal]) {
         // own `name` is the source-level alias. For a positional member the
         // parser sets `name == type_name`, so only `Type` is emitted; for a
         // named member (`alias: Type`) the two differ and the alias is preserved.
-        let type_name = val.union_type.as_ref().and_then(|t| t.unresolved_name.clone());
+        let type_name = val
+            .union_type
+            .as_ref()
+            .and_then(|t| t.unresolved_name.clone());
         let alias = val.name.clone();
         match (alias, type_name) {
             (Some(alias), Some(type_name)) if alias != type_name => {

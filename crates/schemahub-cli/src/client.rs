@@ -8,4 +8,3 @@ pub async fn build_channel(server: &str) -> anyhow::Result<Channel> {
         .await
         .context("connecting to server")
 }
-

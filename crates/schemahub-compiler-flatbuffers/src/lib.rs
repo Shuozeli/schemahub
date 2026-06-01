@@ -25,7 +25,7 @@ pub use mutations::FbsOp;
 use bytes::Bytes;
 
 use schemahub_types::{
-    CodegenError, Compiler, CompatibilityRules, CompatibilityViolation, ConflictError,
+    CodegenError, CompatibilityRules, CompatibilityViolation, Compiler, ConflictError,
     ConflictSides, DeclBlob, DeclChange, DeclDetail, DeclSummary, DescriptorError, DiffError,
     Import, Language, MetaBlob, Mutation, MutationEffect, MutationError, ParseError, ParsedSchema,
     PrintError, ReadError, SchemaClosure, SchemaObjects, TypeRef,
@@ -58,7 +58,8 @@ impl Compiler for FlatBuffersCompiler {
         // (from `meta.decl_order`), then the trailing root_type. `schema.decls`
         // is a `BTreeMap` (alphabetical); without the recorded order, `.fbs`
         // declarations round-trip sorted by name instead of as written.
-        let meta = decode_meta(&schema.meta).map_err(|e| PrintError::MalformedBlob(e.to_string()))?;
+        let meta =
+            decode_meta(&schema.meta).map_err(|e| PrintError::MalformedBlob(e.to_string()))?;
         let mut out = print_meta_header(&meta);
 
         // Names in recorded source order first; any remaining (e.g. added by a

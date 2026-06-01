@@ -109,8 +109,14 @@ fn remove_field_auto_reserves_number_and_name() {
 
     // Assert
     let printed = print_with(&compiler, &objects, &effect);
-    assert!(printed.contains("reserved 1;"), "number reserved; got:\n{printed}");
-    assert!(printed.contains("reserved \"a\""), "name reserved; got:\n{printed}");
+    assert!(
+        printed.contains("reserved 1;"),
+        "number reserved; got:\n{printed}"
+    );
+    assert!(
+        printed.contains("reserved \"a\""),
+        "name reserved; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -251,7 +257,10 @@ fn rules(direction: CompatibilityDirection) -> CompatibilityRules {
 fn add_optional_field_is_full_compatible() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
     let new = decl(
         &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; string b = 2; }\n"),
         "M",
@@ -261,7 +270,10 @@ fn add_optional_field_is_full_compatible() {
     let result = compiler.check_compatibility(&old, &new, &full());
 
     // Assert
-    assert!(result.is_ok(), "adding a field is FULL-compatible: {result:?}");
+    assert!(
+        result.is_ok(),
+        "adding a field is FULL-compatible: {result:?}"
+    );
 }
 
 #[test]
@@ -272,10 +284,14 @@ fn remove_field_is_backward_only() {
         &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; }\n"),
         "M",
     );
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
 
     // Act
-    let backward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
+    let backward =
+        compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
     let forward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Forward));
     let fulls = compiler.check_compatibility(&old, &new, &full());
 
@@ -289,15 +305,25 @@ fn remove_field_is_backward_only() {
 fn add_enum_value_is_backward_only() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"), "E");
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"), "E");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"),
+        "E",
+    );
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"),
+        "E",
+    );
 
     // Act
-    let backward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
+    let backward =
+        compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
     let forward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Forward));
 
     // Assert
-    assert!(backward.is_ok(), "adding enum value is BACKWARD-ok: {backward:?}");
+    assert!(
+        backward.is_ok(),
+        "adding enum value is BACKWARD-ok: {backward:?}"
+    );
     assert!(forward.is_err(), "adding enum value breaks FORWARD");
 }
 
@@ -305,28 +331,46 @@ fn add_enum_value_is_backward_only() {
 fn int32_to_int64_is_full_compatible() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int64 a = 1; }\n"), "M");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int64 a = 1; }\n"),
+        "M",
+    );
 
     // Act
     let result = compiler.check_compatibility(&old, &new, &full());
 
     // Assert
-    assert!(result.is_ok(), "int32->int64 is FULL-compatible: {result:?}");
+    assert!(
+        result.is_ok(),
+        "int32->int64 is FULL-compatible: {result:?}"
+    );
 }
 
 #[test]
 fn int_to_string_crosses_wire_type_and_breaks() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { string a = 1; }\n"), "M");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { string a = 1; }\n"),
+        "M",
+    );
 
     // Act
     let result = compiler.check_compatibility(&old, &new, &full());
 
     // Assert
-    assert!(result.is_err(), "int32->string crosses wire type, must break");
+    assert!(
+        result.is_err(),
+        "int32->string crosses wire type, must break"
+    );
 }
 
 #[test]
@@ -347,7 +391,8 @@ fn add_rpc_is_backward_only() {
     );
 
     // Act
-    let backward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
+    let backward =
+        compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Backward));
     let forward = compiler.check_compatibility(&old, &new, &rules(CompatibilityDirection::Forward));
 
     // Assert
@@ -378,7 +423,10 @@ fn disabled_rules_skip_all_checks() {
 fn diff_reports_modified_with_detail() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
     let new = decl(
         &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; }\n"),
         "M",
@@ -404,7 +452,10 @@ fn diff_reports_modified_with_detail() {
 fn render_conflict_shows_all_sides() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let base = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let base = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
     let ours = decl(
         &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; }\n"),
         "M",
@@ -430,7 +481,10 @@ fn render_conflict_shows_all_sides() {
 fn validate_resolution_accepts_valid_decl() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let resolved = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let resolved = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
 
     // Act
     let result = compiler.validate_resolution(&resolved);
@@ -458,16 +512,17 @@ fn validate_resolution_rejects_garbage() {
 fn type_refs_lists_referenced_messages() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let objects = parse_to_objects(
-        "syntax=\"proto3\";\nmessage A {}\nmessage B { A a = 1; }\n",
-    );
+    let objects = parse_to_objects("syntax=\"proto3\";\nmessage A {}\nmessage B { A a = 1; }\n");
     let b = decl(&objects, "B");
 
     // Act
     let refs = compiler.type_refs(&b).expect("type_refs ok");
 
     // Assert
-    assert!(refs.iter().any(|r| r.name == "A"), "B references A: {refs:?}");
+    assert!(
+        refs.iter().any(|r| r.name == "A"),
+        "B references A: {refs:?}"
+    );
 }
 
 #[test]
@@ -481,7 +536,10 @@ fn imports_lists_dependencies() {
     let imports = compiler.imports(&objects.meta).expect("imports ok");
 
     // Assert
-    assert!(imports.iter().any(|i| i.path == "dep.proto"), "got: {imports:?}");
+    assert!(
+        imports.iter().any(|i| i.path == "dep.proto"),
+        "got: {imports:?}"
+    );
 }
 
 // ── Codegen ────────────────────────────────────────────────────────────────
@@ -497,10 +555,15 @@ fn generate_code_rust_produces_struct() {
         .insert(SchemaPath::new("p", "r", "m.proto"), objects);
 
     // Act
-    let code = compiler.generate_code(&closure, Language::Rust).expect("codegen ok");
+    let code = compiler
+        .generate_code(&closure, Language::Rust)
+        .expect("codegen ok");
 
     // Assert
-    assert!(code.contains("struct M"), "expected a struct M; got:\n{code}");
+    assert!(
+        code.contains("struct M"),
+        "expected a struct M; got:\n{code}"
+    );
 }
 
 #[test]
@@ -515,7 +578,9 @@ fn generate_code_unsupported_language_errors() {
     // Assert
     assert!(matches!(
         result,
-        Err(schemahub_types::CodegenError::UnsupportedLanguage(Language::Go))
+        Err(schemahub_types::CodegenError::UnsupportedLanguage(
+            Language::Go
+        ))
     ));
 }
 
@@ -530,7 +595,9 @@ fn generate_descriptors_is_nonempty_and_versioned() {
         .insert(SchemaPath::new("p", "r", "m.proto"), objects);
 
     // Act
-    let bytes = compiler.generate_descriptors(&closure).expect("descriptors ok");
+    let bytes = compiler
+        .generate_descriptors(&closure)
+        .expect("descriptors ok");
 
     // Assert
     assert!(!bytes.is_empty(), "descriptor bytes must be produced");
@@ -562,7 +629,10 @@ fn change_cardinality_singular_to_optional_sets_proto3_optional() {
 
     // Assert
     let printed = print_with(&compiler, &objects, &effect);
-    assert!(printed.contains("optional int32 a = 1"), "proto3 optional; got:\n{printed}");
+    assert!(
+        printed.contains("optional int32 a = 1"),
+        "proto3 optional; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -652,7 +722,10 @@ fn change_cardinality_unknown_keyword_is_rejected() {
     let result = compiler.apply_mutation(&objects, &op);
 
     // Assert
-    assert!(result.is_err(), "unknown cardinality keyword must be rejected");
+    assert!(
+        result.is_err(),
+        "unknown cardinality keyword must be rejected"
+    );
 }
 
 // ── Reorder fields ──────────────────────────────────────────────────────────
@@ -661,8 +734,9 @@ fn change_cardinality_unknown_keyword_is_rejected() {
 fn reorder_fields_changes_order_but_keeps_numbers() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let objects =
-        parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; int32 c = 3; }\n");
+    let objects = parse_to_objects(
+        "syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; int32 c = 3; }\n",
+    );
     let op = mutation(
         "m.proto",
         ProtoOp::ReorderFields(OpReorderFields {
@@ -679,7 +753,10 @@ fn reorder_fields_changes_order_but_keeps_numbers() {
     let pos_c = printed.find("int32 c = 3").expect("c present");
     let pos_a = printed.find("int32 a = 1").expect("a present");
     let pos_b = printed.find("int32 b = 2").expect("b present");
-    assert!(pos_c < pos_a && pos_a < pos_b, "order should be c,a,b; got:\n{printed}");
+    assert!(
+        pos_c < pos_a && pos_a < pos_b,
+        "order should be c,a,b; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -699,7 +776,10 @@ fn reorder_fields_with_mismatched_set_is_rejected() {
     let result = compiler.apply_mutation(&objects, &op);
 
     // Assert
-    assert!(result.is_err(), "reorder must list exactly the existing fields");
+    assert!(
+        result.is_err(),
+        "reorder must list exactly the existing fields"
+    );
 }
 
 // ── Message create / rename / delete ────────────────────────────────────────
@@ -740,7 +820,10 @@ fn create_message_duplicate_is_rejected() {
     let result = compiler.apply_mutation(&objects, &op);
 
     // Assert
-    assert!(result.is_err(), "creating an existing message must be rejected");
+    assert!(
+        result.is_err(),
+        "creating an existing message must be rejected"
+    );
 }
 
 #[test]
@@ -760,19 +843,26 @@ fn rename_message_renames_decl_and_removes_old() {
     let effect = compiler.apply_mutation(&objects, &op).expect("mutation ok");
 
     // Assert
-    assert!(effect.upserts.iter().any(|(n, _)| n == "Renamed"), "new decl upserted");
+    assert!(
+        effect.upserts.iter().any(|(n, _)| n == "Renamed"),
+        "new decl upserted"
+    );
     assert!(effect.removes.iter().any(|n| n == "M"), "old decl removed");
     let printed = print_with(&compiler, &objects, &effect);
     assert!(printed.contains("message Renamed {"), "got:\n{printed}");
-    assert!(!printed.contains("message M {"), "old name gone; got:\n{printed}");
+    assert!(
+        !printed.contains("message M {"),
+        "old name gone; got:\n{printed}"
+    );
 }
 
 #[test]
 fn delete_message_removes_decl() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let objects =
-        parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\nmessage N { int32 b = 1; }\n");
+    let objects = parse_to_objects(
+        "syntax=\"proto3\";\nmessage M { int32 a = 1; }\nmessage N { int32 b = 1; }\n",
+    );
     let op = mutation(
         "m.proto",
         ProtoOp::DeleteMessage(OpDeleteMessage {
@@ -882,8 +972,14 @@ fn rename_rpc_changes_method_name() {
 
     // Assert
     let printed = print_with(&compiler, &objects, &effect);
-    assert!(printed.contains("rpc Renamed(R) returns (R)"), "got:\n{printed}");
-    assert!(!printed.contains("rpc A("), "old name gone; got:\n{printed}");
+    assert!(
+        printed.contains("rpc Renamed(R) returns (R)"),
+        "got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("rpc A("),
+        "old name gone; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -907,7 +1003,10 @@ fn remove_rpc_drops_method() {
     // Assert
     let printed = print_with(&compiler, &objects, &effect);
     assert!(!printed.contains("rpc A("), "A gone; got:\n{printed}");
-    assert!(printed.contains("rpc B(R) returns (R)"), "B kept; got:\n{printed}");
+    assert!(
+        printed.contains("rpc B(R) returns (R)"),
+        "B kept; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -956,8 +1055,14 @@ fn remove_enum_value_auto_reserves() {
     // Assert
     let printed = print_with(&compiler, &objects, &effect);
     assert!(!printed.contains("B = 1"), "value removed; got:\n{printed}");
-    assert!(printed.contains("reserved 1"), "number reserved; got:\n{printed}");
-    assert!(printed.contains("reserved \"B\""), "name reserved; got:\n{printed}");
+    assert!(
+        printed.contains("reserved 1"),
+        "number reserved; got:\n{printed}"
+    );
+    assert!(
+        printed.contains("reserved \"B\""),
+        "name reserved; got:\n{printed}"
+    );
 }
 
 #[test]
@@ -1030,8 +1135,9 @@ fn delete_enum_removes_decl() {
 fn remove_oneof_member_field_keeps_oneof_and_auto_reserves() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let objects =
-        parse_to_objects("syntax=\"proto3\";\nmessage M { oneof choice { int32 a = 1; string b = 2; } }\n");
+    let objects = parse_to_objects(
+        "syntax=\"proto3\";\nmessage M { oneof choice { int32 a = 1; string b = 2; } }\n",
+    );
     let op = mutation(
         "m.proto",
         ProtoOp::RemoveField(OpRemoveField {
@@ -1045,9 +1151,15 @@ fn remove_oneof_member_field_keeps_oneof_and_auto_reserves() {
 
     // Assert — the oneof block keeps `b`; removed `a` is auto-reserved.
     let printed = print_with(&compiler, &objects, &effect);
-    assert!(printed.contains("oneof choice {"), "oneof kept; got:\n{printed}");
+    assert!(
+        printed.contains("oneof choice {"),
+        "oneof kept; got:\n{printed}"
+    );
     assert!(printed.contains("string b = 2"), "b kept; got:\n{printed}");
-    assert!(printed.contains("reserved 1"), "a's number reserved; got:\n{printed}");
+    assert!(
+        printed.contains("reserved 1"),
+        "a's number reserved; got:\n{printed}"
+    );
 }
 
 /// The op set has no oneof-aware AddField: a plain AddField always lands OUTSIDE
@@ -1076,7 +1188,10 @@ fn add_field_lands_outside_existing_oneof() {
     let printed = print_with(&compiler, &objects, &effect);
     let oneof_close = printed.find("  }").expect("oneof closing brace");
     let c_pos = printed.find("string c = 3").expect("c present");
-    assert!(c_pos > oneof_close, "new field is outside the oneof; got:\n{printed}");
+    assert!(
+        c_pos > oneof_close,
+        "new field is outside the oneof; got:\n{printed}"
+    );
 }
 
 // ── Reference integrity on rename (design §7) ───────────────────────────────
@@ -1102,7 +1217,9 @@ fn rename_message_propagates_references() {
     );
 
     // Act
-    let effect = compiler.apply_mutation(&objects, &op).expect("rename succeeds");
+    let effect = compiler
+        .apply_mutation(&objects, &op)
+        .expect("rename succeeds");
 
     // Assert — `A` renamed to `Renamed`, and the referencing `B` and `S` are
     // upserted with their references updated.
@@ -1148,9 +1265,14 @@ fn verdicts(compiler: &ProtobufCompiler, old: &DeclBlob, new: &DeclBlob) -> (boo
 fn matrix_add_optional_field_ok_all_directions() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
     let new = decl(
-        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; optional string b = 2; }\n"),
+        &parse_to_objects(
+            "syntax=\"proto3\";\nmessage M { int32 a = 1; optional string b = 2; }\n",
+        ),
         "M",
     );
 
@@ -1158,7 +1280,11 @@ fn matrix_add_optional_field_ok_all_directions() {
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (true, true, true), "add optional ok all directions");
+    assert_eq!(
+        (b, f, fu),
+        (true, true, true),
+        "add optional ok all directions"
+    );
 }
 
 #[test]
@@ -1169,41 +1295,68 @@ fn matrix_remove_field_backward_only() {
         &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; int32 b = 2; }\n"),
         "M",
     );
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"), "M");
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nmessage M { int32 a = 1; }\n"),
+        "M",
+    );
 
     // Act
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (true, false, false), "remove field: Backward ok only");
+    assert_eq!(
+        (b, f, fu),
+        (true, false, false),
+        "remove field: Backward ok only"
+    );
 }
 
 #[test]
 fn matrix_add_enum_value_backward_only() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"), "E");
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"), "E");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"),
+        "E",
+    );
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"),
+        "E",
+    );
 
     // Act
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (true, false, false), "add enum value: Backward ok only");
+    assert_eq!(
+        (b, f, fu),
+        (true, false, false),
+        "add enum value: Backward ok only"
+    );
 }
 
 #[test]
 fn matrix_remove_enum_value_forward_only() {
     // Arrange
     let compiler = ProtobufCompiler::new();
-    let old = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"), "E");
-    let new = decl(&parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"), "E");
+    let old = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; B = 1; }\n"),
+        "E",
+    );
+    let new = decl(
+        &parse_to_objects("syntax=\"proto3\";\nenum E { A = 0; }\n"),
+        "E",
+    );
 
     // Act
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (false, true, false), "remove enum value: Forward ok only");
+    assert_eq!(
+        (b, f, fu),
+        (false, true, false),
+        "remove enum value: Forward ok only"
+    );
 }
 
 #[test]
@@ -1211,7 +1364,9 @@ fn matrix_add_rpc_backward_only() {
     // Arrange
     let compiler = ProtobufCompiler::new();
     let old = decl(
-        &parse_to_objects("syntax=\"proto3\";\nmessage R {}\nservice S { rpc A(R) returns (R); }\n"),
+        &parse_to_objects(
+            "syntax=\"proto3\";\nmessage R {}\nservice S { rpc A(R) returns (R); }\n",
+        ),
         "S",
     );
     let new = decl(
@@ -1225,7 +1380,11 @@ fn matrix_add_rpc_backward_only() {
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (true, false, false), "add rpc: Backward ok only");
+    assert_eq!(
+        (b, f, fu),
+        (true, false, false),
+        "add rpc: Backward ok only"
+    );
 }
 
 #[test]
@@ -1239,7 +1398,9 @@ fn matrix_remove_rpc_forward_only() {
         "S",
     );
     let new = decl(
-        &parse_to_objects("syntax=\"proto3\";\nmessage R {}\nservice S { rpc A(R) returns (R); }\n"),
+        &parse_to_objects(
+            "syntax=\"proto3\";\nmessage R {}\nservice S { rpc A(R) returns (R); }\n",
+        ),
         "S",
     );
 
@@ -1247,23 +1408,27 @@ fn matrix_remove_rpc_forward_only() {
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert
-    assert_eq!((b, f, fu), (false, true, false), "remove rpc: Forward ok only");
+    assert_eq!(
+        (b, f, fu),
+        (false, true, false),
+        "remove rpc: Forward ok only"
+    );
 }
 
 // ── Type-change allowlist rows (within wire type) ───────────────────────────
 
 /// Helper: compat verdicts for a `M { <from> a = 1; }` → `M { <to> a = 1; }` change.
-fn type_change_verdicts(
-    compiler: &ProtobufCompiler,
-    from: &str,
-    to: &str,
-) -> (bool, bool, bool) {
+fn type_change_verdicts(compiler: &ProtobufCompiler, from: &str, to: &str) -> (bool, bool, bool) {
     let old = decl(
-        &parse_to_objects(&format!("syntax=\"proto3\";\nmessage M {{ {from} a = 1; }}\n")),
+        &parse_to_objects(&format!(
+            "syntax=\"proto3\";\nmessage M {{ {from} a = 1; }}\n"
+        )),
         "M",
     );
     let new = decl(
-        &parse_to_objects(&format!("syntax=\"proto3\";\nmessage M {{ {to} a = 1; }}\n")),
+        &parse_to_objects(&format!(
+            "syntax=\"proto3\";\nmessage M {{ {to} a = 1; }}\n"
+        )),
         "M",
     );
     verdicts(compiler, &old, &new)
@@ -1327,7 +1492,11 @@ fn matrix_int32_to_sint32_breaks_all_directions() {
     let v = type_change_verdicts(&compiler, "int32", "sint32");
 
     // Assert
-    assert_eq!(v, (false, false, false), "non-allowlisted same-wire change breaks all");
+    assert_eq!(
+        v,
+        (false, false, false),
+        "non-allowlisted same-wire change breaks all"
+    );
 }
 
 /// BUG: `enum→int32` is wire-compatible (enum's wire type IS varint, same as
@@ -1360,7 +1529,11 @@ fn matrix_enum_to_int32_ok_all_directions() {
     let (b, f, fu) = verdicts(&compiler, &old, &new);
 
     // Assert — enum and int32 share the varint wire type, so this is FULL-compatible.
-    assert_eq!((b, f, fu), (true, true, true), "enum->int32 ok all directions");
+    assert_eq!(
+        (b, f, fu),
+        (true, true, true),
+        "enum->int32 ok all directions"
+    );
 }
 
 /// Cross-wire type changes are enforced at the MUTATION-VALIDATION layer (the
@@ -1385,7 +1558,10 @@ fn cross_wire_change_rejected_at_mutation_validation() {
     // Assert — int32->string crosses the wire boundary; rejected as INVALID here,
     // not deferred to a compatibility check.
     assert!(
-        matches!(result, Err(schemahub_types::MutationError::InvalidOperation(_))),
+        matches!(
+            result,
+            Err(schemahub_types::MutationError::InvalidOperation(_))
+        ),
         "cross-wire ChangeFieldType must be rejected at mutation validation; got {result:?}"
     );
 }

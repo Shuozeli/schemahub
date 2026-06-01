@@ -79,12 +79,7 @@ impl PgObjectDb {
     pub fn connect(url: &str) -> ObjectDbResult<Self> {
         let runtime = Self::build_runtime()?;
         let pool = runtime
-            .block_on(async {
-                PgPoolOptions::new()
-                    .max_connections(8)
-                    .connect(url)
-                    .await
-            })
+            .block_on(async { PgPoolOptions::new().max_connections(8).connect(url).await })
             .map_err(map_db)?;
         let db = Self {
             pool,
@@ -381,12 +376,10 @@ impl ObjectDb for PgObjectDb {
         let pool = self.pool.clone();
         let rows = self
             .block_on(async move {
-                sqlx::query(
-                    "SELECT op_id FROM ops WHERE repo = $1 ORDER BY inserted_at ASC",
-                )
-                .bind(&repo_s)
-                .fetch_all(&pool)
-                .await
+                sqlx::query("SELECT op_id FROM ops WHERE repo = $1 ORDER BY inserted_at ASC")
+                    .bind(&repo_s)
+                    .fetch_all(&pool)
+                    .await
             })
             .map_err(map_db)?;
         let mut out = Vec::with_capacity(rows.len());
@@ -482,12 +475,7 @@ mod tests {
                     .expect("admin runtime"),
             );
             let admin_pool = admin_runtime
-                .block_on(async {
-                    PgPoolOptions::new()
-                        .max_connections(2)
-                        .connect(&url)
-                        .await
-                })
+                .block_on(async { PgPoolOptions::new().max_connections(2).connect(&url).await })
                 .expect("connect admin pool");
             // SAFETY (SqlSafeStr): `schema` is `shvcs_test_<uuid hex>` — fully
             // controlled by this test, ASCII alphanumeric + underscore, no

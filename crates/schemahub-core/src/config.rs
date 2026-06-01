@@ -37,7 +37,10 @@ impl RepoConfig {
     pub fn compat_rules(&self) -> CompatibilityRules {
         CompatibilityRules {
             direction: self.compatibility_direction,
-            disabled: matches!(self.compatibility_direction, CompatibilityDirection::Disabled),
+            disabled: matches!(
+                self.compatibility_direction,
+                CompatibilityDirection::Disabled
+            ),
         }
     }
 }

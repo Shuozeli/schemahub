@@ -45,14 +45,15 @@ fn render_decl(p: &DeclPayload) -> String {
     }
     // Reuse the printer but strip the leading syntax/package preamble.
     let full = crate::printer::print_file(&file);
-    full.split_once("\n\n").map(|(_, body)| body.to_string()).unwrap_or(full)
+    full.split_once("\n\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or(full)
 }
 
 /// Imports declared in the file's metadata.
 pub fn imports(meta: &MetaBlob) -> Result<Vec<Import>, ReadError> {
     let m = decode_meta(meta.as_bytes()).map_err(|e| ReadError::MalformedBlob(e.to_string()))?;
-    Ok(m
-        .dependency
+    Ok(m.dependency
         .iter()
         .map(|path| Import {
             path: path.clone(),
@@ -91,7 +92,12 @@ fn collect_message_refs(m: &DescriptorProto, out: &mut Vec<String>) {
     let map_entry_names: std::collections::HashSet<&str> = m
         .nested_type
         .iter()
-        .filter(|n| n.options.as_ref().and_then(|o| o.map_entry).unwrap_or(false))
+        .filter(|n| {
+            n.options
+                .as_ref()
+                .and_then(|o| o.map_entry)
+                .unwrap_or(false)
+        })
         .filter_map(|n| n.name.as_deref())
         .collect();
 

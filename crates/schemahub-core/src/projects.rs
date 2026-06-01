@@ -41,9 +41,7 @@ impl Core {
             )));
         }
         if self.project_store.get(name).is_some() {
-            return Err(CoreError::Other(format!(
-                "project '{name}' already exists"
-            )));
+            return Err(CoreError::Other(format!("project '{name}' already exists")));
         }
         let creator = caller.id().unwrap_or("").to_string();
         let meta = ProjectMeta {
@@ -63,11 +61,7 @@ impl Core {
 
     /// Lookup a project by name. Returns `Ok(None)` if missing; returns
     /// `PermissionDenied` if the caller can't `Read` it.
-    pub fn get_project(
-        &self,
-        name: &str,
-        token: Option<&str>,
-    ) -> CoreResult<Option<ProjectMeta>> {
+    pub fn get_project(&self, name: &str, token: Option<&str>) -> CoreResult<Option<ProjectMeta>> {
         let Some(meta) = self.project_store.get(name) else {
             return Ok(None);
         };
@@ -160,7 +154,12 @@ impl Core {
             project,
             "",
         )?;
-        self.guard_last_owner(project, identity_id, /*removing=*/ false, Some(new_role))?;
+        self.guard_last_owner(
+            project,
+            identity_id,
+            /*removing=*/ false,
+            Some(new_role),
+        )?;
         self.role_store
             .set(project, identity_id, new_role)
             .map_err(|e| CoreError::Other(format!("write role store: {e}")))?;

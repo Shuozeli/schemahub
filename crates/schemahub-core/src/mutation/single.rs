@@ -26,7 +26,11 @@ impl Core {
         let schema_name = path.schema_name.clone();
 
         // 2. AuthN → 3. AuthZ (Force if --force, else Write).
-        let action = if req.force { Action::Force } else { Action::Write };
+        let action = if req.force {
+            Action::Force
+        } else {
+            Action::Write
+        };
         authorize(
             self.authn.as_ref(),
             self.authz.as_ref(),

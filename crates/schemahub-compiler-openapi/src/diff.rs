@@ -54,16 +54,8 @@ fn describe_change(old: &DeclPayload, new: &DeclPayload) -> Vec<u8> {
             format!("path item modified; methods {old_methods:?} -> {new_methods:?}")
         }
         (DeclPayload::ComponentSchema(o), DeclPayload::ComponentSchema(n)) => {
-            let old_props = o
-                .schema
-                .as_ref()
-                .map(|s| s.properties.len())
-                .unwrap_or(0);
-            let new_props = n
-                .schema
-                .as_ref()
-                .map(|s| s.properties.len())
-                .unwrap_or(0);
+            let old_props = o.schema.as_ref().map(|s| s.properties.len()).unwrap_or(0);
+            let new_props = n.schema.as_ref().map(|s| s.properties.len()).unwrap_or(0);
             format!("schema modified; properties {old_props} -> {new_props}")
         }
         _ => "declaration content changed".to_string(),

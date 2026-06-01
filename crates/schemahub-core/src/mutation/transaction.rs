@@ -58,7 +58,11 @@ impl Core {
         let plan = TransactionPlan::build(&req.mutations, limits)?;
 
         // 2/3. Auth (one repo for the whole transaction).
-        let action = if req.force { Action::Force } else { Action::Write };
+        let action = if req.force {
+            Action::Force
+        } else {
+            Action::Write
+        };
         authorize(
             self.authn.as_ref(),
             self.authz.as_ref(),

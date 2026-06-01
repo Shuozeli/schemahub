@@ -88,16 +88,11 @@ pub fn reassemble(schema: &SchemaObjects) -> Result<FileDescriptorProto, PrintEr
 /// remaining items (e.g. added by a mutation after the original parse) are
 /// appended in name-sorted order for determinism. An empty `order` (e.g. a blob
 /// written before order tracking existed) leaves `items` untouched.
-fn reorder_by_name<T>(
-    items: Vec<T>,
-    order: &[String],
-    name_of: impl Fn(&T) -> String,
-) -> Vec<T> {
+fn reorder_by_name<T>(items: Vec<T>, order: &[String], name_of: impl Fn(&T) -> String) -> Vec<T> {
     if order.is_empty() {
         return items;
     }
-    let mut by_name: HashMap<String, T> =
-        items.into_iter().map(|it| (name_of(&it), it)).collect();
+    let mut by_name: HashMap<String, T> = items.into_iter().map(|it| (name_of(&it), it)).collect();
     let mut out: Vec<T> = Vec::with_capacity(by_name.len());
     for name in order {
         if let Some(it) = by_name.remove(name) {
@@ -111,7 +106,9 @@ fn reorder_by_name<T>(
 }
 
 /// Build a `path -> SourceLocation` lookup for comment retrieval at print time.
-pub fn comment_index(info: &SourceCodeInfo) -> HashMap<Vec<i32>, &protoc_rs_schema::SourceLocation> {
+pub fn comment_index(
+    info: &SourceCodeInfo,
+) -> HashMap<Vec<i32>, &protoc_rs_schema::SourceLocation> {
     let mut map = HashMap::new();
     for loc in &info.location {
         // Keep the first location for a given path (matches descriptor.proto:

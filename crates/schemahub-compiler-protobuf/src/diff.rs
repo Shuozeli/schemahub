@@ -42,14 +42,22 @@ fn summarize_change(old: &DeclPayload, new: &DeclPayload) -> String {
             for f in &n.field {
                 if let Some(num) = f.number {
                     if !on.contains(&num) {
-                        lines.push(format!("+ field {} = {}", f.name.as_deref().unwrap_or(""), num));
+                        lines.push(format!(
+                            "+ field {} = {}",
+                            f.name.as_deref().unwrap_or(""),
+                            num
+                        ));
                     }
                 }
             }
             for f in &o.field {
                 if let Some(num) = f.number {
                     if !nn.contains(&num) {
-                        lines.push(format!("- field {} = {}", f.name.as_deref().unwrap_or(""), num));
+                        lines.push(format!(
+                            "- field {} = {}",
+                            f.name.as_deref().unwrap_or(""),
+                            num
+                        ));
                     }
                 }
             }
@@ -68,14 +76,22 @@ fn summarize_change(old: &DeclPayload, new: &DeclPayload) -> String {
             for v in &n.value {
                 if let Some(num) = v.number {
                     if !on.contains(&num) {
-                        lines.push(format!("+ value {} = {}", v.name.as_deref().unwrap_or(""), num));
+                        lines.push(format!(
+                            "+ value {} = {}",
+                            v.name.as_deref().unwrap_or(""),
+                            num
+                        ));
                     }
                 }
             }
             for v in &o.value {
                 if let Some(num) = v.number {
                     if !nn.contains(&num) {
-                        lines.push(format!("- value {} = {}", v.name.as_deref().unwrap_or(""), num));
+                        lines.push(format!(
+                            "- value {} = {}",
+                            v.name.as_deref().unwrap_or(""),
+                            num
+                        ));
                     }
                 }
             }

@@ -13,9 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use flatc_rs_schema::{
-    Attributes, BaseType, Enum, EnumVal, Field, KeyValue, Object, Type,
-};
+use flatc_rs_schema::{Attributes, BaseType, Enum, EnumVal, Field, KeyValue, Object, Type};
 use schemahub_types::{MetaBlob, Mutation, MutationEffect, MutationError, SchemaObjects};
 
 use crate::blob::{decode_decl, decode_meta, encode_decl, encode_meta, DeclPayload};
@@ -52,7 +50,10 @@ pub enum FbsOp {
     RemoveField { table: String, field_name: String },
 
     /// Create a new (empty) table.
-    CreateTable { name: String, doc_comment: Option<String> },
+    CreateTable {
+        name: String,
+        doc_comment: Option<String>,
+    },
     /// Rename a table.
     RenameTable { old_name: String, new_name: String },
     /// Delete a table.
@@ -87,7 +88,10 @@ pub enum FbsOp {
     },
 
     /// Create a new (empty) union.
-    CreateUnion { name: String, doc_comment: Option<String> },
+    CreateUnion {
+        name: String,
+        doc_comment: Option<String>,
+    },
     /// Rename a union.
     RenameUnion { old_name: String, new_name: String },
     /// Delete a union.
@@ -105,7 +109,8 @@ impl FbsOp {
 
     /// Decode an op from opaque mutation operation bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, MutationError> {
-        serde_json::from_slice(bytes).map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))
+        serde_json::from_slice(bytes)
+            .map_err(|e| MutationError::InvalidOperationBytes(e.to_string()))
     }
 }
 
@@ -277,7 +282,11 @@ impl WorkingState {
                 "cannot add a field to struct '{table}': struct layout is fixed"
             )));
         }
-        if obj.fields.iter().any(|f| f.name.as_deref() == Some(field_name)) {
+        if obj
+            .fields
+            .iter()
+            .any(|f| f.name.as_deref() == Some(field_name))
+        {
             return Err(MutationError::InvalidOperation(format!(
                 "field '{field_name}' already exists in '{table}'"
             )));
@@ -403,9 +412,11 @@ impl WorkingState {
         }
         let obj = Object {
             name: Some(name.to_string()),
-            documentation: doc_comment.as_ref().map(|d| flatc_rs_schema::Documentation {
-                lines: vec![d.clone()],
-            }),
+            documentation: doc_comment
+                .as_ref()
+                .map(|d| flatc_rs_schema::Documentation {
+                    lines: vec![d.clone()],
+                }),
             ..Default::default()
         };
         self.decls
@@ -431,9 +442,11 @@ impl WorkingState {
             name: Some(name.to_string()),
             is_union,
             underlying_type: Some(underlying),
-            documentation: doc_comment.as_ref().map(|d| flatc_rs_schema::Documentation {
-                lines: vec![d.clone()],
-            }),
+            documentation: doc_comment
+                .as_ref()
+                .map(|d| flatc_rs_schema::Documentation {
+                    lines: vec![d.clone()],
+                }),
             ..Default::default()
         };
         self.decls
@@ -468,9 +481,11 @@ impl WorkingState {
             is_union: true,
             underlying_type: Some(utype),
             values: vec![none],
-            documentation: doc_comment.as_ref().map(|d| flatc_rs_schema::Documentation {
-                lines: vec![d.clone()],
-            }),
+            documentation: doc_comment
+                .as_ref()
+                .map(|d| flatc_rs_schema::Documentation {
+                    lines: vec![d.clone()],
+                }),
             ..Default::default()
         };
         self.decls
@@ -536,7 +551,11 @@ impl WorkingState {
         value: i64,
     ) -> Result<(), MutationError> {
         let en = self.enum_mut(enum_name)?;
-        if en.values.iter().any(|v| v.name.as_deref() == Some(value_name)) {
+        if en
+            .values
+            .iter()
+            .any(|v| v.name.as_deref() == Some(value_name))
+        {
             return Err(MutationError::InvalidOperation(format!(
                 "enum value '{value_name}' already exists in '{enum_name}'"
             )));

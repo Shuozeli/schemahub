@@ -30,8 +30,7 @@ pub fn render_conflict(sides: &ConflictSides) -> Result<String, ConflictError> {
 
 /// Validate that a proposed resolution blob is a single valid declaration.
 pub fn validate_resolution(resolved: &DeclBlob) -> Result<(), ConflictError> {
-    let payload =
-        decode_decl(resolved).map_err(|e| ConflictError::MalformedBlob(e.to_string()))?;
+    let payload = decode_decl(resolved).map_err(|e| ConflictError::MalformedBlob(e.to_string()))?;
     if payload.name().is_none() {
         return Err(ConflictError::InvalidResolution(
             "resolved declaration has no name".to_string(),

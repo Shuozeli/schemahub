@@ -35,7 +35,10 @@ pub enum OpenApiOp {
         description: String,
     },
     /// Remove an operation (by method) from a path item.
-    RemoveOperation { path_pattern: String, method: String },
+    RemoveOperation {
+        path_pattern: String,
+        method: String,
+    },
     /// Add a (bare typed) component schema.
     AddComponentSchema {
         schema_name: String,

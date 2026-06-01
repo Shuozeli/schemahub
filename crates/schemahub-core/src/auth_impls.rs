@@ -45,11 +45,7 @@ impl AuthnProvider for BearerTokenAuthn {
         if t.is_empty() {
             return Ok(Identity::Anonymous);
         }
-        Ok(self
-            .tokens
-            .get(t)
-            .cloned()
-            .unwrap_or(Identity::Anonymous))
+        Ok(self.tokens.get(t).cloned().unwrap_or(Identity::Anonymous))
     }
 }
 
@@ -189,7 +185,10 @@ mod tests {
             self.projects.lock().unwrap().get(project).cloned()
         }
         fn set(&self, meta: ProjectMeta) -> std::io::Result<()> {
-            self.projects.lock().unwrap().insert(meta.name.clone(), meta);
+            self.projects
+                .lock()
+                .unwrap()
+                .insert(meta.name.clone(), meta);
             Ok(())
         }
         fn list(&self) -> Vec<ProjectMeta> {
@@ -197,7 +196,9 @@ mod tests {
         }
     }
 
-    fn fixture(visibility: Visibility) -> (RoleBasedAuthz, Arc<MemRoleStore>, Arc<MemProjectStore>) {
+    fn fixture(
+        visibility: Visibility,
+    ) -> (RoleBasedAuthz, Arc<MemRoleStore>, Arc<MemProjectStore>) {
         let roles: Arc<MemRoleStore> = Arc::new(MemRoleStore::default());
         let projects: Arc<MemProjectStore> = Arc::new(MemProjectStore::default());
         projects
@@ -310,7 +311,11 @@ mod tests {
         let authz = RoleBasedAuthz::new(roles, projects);
 
         // Act
-        let result = authz.check(&Identity::Anonymous, Action::Read, &ResourcePath::project("ghost"));
+        let result = authz.check(
+            &Identity::Anonymous,
+            Action::Read,
+            &ResourcePath::project("ghost"),
+        );
 
         // Assert: anonymous read denied because the project is treated as private.
         assert!(matches!(result, Err(AuthzError::PermissionDenied(_))));
