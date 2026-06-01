@@ -532,6 +532,8 @@ The server picks one of two modes at startup (`schemahub-server/src/lib.rs::buil
 
 If `schemahub.toml` has no `[auth]` section (and no `[projects.*]` bootstrap), the server installs `NoopAuthn` (every request is `Identity::Anonymous`) and `NoopAuthz` (every action allowed). Tokens are accepted but ignored. This is the getting-started default.
 
+**Project + member RPCs fail fast in Noop mode.** Because there is no role store or project store to write into, `schemahub project create`, `schemahub project member add|remove|set-role`, and the underlying `ProjectService.{CreateProject, AddMember, RemoveMember, UpdateMemberRole}` RPCs return a `FailedPrecondition` error pointing at `[auth]` rather than silently no-op'ing. To use those commands, add an `[auth]` section (see below) — even a one-token table is enough to switch on the real RBAC layer.
+
 ### BearerToken + RBAC (configured)
 
 When `[auth].tokens` is non-empty, the real RBAC layer turns on automatically:

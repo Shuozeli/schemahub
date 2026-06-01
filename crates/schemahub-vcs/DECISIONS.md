@@ -99,3 +99,21 @@ forwards into `schemahub-vcs/postgres` so a `--features postgres` build pulls
 The trait gained `put_object_at` / `put_op_at` (store under a
 *caller-supplied* id, since jj computes its own blake2b ids) and `Symlink`/`View`
 object kinds.
+
+## Op-log audit author: `schemahub.author` attribute
+
+Every operation jj records carries `meta.username` (the OS user that drove the
+write). For a server-mediated registry that's not the audit-relevant identity —
+we want the *authenticated caller* (e.g. `alice` from a `Bearer` token) on every
+op-log entry.
+
+We thread the authenticated `Identity` through `Vcs::record_author(...)`, which
+stamps a `schemahub.author = "<identity_id>"` attribute on the operation via
+jj's metadata-attribute surface. `OpRecord::author` prefers this attribute when
+present and falls back to `meta.username` when absent.
+
+This makes the attribute a **durable on-disk format detail**: ops written by
+older binaries (or under Noop auth) won't carry it and continue to surface
+`meta.username`; ops written after this change carry both and `OpRecord` picks
+the authenticated identity. No migration needed — the read path handles the
+absence gracefully.
