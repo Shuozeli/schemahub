@@ -2071,8 +2071,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "schemahub-compiler-protobuf",
+ "schemahub-jj",
  "schemahub-types",
- "schemahub-vcs",
  "serde",
  "serde_json",
  "tempfile",
@@ -2080,40 +2080,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "schemahub-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "prost 0.13.5",
- "prost-types",
- "schemahub-api",
- "schemahub-compiler-flatbuffers",
- "schemahub-compiler-openapi",
- "schemahub-compiler-protobuf",
- "schemahub-core",
- "schemahub-types",
- "schemahub-vcs",
- "serde",
- "tempfile",
- "tokio",
- "tokio-stream",
- "toml",
- "tonic",
-]
-
-[[package]]
-name = "schemahub-types"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "schemahub-vcs"
+name = "schemahub-jj"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2134,6 +2101,39 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "schemahub-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "prost 0.13.5",
+ "prost-types",
+ "schemahub-api",
+ "schemahub-compiler-flatbuffers",
+ "schemahub-compiler-openapi",
+ "schemahub-compiler-protobuf",
+ "schemahub-core",
+ "schemahub-jj",
+ "schemahub-types",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+]
+
+[[package]]
+name = "schemahub-types"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

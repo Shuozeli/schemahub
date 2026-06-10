@@ -210,6 +210,9 @@ service OrderService {
 }
 "#;
 
+const RICH_INVENTORY_PROTO: &str = include_str!("../../../tests/integration/rich_inventory.proto");
+const COMMERCE_CATALOG_FBS: &str = include_str!("../../../tests/integration/commerce_catalog.fbs");
+
 // ── 1. FlatBuffers round-trip ──────────────────────────────────────────────────
 
 #[tokio::test]
@@ -573,5 +576,198 @@ async fn complex_protobuf_round_trip_preserves_map_oneof_optional_nested_and_qua
     assert!(
         pulled.contains("import \"google/protobuf/timestamp.proto\""),
         "timestamp import lost:\n{pulled}"
+    );
+}
+
+// ── 6. Rich Protobuf fixture ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rich_protobuf_fixture_preserves_business_schema_features_and_imports() {
+    // Arrange
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "inventory",
+        "catalog",
+        "main",
+        "rich_inventory.proto",
+        pb::SchemaFormat::Protobuf,
+        RICH_INVENTORY_PROTO,
+        "pb-rich-fixture-1",
+    )
+    .await;
+
+    // Act
+    let pulled = pull_source(
+        &mut c.explore,
+        "inventory",
+        "catalog",
+        "rich_inventory.proto",
+        vref_branch("main"),
+    )
+    .await;
+    let names = list_decl_names(
+        &mut c.explore,
+        "inventory",
+        "catalog",
+        "rich_inventory.proto",
+        vref_branch("main"),
+    )
+    .await;
+    let deps = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "inventory".into(),
+            repo: "catalog".into(),
+            schema_path: "rich_inventory.proto".into(),
+            at: Some(vref_branch("main")),
+            transitive: false,
+        })
+        .await
+        .expect("list_dependencies")
+        .into_inner()
+        .dependencies;
+
+    // Assert: top-level declarations are addressable.
+    for n in [
+        "Money",
+        "Warehouse",
+        "ProductStatus",
+        "Product",
+        "InventoryEvent",
+        "InventoryService",
+    ] {
+        assert!(
+            names.contains(&n.to_string()),
+            "missing proto declaration `{n}`: {names:?}"
+        );
+    }
+
+    // Assert: rich proto features survive canonical print.
+    for needle in [
+        "message Address",
+        "message Dimensions",
+        "map<string, string> labels",
+        "map<string, string> attributes",
+        "optional string gtin",
+        "oneof purchasable_unit",
+        "reserved 8",
+        "reserved 12 to 15",
+        "reserved \"legacy_sku\"",
+        "google.protobuf.Timestamp created_at",
+        "google.protobuf.Duration shelf_life",
+        "returns (stream InventoryEvent)",
+    ] {
+        assert!(pulled.contains(needle), "lost `{needle}`:\n{pulled}");
+    }
+
+    // Assert: imports are tracked as dependencies.
+    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.imported_schema).collect();
+    assert!(
+        dep_paths.contains(&"google/protobuf/timestamp.proto".to_string()),
+        "timestamp dependency missing: {dep_paths:?}"
+    );
+    assert!(
+        dep_paths.contains(&"google/protobuf/duration.proto".to_string()),
+        "duration dependency missing: {dep_paths:?}"
+    );
+}
+
+// ── 7. Rich FlatBuffers fixture ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn rich_flatbuffers_fixture_preserves_catalog_schema_features() {
+    // Arrange
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "commerce",
+        "catalog",
+        "main",
+        "commerce_catalog.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        COMMERCE_CATALOG_FBS,
+        "fbs-rich-fixture-1",
+    )
+    .await;
+
+    // Act
+    let pulled = pull_source(
+        &mut c.explore,
+        "commerce",
+        "catalog",
+        "commerce_catalog.fbs",
+        vref_branch("main"),
+    )
+    .await;
+    let kinds = list_decls_with_kinds(
+        &mut c.explore,
+        "commerce",
+        "catalog",
+        "commerce_catalog.fbs",
+        vref_branch("main"),
+    )
+    .await;
+    let deps = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "commerce".into(),
+            repo: "catalog".into(),
+            schema_path: "commerce_catalog.fbs".into(),
+            at: Some(vref_branch("main")),
+            transitive: false,
+        })
+        .await
+        .expect("list_dependencies")
+        .into_inner()
+        .dependencies;
+
+    // Assert: file metadata and rich FlatBuffers constructs survive.
+    for needle in [
+        "include \"common/money.fbs\"",
+        "namespace commerce.catalog",
+        "enum Availability",
+        "struct GeoPoint",
+        "table Supplier",
+        "table Product",
+        "table Category",
+        "union CatalogEntity",
+        "product: Product",
+        "supplier: Supplier",
+        "category: Category",
+        "tags: [string]",
+        "related: [Product]",
+        "(required",
+        "(deprecated",
+        "(key",
+        "rpc_service CatalogService",
+        "root_type Product",
+        "file_identifier \"CATL\"",
+        "file_extension \"cat\"",
+    ] {
+        assert!(pulled.contains(needle), "lost `{needle}`:\n{pulled}");
+    }
+
+    // Assert: declaration kinds are classified across FlatBuffers concepts.
+    let kind_of = |name: &str| -> i32 {
+        kinds
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("decl `{name}` not found in {kinds:?}"))
+            .1
+    };
+    assert_eq!(kind_of("Availability"), pb::DeclKind::FbsEnum as i32);
+    assert_eq!(kind_of("GeoPoint"), pb::DeclKind::Struct as i32);
+    assert_eq!(kind_of("Product"), pb::DeclKind::Table as i32);
+    assert_eq!(kind_of("CatalogEntity"), pb::DeclKind::Union as i32);
+    assert_eq!(kind_of("CatalogService"), pb::DeclKind::Service as i32);
+
+    // Assert: includes are tracked as dependencies.
+    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.imported_schema).collect();
+    assert!(
+        dep_paths.contains(&"common/money.fbs".to_string()),
+        "include dependency missing: {dep_paths:?}"
     );
 }

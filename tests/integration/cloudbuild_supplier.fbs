@@ -1,0 +1,11 @@
+include "acme/core/common/money.fbs";
+
+namespace cloudbuild.supplier;
+
+table Supplier {
+  id: string (key);
+  display_name: string (required);
+  minimum_order: Money;
+}
+
+root_type Supplier;

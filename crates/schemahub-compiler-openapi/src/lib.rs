@@ -416,7 +416,7 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
                 }),
                 extensions: None,
             };
-            Ok(upsert(key, DeclPayload::ComponentSchema(blob)))
+            Ok(upsert(key, DeclPayload::ComponentSchema(Box::new(blob))))
         }
 
         OpenApiOp::RemoveComponentSchema { schema_name } => {

@@ -1,13 +1,13 @@
-# schemahub-vcs — Decisions
+# schemahub-jj — Decisions
 
 ## jj-lib (path A): **adopted**
 
-`schemahub-vcs` is built on the **real Jujutsu library** (`jj-lib = "0.41"`,
+`schemahub-jj` is built on the **real Jujutsu library** (`jj-lib = "0.41"`,
 default features off — no `git`). We implement jj's `Backend` and `OpStore`
 traits over our `ObjectDb` and drive all writes through jj's
 `RepoLoader → Transaction → MutableRepo / CommitBuilder / MergedTreeBuilder`.
 An earlier iteration hand-rolled a "jj-style" model over redb; that has been
-replaced. The crate's public `Vcs` API (consumed by core/server/cli) is
+replaced. The crate's public `Jj` API (consumed by core/server/cli) is
 unchanged.
 
 ### What jj-lib gives us, persisted to our DB
@@ -27,8 +27,8 @@ unchanged.
 |---|---|---|
 | `backend::Backend` | `jj_backend::DbBackend` | files/trees/commits → `ObjectDb` (`File`/`Tree`/`Commit` kinds), keyed by jj's blake2b id via `put_object_at`/`put_op_at`; proto-encoded exactly like jj's `SimpleBackend` |
 | `op_store::OpStore` | `jj_op_store::DbOpStore` | operations → per-repo op-log (`put_op_at`); views → `ObjectKind::View`, keyed by jj's `ViewId`. Views/ops use a reduced serde form covering exactly the fields schemahub touches (heads, local bookmarks, local tags, wc pointers) — schemahub has no git/remotes |
-| `op_heads_store::OpHeadsStore` | `jj_op_heads::DbOpHeadsStore` | the current operation-head id(s) in the `ObjectDb` ref table (`set_ref`/`get_ref`) — durable, the substrate for `undo` and reload-at-head across `Vcs` instances |
-| `IndexStore` | jj's `DefaultIndexStore` | a per-`Vcs` **temp dir**. The index is a pure cache, rebuilt from the (DB-backed) op-log on load; it holds no durable schemahub state |
+| `op_heads_store::OpHeadsStore` | `jj_op_heads::DbOpHeadsStore` | the current operation-head id(s) in the `ObjectDb` ref table (`set_ref`/`get_ref`) — durable, the substrate for `undo` and reload-at-head across `Jj` instances |
+| `IndexStore` | jj's `DefaultIndexStore` | a per-`Jj` **temp dir**. The index is a pure cache, rebuilt from the (DB-backed) op-log on load; it holds no durable schemahub state |
 | `SubmoduleStore` | jj's `DefaultSubmoduleStore` | stub; schemahub has no submodules. Its path arg is ignored by jj |
 | `RepoLoader`/`MutableRepo`/`Transaction` | used directly | — |
 
@@ -43,10 +43,10 @@ globally (jj's content addressing makes this inherent).
 - **OpHeads is DB-backed** because the head pointer is durable state that must
   survive process restarts (it anchors undo and reload-at-head). It is tiny
   (a newline-joined list of hex op ids in the per-repo ref table).
-- **Index + submodule stores use jj's filesystem defaults on a per-`Vcs` scratch
+- **Index + submodule stores use jj's filesystem defaults on a per-`Jj` scratch
   dir.** The index is reconstructable from the op-log, so a fresh temp dir per
-  `Vcs` is correct and loses nothing (verified by
-  `redb_state_survives_reopening_the_database`: a new `Vcs` over the same redb
+  `Jj` is correct and loses nothing (verified by
+  `redb_state_survives_reopening_the_database`: a new `Jj` over the same redb
   file reads back all commits/bookmarks/op-log). Reimplementing jj's
   `Index`/`ReadonlyIndex`/`MutableIndex` (ancestry, revsets, prefix resolution)
   was deliberately avoided — it is a large surface with no schemahub-specific
@@ -54,21 +54,21 @@ globally (jj's content addressing makes this inherent).
 
 ### Async bridge
 
-jj-lib's `Backend`/`OpStore`/repo APIs are `#[async_trait]`. The `Vcs` public
-API is **synchronous**. Each `Vcs` owns a **dedicated** `tokio` current-thread
+jj-lib's `Backend`/`OpStore`/repo APIs are `#[async_trait]`. The `Jj` public
+API is **synchronous**. Each `Jj` owns a **dedicated** `tokio` current-thread
 runtime (`Store::block_on`) and never blocks on an ambient/shared runtime
 (infra rule: dedicated runtime for workers). The runtime lives as long as the
-`Vcs`.
+`Jj`.
 
 ### Shims / deviations
 
 - **Conflict id `ObjectKind`** is retained for backward compatibility but unused
   by the backend: jj represents conflicts inline as conflicted (multi-side)
   trees, not as separate conflict objects.
-- **`gc`** is implemented at the `Vcs`/`ObjectDb` level (mark-and-sweep over
+- **`gc`** is implemented at the `Jj`/`ObjectDb` level (mark-and-sweep over
   commits/trees/files/views reachable from every op's view). jj's per-backend
   `Backend::gc`/`OpStore::gc` are no-ops; op-log retention is required for undo.
-- No genuine jj-lib wall was hit — every `Vcs` method is expressed through real
+- No genuine jj-lib wall was hit — every `Jj` method is expressed through real
   jj-lib types and write paths.
 
 ## New public primitives (additive; nothing removed/renamed)
@@ -86,13 +86,13 @@ Three impls ship:
 - `RedbObjectDb` (embedded default — single-file MVCC store, zero-ops).
 - `MemoryObjectDb` (tests / core unit tests — non-persistent).
 - `PgObjectDb` (server / multi-instance deployments — `pg_db.rs`), gated by the
-  `postgres` cargo feature on `schemahub-vcs`. Integration tests against a real
+  `postgres` cargo feature on `schemahub-jj`. Integration tests against a real
   Postgres are further gated by `postgres-integration` and read
   `SCHEMAHUB_TEST_POSTGRES_URL`. Workspace dep: `sqlx 0.9` with
   `runtime-tokio + tls-rustls`.
 
 `RedbObjectDb` remains the default. The server crate's `postgres` feature
-forwards into `schemahub-vcs/postgres` so a `--features postgres` build pulls
+forwards into `schemahub-jj/postgres` so a `--features postgres` build pulls
 `PgObjectDb` into `schemahub-server`; `storage.backend = "postgres"` in
 `schemahub.toml` then routes through it.
 
@@ -107,7 +107,7 @@ write). For a server-mediated registry that's not the audit-relevant identity �
 we want the *authenticated caller* (e.g. `alice` from a `Bearer` token) on every
 op-log entry.
 
-We thread the authenticated `Identity` through `Vcs::record_author(...)`, which
+We thread the authenticated `Identity` through `Jj::record_author(...)`, which
 stamps a `schemahub.author = "<identity_id>"` attribute on the operation via
 jj's metadata-attribute surface. `OpRecord::author` prefers this attribute when
 present and falls back to `meta.username` when absent.

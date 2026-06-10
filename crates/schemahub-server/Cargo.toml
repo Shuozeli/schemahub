@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 schemahub-types                = { path = "../schemahub-types" }
-schemahub-vcs                  = { path = "../schemahub-vcs" }
+schemahub-jj                  = { path = "../schemahub-jj" }
 schemahub-core                 = { path = "../schemahub-core" }
 schemahub-api                  = { path = "../schemahub-api" }
 schemahub-compiler-protobuf    = { path = "../schemahub-compiler-protobuf" }
@@ -29,8 +29,8 @@ tokio-stream = "0.1"
 [features]
 default = []
 # Enable the Postgres-backed ObjectDb. Pulls the `postgres` feature on
-# schemahub-vcs (which is the actual compile gate for `PgObjectDb`).
-postgres = ["schemahub-vcs/postgres"]
+# schemahub-jj (which is the actual compile gate for `PgObjectDb`).
+postgres = ["schemahub-jj/postgres"]
 
 [dev-dependencies]
 tempfile = "3"

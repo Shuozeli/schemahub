@@ -1,10 +1,10 @@
-# schemahub — gRPC API (v2: Compilers + Jujutsu-style VCS)
+# schemahub — gRPC API (v2: Compilers + Jujutsu-style JJ)
 
 > This document specifies the gRPC API surface **as implemented**: all services, RPCs, request/response shapes, and mutation types. The `.proto` files described here are the external contract that the CLI, AI agents, and any future client libraries depend on. The server (`schemahub-server`) translates these wire types into the internal `Mutation` envelope and `Core` calls described in `design.md`.
 >
 > It supersedes the v1 git-style API design (preserved in git history). Two project-level decisions drive the v2 surface (see `design.md`, `requirements.md`):
 >
-> 1. **Jujutsu-style VCS.** Writes no longer reject on a base-revision CAS mismatch. Every write returns a stable **`change_id`** (durable identity that survives rewrite/rebase) alongside the new commit, and may report **`conflicted_decls`** — declarations that landed as first-class conflicts rather than hard-failing. A new **`HistoryService`** exposes the operation log, `Undo`, and conflict render/resolve.
+> 1. **Jujutsu-style JJ.** Writes no longer reject on a base-revision CAS mismatch. Every write returns a stable **`change_id`** (durable identity that survives rewrite/rebase) alongside the new commit, and may report **`conflicted_decls`** — declarations that landed as first-class conflicts rather than hard-failing. A new **`HistoryService`** exposes the operation log, `Undo`, and conflict render/resolve.
 > 2. **Compilers, not plugins.** "branches" map to jj **bookmarks** (the server keeps the `RefService`/branch names as an alias over bookmarks); per-declaration storage; the format-specific work is owned by a `Compiler` (`design.md` §2).
 >
 > **Source-of-truth note.** Where this doc and `design.md` disagree, the protos + server win — they are the implementation. Divergences are flagged inline with **AS-BUILT**.
@@ -43,7 +43,7 @@ This is the single biggest change from v1 and shapes every write RPC.
 
 ### 2.1 No CAS rejection — concurrency yields conflicts
 
-In v1 a write carried a `base_revision` and the server **rejected** with `FAILED_PRECONDITION` + `ConflictDetail` if it did not match the branch HEAD. In v2 the VCS is jj-style:
+In v1 a write carried a `base_revision` and the server **rejected** with `FAILED_PRECONDITION` + `ConflictDetail` if it did not match the branch HEAD. In v2 the JJ layer is jj-style:
 
 - Two writes starting from the same state **both commit**. jj records concurrent operations and merges their views on next load.
 - Edits to **different** declarations merge automatically (different per-declaration files in the tree).
@@ -201,7 +201,7 @@ A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService
 
 - **`CreateBranch`** creates a bookmark from `from` (default `"main"`); returns `BranchInfo` (`protected` is always reported `false` — protection lives in repo config, §8).
 - **`ListBranches`** / **`GetBranch`** enumerate bookmarks (optional `name_prefix`), reporting each bookmark's first target as `head_commit`.
-- **`DeleteBranch`** removes the bookmark via `Core::delete_bookmark` (delegating to `Vcs::delete_bookmark`).
+- **`DeleteBranch`** removes the bookmark via `Core::delete_bookmark` (delegating to `Jj::delete_bookmark`).
 
 ### 5.3 Tags
 
@@ -211,7 +211,7 @@ A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService
 
 ### 5.4 Merge
 
-`Merge(source_branch → target_branch)` returns the commit `target_branch` points to afterward. **AS-BUILT:** a real jj merge via `Core::merge` → `Vcs::merge` (`jj_lib::rewrite::merge_commit_trees`), producing a two-parent merge commit whose tree is jj's 3-way merge over the merge base. Same-declaration divergence becomes a stored jj first-class conflict, surfaced to the caller in `WriteResult::conflicted_decls` (the `MergeResponse` does not currently carry that field — callers can re-read the resulting commit to see them). `base_revision`/`idempotency_key`/`message` are accepted.
+`Merge(source_branch → target_branch)` returns the commit `target_branch` points to afterward. **AS-BUILT:** a real jj merge via `Core::merge` → `Jj::merge` (`jj_lib::rewrite::merge_commit_trees`), producing a two-parent merge commit whose tree is jj's 3-way merge over the merge base. Same-declaration divergence becomes a stored jj first-class conflict, surfaced to the caller in `WriteResult::conflicted_decls` (the `MergeResponse` does not currently carry that field — callers can re-read the resulting commit to see them). `base_revision`/`idempotency_key`/`message` are accepted.
 
 ---
 
@@ -238,7 +238,7 @@ message LogEntry { string commit_id=1; string change_id=2; repeated string paren
                    string author=4; string message=5; string timestamp=6; }
 ```
 
-Each entry exposes both the **`commit_id`** and the stable **`change_id`**. The walk is over the real commit/change graph (`Vcs::commit_log`) newest→oldest from `at` (defaults to the repo's configured default bookmark when unset). `limit = 0` means "use Core's default", currently 100.
+Each entry exposes both the **`commit_id`** and the stable **`change_id`**. The walk is over the real commit/change graph (`Jj::commit_log`) newest→oldest from `at` (defaults to the repo's configured default bookmark when unset). `limit = 0` means "use Core's default", currently 100.
 
 ### 6.2 `OpLog` — the audit record
 
@@ -249,7 +249,7 @@ message OperationRecord { string op_id=1; repeated string parents=2;
                           string description=3; string author=4; string timestamp=5; }
 ```
 
-Every schemahub write (mutation, transaction, bookmark move, tag, undo, …) is one operation. The VCS returns the chain oldest→newest along the head's parent chain; `limit = 0` returns the full log, `limit = n` trims the front (oldest entries) and keeps the most recent `n` operations.
+Every schemahub write (mutation, transaction, bookmark move, tag, undo, …) is one operation. The JJ returns the chain oldest→newest along the head's parent chain; `limit = 0` returns the full log, `limit = n` trims the front (oldest entries) and keeps the most recent `n` operations.
 
 ### 6.3 `Undo`
 
@@ -306,7 +306,7 @@ All three are **format-agnostic, whole-document** and share one mechanism: the s
 
 ### 7.3 `ApplyTransaction` — atomic batch
 
-`ApplyTransactionRequest { …, repeated TransactionOp operations }` applies an ordered batch in **one** commit / one operation; compatibility + reference integrity are checked on the **final** state. `TransactionOp` carries only `protobuf_op` | `fbs_op` (OpenAPI granular ops are not transactionable — §4.3). Empty `operations` → `INVALID_ARGUMENT`. All ops in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`; ops may target several schema files within that repo, in which case the core groups them by `schema_path`, applies each file's ops through the compiler, and commits every effect atomically via `Vcs::commit_write_multi` (one commit, one operation across all touched files).
+`ApplyTransactionRequest { …, repeated TransactionOp operations }` applies an ordered batch in **one** commit / one operation; compatibility + reference integrity are checked on the **final** state. `TransactionOp` carries only `protobuf_op` | `fbs_op` (OpenAPI granular ops are not transactionable — §4.3). Empty `operations` → `INVALID_ARGUMENT`. All ops in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`; ops may target several schema files within that repo, in which case the core groups them by `schema_path`, applies each file's ops through the compiler, and commits every effect atomically via `Jj::commit_write_multi` (one commit, one operation across all touched files).
 
 > **AS-BUILT — limits.** The proto comment says ≤500 ops / ≤20 schemas / 30 s. `AdminService.GetServerConfig` actually reports `max_ops_per_transaction = 100`, `max_schemas_per_transaction = 20`, `transaction_timeout_secs = 30`. The schema count now matches the proto's claim; the op count is still half. Treat the served config as authoritative.
 
@@ -367,10 +367,10 @@ service ProjectService {
 | `CreateProject` | **REAL** — wired to `Core::create_project`. Anonymous identities are rejected (`PERMISSION_DENIED`); the resolved caller becomes the project's Owner. |
 | `GetProject` | **REAL** — `Core::get_project`; `NOT_FOUND` if absent; `PERMISSION_DENIED` if the caller can't `Read` it. |
 | `ListProjects` | **REAL** — `Core::list_projects`; returns every project the caller can `Read` (public ∪ private-where-member), filtered by `name_prefix`. |
-| `DeleteProject` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1". |
+| `DeleteProject` | **UNIMPLEMENTED** — "not exposed by the JJ layer in v1". |
 | `CreateRepo`, `GetRepo`, `UpdateRepo` | echo back a `RepoConfig` with defaults (`default_branch="main"`, `protected_branches=["main"]`, direction `FULL`). No persisted repo registry yet. |
 | `ListRepos` | returns an empty list (no registry). |
-| `DeleteRepo` | **UNIMPLEMENTED** — "not exposed by the VCS layer in v1". |
+| `DeleteRepo` | **UNIMPLEMENTED** — "not exposed by the JJ layer in v1". |
 | `AddMember`, `RemoveMember`, `UpdateMemberRole` | **REAL** — wired to `Core::add_member` / `remove_member` / `update_member_role`. Owner-only (`Action::ManageProject`). The "last Owner" invariant is enforced fail-fast — these calls refuse to leave a project with zero Owners. |
 | `ListMembers` | **REAL** — `Core::list_members`; gated by `Action::Read`. |
 
@@ -416,7 +416,7 @@ Two modes ship in-tree (`schemahub-server/src/lib.rs::build_core`):
 | `FAILED_PRECONDITION` | compatibility violation (`CompatibilityError`); `RenderConflict` on a non-conflicted decl |
 | `PERMISSION_DENIED` / `UNAUTHENTICATED` | authz / authn failure (Noop default never raises these; BearerToken + RBAC mode raises them on missing/unknown token or insufficient role) |
 | `UNIMPLEMENTED` | `DeleteProject`, `DeleteRepo`; unsupported `PreviewCodegen` language/format (e.g. OpenAPI). `DeleteBranch`, `DeleteTag`, `AddMember`/`RemoveMember`/`UpdateMemberRole` are all implemented now. |
-| `INTERNAL` | server/VCS error |
+| `INTERNAL` | server/JJ error |
 
 Structured `status.details` (as `google.protobuf.Any`) carry `CompatibilityError` and `MutationValidationError` for programmatic inspection; the CLI unpacks and renders them.
 
@@ -472,6 +472,6 @@ schemahub codegen preview <project/repo/schema> [--branch] [--lang]
 - **One service per concern.** Seven services keep each `.proto` focused; `HistoryService` isolates the jj-specific surface so non-history clients ignore it.
 - **`change_id` on every write.** Durable identity replaces v1's CAS-as-identity. A client answers "did my edit land, and where is it now" via the change ID + op log even after the bookmark advanced or history was rewritten.
 - **`conflicted_decls`, not rejection.** Concurrency is surfaced as data the caller can resolve, never a hard error to retry against a moving target — the core agents-and-humans-editing-concurrently goal.
-- **Branches == bookmarks.** `RefService` keeps git-flavored branch/tag/merge naming as a thin alias over jj bookmarks, easing migration; deletion is deferred (UNIMPLEMENTED) until the VCS layer exposes it.
+- **Branches == bookmarks.** `RefService` keeps git-flavored branch/tag/merge naming as a thin alias over jj bookmarks, easing migration; deletion is deferred (UNIMPLEMENTED) until the JJ layer exposes it.
 - **`VersionRef` oneof.** Forces the caller to declare branch vs. tag vs. commit intent; read paths currently lean on the bookmark form.
 - **Format always explicit on create.** No content sniffing; the CLI infers from extension and sets `SchemaFormat`.

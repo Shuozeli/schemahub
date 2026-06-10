@@ -26,7 +26,7 @@ pub(crate) const DEFAULT_AUTHOR: &str = "schemahub";
 /// reach the commit path).
 ///
 /// This is the single source of truth for \"who's committing\" — handlers
-/// must not accept a client-supplied author string and pass it to the VCS,
+/// must not accept a client-supplied author string and pass it to the JJ layer,
 /// since that would let any authenticated caller forge an arbitrary audit
 /// trail.
 pub(crate) fn resolve_author(core: &Core, token: Option<&str>) -> Result<String, Status> {

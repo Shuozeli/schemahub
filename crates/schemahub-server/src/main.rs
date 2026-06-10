@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use schemahub_vcs::{ObjectDb, RedbObjectDb};
+use schemahub_jj::{ObjectDb, RedbObjectDb};
 
 use schemahub_server::{build_core, build_router, config::Config};
 
@@ -85,7 +85,7 @@ fn open_object_db(args: &Args, config: &Config) -> anyhow::Result<Arc<dyn Object
 
 #[cfg(feature = "postgres")]
 fn open_postgres(args: &Args, config: &Config) -> anyhow::Result<Arc<dyn ObjectDb>> {
-    use schemahub_vcs::PgObjectDb;
+    use schemahub_jj::PgObjectDb;
     let url = args
         .db_url
         .clone()

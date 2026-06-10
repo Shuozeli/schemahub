@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package cloudbuild.order.v1;
+
+import "acme/core/user/profile.proto";
+
+message PurchaseOrder {
+  string id = 1;
+  cloudbuild.user.v1.UserProfile buyer = 2;
+  string external_reference = 3;
+}

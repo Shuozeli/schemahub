@@ -1,9 +1,9 @@
-# schemahub — Design (v2: Compilers + Jujutsu-style VCS)
+# schemahub — Design (v2: Compilers + Jujutsu-style JJ)
 
 > This document specifies *how* schemahub is built. It supersedes the v1 git-style design (preserved in git history). Two project-level decisions drive this revision:
 >
 > 1. **Compilers, not bespoke parsers.** Protobuf and FlatBuffers are fronted by the sibling compiler projects `protobuf-rs` and `flatbuffers-rs`; OpenAPI is in-tree. schemahub does not hand-roll format parsers or ASTs.
-> 2. **Jujutsu-style VCS over a database.** The version-control layer uses the `jj-lib` model — content-addressed commits, stable change IDs, first-class conflicts, and an operation log with undo — with **custom backends that persist to a database** (not jj's on-disk git/file layout).
+> 2. **JJ over a database.** The storage layer uses the `jj-lib` model — content-addressed commits, stable change IDs, first-class conflicts, and an operation log with undo — with **custom backends that persist to a database** (not jj's on-disk git/file layout).
 >
 > Where this document names a `jj-lib` type or method, it follows jj-lib's model; exact signatures are pinned to the vendored jj-lib version during implementation (see §4.6 and Open Question 11 in `requirements.md`).
 
@@ -14,7 +14,7 @@
 schemahub is two layers with a single trait boundary between them.
 
 ```
-┌──────────────────────────── VCS layer (format-agnostic) ────────────────────────────┐
+┌──────────────────────────── JJ layer (format-agnostic) ────────────────────────────┐
 │                                                                                      │
 │   jj-lib model:  commits + change IDs · operation log + undo · first-class conflicts │
 │                  bookmarks · merge/rebase · auto-rebase of descendants               │
@@ -40,7 +40,7 @@ schemahub is two layers with a single trait boundary between them.
    └────────────────────┘          └──────────────────────┘          └─────────────────────┘
 ```
 
-**The VCS layer knows nothing about Protobuf, FlatBuffers, or OpenAPI.** It stores opaque per-declaration blobs and delegates all format-specific work to a `Compiler` via the trait below. Adding a format (SQL DDL, Thrift) is a new compiler crate; the VCS layer is untouched.
+**The JJ layer knows nothing about Protobuf, FlatBuffers, or OpenAPI.** It stores opaque per-declaration blobs and delegates all format-specific work to a `Compiler` via the trait below. Adding a format (SQL DDL, Thrift) is a new compiler crate; the JJ layer is untouched.
 
 **Key difference from v1:** v1 reduced this to a single `__schema__` blob per file fronted by hand-rolled mini-parsers. v2 fixes both: real compiler ASTs, and genuine per-declaration objects (§4.2) so jj's content-addressing, dedup, and first-class conflicts operate at declaration granularity.
 
@@ -48,7 +48,7 @@ schemahub is two layers with a single trait boundary between them.
 
 ## 2. The `Compiler` Trait
 
-This is the boundary between the two layers (v1 called it `FormatPlugin`; renamed to reflect that each implementation *is* a compiler front-end). A `DeclBlob` is the serialized AST of **one top-level declaration**; a `MetaBlob` is the file-level metadata (package, imports, syntax/edition). Both are opaque `Vec<u8>` to the VCS layer.
+This is the boundary between the two layers (v1 called it `FormatPlugin`; renamed to reflect that each implementation *is* a compiler front-end). A `DeclBlob` is the serialized AST of **one top-level declaration**; a `MetaBlob` is the file-level metadata (package, imports, syntax/edition). Both are opaque `Vec<u8>` to the JJ layer.
 
 ```rust
 pub trait Compiler: Send + Sync + 'static {
@@ -130,7 +130,7 @@ pub struct MetaBlob(pub Vec<u8>);
 
 ### 2.1 Blob encoding
 
-Each compiler serializes its AST nodes with a stable, versioned encoding, wrapped with a `blob_version: u32` for migration. The VCS layer never inspects these bytes — it only content-addresses and stores them. The encoding used per compiler is determined by what the underlying AST types support:
+Each compiler serializes its AST nodes with a stable, versioned encoding, wrapped with a `blob_version: u32` for migration. The JJ layer never inspects these bytes — it only content-addresses and stores them. The encoding used per compiler is determined by what the underlying AST types support:
 
 | Compiler | Encoding | Why |
 |----------|----------|-----|
@@ -187,7 +187,7 @@ No sibling compiler exists, so this stays in-tree. The existing in-tree AST (`do
 
 ---
 
-## 4. VCS Layer (jj-lib over a database)
+## 4. JJ Layer (jj-lib over a database)
 
 ### 4.1 What the jj model gives us
 
@@ -254,7 +254,7 @@ impl OpStore for DbOpStore {
 
 **Every schemahub write is one jj operation.** A mutation, a transaction, a bookmark move, a GC run, a role change — each is a `Transaction` that commits to a new `Operation`. This is the audit log (`who/when/what`) and the substrate for `undo` (restore the repo to a prior `OperationId`). It replaces v1's bespoke `pending/` GC roots and idempotency-as-durability machinery.
 
-`Vcs::undo` is a **linear monotonic walk-back stack**, not jj's bare op-toggle: consecutive `undo` calls step further back through the content-op chain (skipping leading `undo` ops at the head), rather than re-doing the previous undo. The newly recorded `undo` operation's view equals the target state's view; the response carries the id of the operation whose effect was rolled past.
+`Jj::undo` is a **linear monotonic walk-back stack**, not jj's bare op-toggle: consecutive `undo` calls step further back through the content-op chain (skipping leading `undo` ops at the head), rather than re-doing the previous undo. The newly recorded `undo` operation's view equals the target state's view; the response carries the id of the operation whose effect was rolled past.
 
 ### 4.5 Database choice
 
@@ -305,7 +305,7 @@ Project/repo namespacing: each `project/repo` is an independent jj repo (its own
 
 Identical to §5.1, except step 7 calls `compiler.apply_mutations(&schema, &ops)` (final-state validation only), step 8 checks every changed declaration, and step 9 writes all changes under **one** commit / one operation. Limits (≤ ops, ≤ schemas, timeout) are validated before step 7. Atomicity is inherent: a jj transaction either commits one operation or none.
 
-**Multi-file transactions.** A transaction may touch several schema files within one `(project, repo)`. The implementation (`schemahub-core/src/mutation/transaction.rs`) groups the ordered ops by `Mutation::schema_path` (preserving op order within each file and first-appearance file order), loads each touched file's base, applies that file's ops through the compiler to produce one `MutationEffect` per file, runs the compat gate per file when the bookmark is protected, and commits every effect atomically through `Vcs::commit_write_multi` — one commit, one operation across all touched files. Every op in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`.
+**Multi-file transactions.** A transaction may touch several schema files within one `(project, repo)`. The implementation (`schemahub-core/src/mutation/transaction.rs`) groups the ordered ops by `Mutation::schema_path` (preserving op order within each file and first-appearance file order), loads each touched file's base, applies that file's ops through the compiler to produce one `MutationEffect` per file, runs the compat gate per file when the bookmark is protected, and commits every effect atomically through `Jj::commit_write_multi` — one commit, one operation across all touched files. Every op in a transaction must share one `format_id` (transactions never mix formats) and one `(project, repo)`.
 
 Default limits served by the core (`TransactionLimits::default`): `max_ops = 100`, `max_schemas = 20`. The proto's `schema_service.proto` comment ("≤ 500 operations") is aspirational; `AdminService.GetServerConfig` reports the live values.
 
@@ -363,13 +363,13 @@ rpc GetSchemaSource(...)    // compiler.print(SchemaObjects) — reconstructed, 
 
 `FollowType` and `Search` use the dependency / name index; both can cross repo boundaries via the full `project/repo/schema` path in each `Import`.
 
-`Log` (the commit/change history) walks the **real** commit graph from a ref via `Vcs::commit_log`, newest→oldest, surfacing each commit's content-addressed `commit_id`, its stable jj `change_id` (reverse hex), parents, author, message, and timestamp. This is distinct from `OpLog` (the operation log audit record); see §6 / §4.4.
+`Log` (the commit/change history) walks the **real** commit graph from a ref via `Jj::commit_log`, newest→oldest, surfacing each commit's content-addressed `commit_id`, its stable jj `change_id` (reverse hex), parents, author, message, and timestamp. This is distinct from `OpLog` (the operation log audit record); see §6 / §4.4.
 
 ---
 
 ## 10. Codegen API
 
-Reuses the sibling compilers' codegen; the VCS layer pre-computes the transitive import closure (BFS over `imports`, resolving each import's pinned commit, with cycle detection) and hands a `SchemaClosure` to the compiler:
+Reuses the sibling compilers' codegen; the JJ layer pre-computes the transitive import closure (BFS over `imports`, resolving each import's pinned commit, with cycle detection) and hands a `SchemaClosure` to the compiler:
 
 ```proto
 rpc GetDescriptors(...)   // protobuf → FileDescriptorSet (via protoc-rs-codegen path);
@@ -471,16 +471,16 @@ Config: `~/.schemahub/config` (TOML) with `SCHEMAHUB_SERVER` / `SCHEMAHUB_TOKEN`
 The structural migration to v2 is **complete** (initial v2 commit landed on the `v2-rearchitecture` branch). Three things changed:
 
 1. **Hand-rolled parsers/ASTs replaced** by compiler wrappers over `protobuf-rs` / `flatbuffers-rs` (`schemahub-compiler-protobuf` / `schemahub-compiler-flatbuffers`); the OpenAPI AST stayed in-tree (`schemahub-compiler-openapi`). All three compilers ship in-tree printers (the sibling crates have none).
-2. **`__schema__` single-blob storage replaced** by the per-declaration split (§4.2). `Compiler::parse` returns `ParsedSchema { meta, decls }`; the VCS layer stores each decl at `<schema>/<decl>` with `__meta__` for the file metadata.
+2. **`__schema__` single-blob storage replaced** by the per-declaration split (§4.2). `Compiler::parse` returns `ParsedSchema { meta, decls }`; the JJ layer stores each decl at `<schema>/<decl>` with `__meta__` for the file metadata.
 3. **Bespoke git-style object store + refs + GC replaced** by the jj-lib model: `DbBackend` + `DbOpStore` over an `ObjectDb`, transactions, bookmarks, op-log/undo, first-class conflicts. Mutation/transaction flows (§5) keep their shape; the primitives underneath are jj-native.
 
-Net effect: `schemahub-types`, `schemahub-api`, `schemahub-server`, `schemahub-cli` largely survived (with the `FormatPlugin`→`Compiler` rename and conflict/op-log RPCs added); `schemahub-storage` + `schemahub-core/version_control` were reworked into `schemahub-vcs`; the plugin crates became compiler crates. See `crate-structure.md`.
+Net effect: `schemahub-types`, `schemahub-api`, `schemahub-server`, `schemahub-cli` largely survived (with the `FormatPlugin`→`Compiler` rename and conflict/op-log RPCs added); `schemahub-storage` + `schemahub-core/version_control` were reworked into `schemahub-jj`; the plugin crates became compiler crates. See `crate-structure.md`.
 
 ### Post-v2 increments
 
 After the v2 cut, two extensions landed on the same branch (not architectural changes, just filling in what v2 left as Noop / stub):
 
-- **Postgres `ObjectDb`** behind the `postgres` feature on `schemahub-vcs` (and forwarded to `schemahub-server` via `--features postgres`). Redb remains the default.
+- **Postgres `ObjectDb`** behind the `postgres` feature on `schemahub-jj` (and forwarded to `schemahub-server` via `--features postgres`). Redb remains the default.
 - **Project-scoped RBAC** — `BearerTokenAuthn` + `RoleBasedAuthz` over file-backed `RoleStore` + `ProjectStore` (JSON under `[auth].data_dir`), with `[projects.*]` bootstrap. See §11. Noop auth still ships when `[auth]` is absent.
 
 The repo registry (`CreateRepo` / `GetRepo` / `UpdateRepo` / `ListRepos`) remains mostly echo until a persisted repo registry lands.

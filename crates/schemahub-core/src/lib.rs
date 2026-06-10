@@ -1,10 +1,10 @@
-//! `schemahub-core` — orchestration over the VCS layer and the compiler
+//! `schemahub-core` — orchestration over the JJ layer and the compiler
 //! registry (crate-structure.md §3.3, design.md §5–§11).
 //!
 //! Core is the pass-through orchestrator: it never interprets mutation-op bytes
 //! — it routes by `format_id` to a [`Compiler`](schemahub_types::Compiler) from
 //! the [`CompilerRegistry`], runs the auth + compatibility policy, and delegates
-//! storage to [`Vcs`]. The mutation/transaction/exploration/codegen/conflict/
+//! storage to [`Jj`]. The mutation/transaction/exploration/codegen/conflict/
 //! history/gc flows are split into focused modules; their public methods are all
 //! `impl Core` blocks so the surface is a single type.
 //!
@@ -57,15 +57,15 @@ pub use request::{
     SearchHit, TransactionLimits, TransactionRequest,
 };
 
+use schemahub_jj::Jj;
 use schemahub_types::{AuthnProvider, AuthzPolicy};
-use schemahub_vcs::Vcs;
 
-/// The orchestration root. Holds the VCS handle, the compiler registry, the auth
+/// The orchestration root. Holds the JJ handle, the compiler registry, the auth
 /// providers, the per-repo compatibility config, the project + role registries,
 /// and the idempotency edge cache. Constructed by `schemahub-server` (the
 /// composition root). Cheap to share behind an `Arc` — all methods take `&self`.
 pub struct Core {
-    pub(crate) vcs: Arc<Vcs>,
+    pub(crate) jj: Arc<Jj>,
     pub(crate) registry: CompilerRegistry,
     pub(crate) authn: Arc<dyn AuthnProvider>,
     pub(crate) authz: Arc<dyn AuthzPolicy>,
@@ -80,13 +80,13 @@ impl Core {
     /// (non-persistent) role/project stores. Useful for tests and the
     /// getting-started default path where no `[auth]` is configured.
     pub fn new(
-        vcs: Arc<Vcs>,
+        jj: Arc<Jj>,
         registry: CompilerRegistry,
         authn: Arc<dyn AuthnProvider>,
         authz: Arc<dyn AuthzPolicy>,
     ) -> Self {
         Self::with_stores(
-            vcs,
+            jj,
             registry,
             authn,
             authz,
@@ -99,14 +99,14 @@ impl Core {
     /// Construct the core with an explicit per-repo config store, defaulting
     /// the role/project stores to empty in-memory stubs.
     pub fn with_config(
-        vcs: Arc<Vcs>,
+        jj: Arc<Jj>,
         registry: CompilerRegistry,
         authn: Arc<dyn AuthnProvider>,
         authz: Arc<dyn AuthzPolicy>,
         repo_configs: RepoConfigStore,
     ) -> Self {
         Self::with_stores(
-            vcs,
+            jj,
             registry,
             authn,
             authz,
@@ -119,7 +119,7 @@ impl Core {
     /// Construct the core with explicit role + project stores. This is the
     /// full constructor the server uses when `[auth]` is configured.
     pub fn with_stores(
-        vcs: Arc<Vcs>,
+        jj: Arc<Jj>,
         registry: CompilerRegistry,
         authn: Arc<dyn AuthnProvider>,
         authz: Arc<dyn AuthzPolicy>,
@@ -128,7 +128,7 @@ impl Core {
         project_store: Arc<dyn ProjectStore>,
     ) -> Self {
         Self {
-            vcs,
+            jj,
             registry,
             authn,
             authz,
@@ -144,10 +144,10 @@ impl Core {
         &self.registry
     }
 
-    /// Access the VCS handle (read-only). Lets the server perform low-level ops
+    /// Access the JJ handle (read-only). Lets the server perform low-level ops
     /// not yet wrapped by a Core method.
-    pub fn vcs(&self) -> &Arc<Vcs> {
-        &self.vcs
+    pub fn jj(&self) -> &Arc<Jj> {
+        &self.jj
     }
 
     /// Register / replace a repo's compatibility config at runtime.

@@ -11,8 +11,8 @@ use schemahub_api::schemahub_v1::exploration_service_client::ExplorationServiceC
 use schemahub_api::schemahub_v1::history_service_client::HistoryServiceClient;
 use schemahub_api::schemahub_v1::ref_service_client::RefServiceClient;
 use schemahub_api::schemahub_v1::schema_service_client::SchemaServiceClient;
+use schemahub_jj::{MemoryObjectDb, ObjectDb};
 use schemahub_server::{build_core, build_router, config::Config};
-use schemahub_vcs::{MemoryObjectDb, ObjectDb};
 use tokio::net::TcpListener;
 use tonic::transport::Channel;
 

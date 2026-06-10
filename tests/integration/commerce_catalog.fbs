@@ -1,0 +1,53 @@
+include "common/money.fbs";
+
+namespace commerce.catalog;
+
+enum Availability : byte {
+  Unknown = 0,
+  InStock = 1,
+  Backordered = 2,
+  Discontinued = 3
+}
+
+struct GeoPoint {
+  lat: double;
+  lng: double;
+}
+
+table Supplier {
+  id: string (key, id: 0);
+  name: string (required, id: 1);
+  warehouse_location: GeoPoint (id: 2);
+}
+
+table Product {
+  id: string (key, id: 0);
+  sku: string (required, id: 1);
+  title: string (id: 2);
+  availability: Availability = InStock (id: 3);
+  supplier: Supplier (id: 4);
+  tags: [string] (id: 5);
+  related: [Product] (id: 6);
+  old_rank: int (deprecated, id: 7);
+}
+
+table Category {
+  id: string (key);
+  path: [string];
+  featured_products: [Product];
+}
+
+union CatalogEntity {
+  product: Product,
+  supplier: Supplier,
+  category: Category
+}
+
+rpc_service CatalogService {
+  LookupProduct(Product): Product;
+  ListCategory(Category): Category;
+}
+
+root_type Product;
+file_identifier "CATL";
+file_extension "cat";

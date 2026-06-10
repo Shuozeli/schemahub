@@ -19,8 +19,8 @@ use schemahub_compiler_protobuf::{
     OpRemoveRpc, OpRemoveService, OpRenameEnumValue, OpRenameField, OpRenameMessage, OpRenameRpc,
     OpUpdateImport, ProtoOp,
 };
+use schemahub_jj::RefSpec;
 use schemahub_types::{DeclKind, DeclSummary, Language, Mutation, SchemaPath};
-use schemahub_vcs::RefSpec;
 
 /// Resolve a [`pb::VersionRef`] to a [`RefSpec`], defaulting to the `default`
 /// bookmark when unset. Tags/commits are honored; a bare branch maps to a

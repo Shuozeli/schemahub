@@ -32,12 +32,12 @@ See `docs/design.md` for the architecture deep-dive, `docs/grpc-api.md` for the 
 
 ## Workspace structure
 
-Nine crates, organized as two layers (format-agnostic VCS + per-format compilers):
+Nine crates, organized as two layers (format-agnostic JJ + per-format compilers):
 
 | Crate | Purpose |
 |---|---|
 | `schemahub-types` | Shared types, the `Compiler` trait, auth traits (`AuthnProvider`/`AuthzPolicy`), errors |
-| `schemahub-vcs` | jj-lib over a swappable `ObjectDb`: `DbBackend` + `DbOpStore`; redb default, in-memory + Postgres impls |
+| `schemahub-jj` | jj-lib over a swappable `ObjectDb`: `DbBackend` + `DbOpStore`; redb default, in-memory + Postgres impls |
 | `schemahub-core` | Orchestration: mutations, transactions, compatibility, conflicts, history, GC, RBAC (real `BearerTokenAuthn` + `RoleBasedAuthz`) |
 | `schemahub-api` | tonic/prost-generated gRPC bindings for the protos in `crates/schemahub-api/proto/schemahub/v1/` |
 | `schemahub-compiler-protobuf` | Protobuf compiler — wraps `protobuf-rs` (parse/AST/codegen); owns the `.proto` printer + mutation validator + compat checker |
@@ -195,7 +195,7 @@ Providing `--message` creates an annotated tag. Without it, the tag is lightweig
 schemahub log [--branch B] [--limit N] <project/repo>
 ```
 
-Default limit: 20 commits. Walks the real commit/change graph via `Vcs::commit_log`, surfacing each commit's content-addressed `commit_id`, stable jj `change_id`, parents, author, and message.
+Default limit: 20 commits. Walks the real commit/change graph via `Jj::commit_log`, surfacing each commit's content-addressed `commit_id`, stable jj `change_id`, parents, author, and message.
 
 ### `op log` — operation log (jj-style audit record)
 
@@ -550,7 +550,7 @@ Four roles, descending: `Owner` / `Maintainer` / `Writer` / `Reader`. `--force` 
 
 ## Storage
 
-The VCS layer (`schemahub-vcs`) implements jj-lib's `Backend` and `OpStore` traits over a small `ObjectDb` abstraction. Three backends ship:
+The JJ layer (`schemahub-jj`) implements jj-lib's `Backend` and `OpStore` traits over a small `ObjectDb` abstraction. Three backends ship:
 
 | Backend | Build | Use case |
 |---|---|---|

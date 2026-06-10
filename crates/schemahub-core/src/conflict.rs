@@ -1,8 +1,8 @@
 //! First-class conflict orchestration (design.md §6): render a conflicted
 //! declaration for display, and validate + apply a proposed resolution.
 
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, DeclBlob, SchemaPath};
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
@@ -11,7 +11,7 @@ use crate::Core;
 
 impl Core {
     /// Render a conflicted declaration's competing sides for human/agent display
-    /// (`vcs.read_conflict` → `compiler.render_conflict`).
+    /// (`jj.read_conflict` → `compiler.render_conflict`).
     pub fn render_conflict(
         &self,
         schema: &SchemaPath,
@@ -28,7 +28,7 @@ impl Core {
             &schema.repo,
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let sides = self.vcs.read_conflict(
+        let sides = self.jj.read_conflict(
             &schema.project,
             &schema.repo,
             &schema.schema_name,
@@ -39,7 +39,7 @@ impl Core {
     }
 
     /// Validate a proposed resolution and commit it, replacing the conflict
-    /// (`compiler.validate_resolution` → `vcs.resolve_conflict`).
+    /// (`compiler.validate_resolution` → `jj.resolve_conflict`).
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_conflict(
         &self,
@@ -62,7 +62,7 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         compiler.validate_resolution(&resolved)?;
-        let write = self.vcs.resolve_conflict(
+        let write = self.jj.resolve_conflict(
             &schema.project,
             &schema.repo,
             bookmark,

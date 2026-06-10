@@ -2,8 +2,8 @@
 //! against. The server maps gRPC messages (schemahub-api) onto these and back
 //! (`wire.rs`). Core never touches tonic/prost; these are plain structs.
 
+use schemahub_jj::OpRecord;
 use schemahub_types::{DeclSummary, Language, Mutation, SchemaPath};
-use schemahub_vcs::OpRecord;
 
 /// A single-mutation request (design.md §5.1).
 #[derive(Clone, Debug)]

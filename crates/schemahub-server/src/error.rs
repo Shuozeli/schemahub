@@ -6,8 +6,8 @@
 //! `UNAUTHENTICATED` / `PERMISSION_DENIED`; bad input to `INVALID_ARGUMENT`.
 
 use schemahub_core::CoreError;
+use schemahub_jj::JjError;
 use schemahub_types::{AuthnError, AuthzError, MutationError};
-use schemahub_vcs::VcsError;
 use tonic::Status;
 
 /// Convert a [`CoreError`] into a `tonic::Status`.
@@ -19,7 +19,7 @@ pub fn to_status(err: CoreError) -> Status {
         CoreError::UndetectableFormat(s) => {
             Status::invalid_argument(format!("could not detect a format for schema '{s}'"))
         }
-        CoreError::Vcs(e) => vcs_to_status(e),
+        CoreError::Jj(e) => jj_to_status(e),
         CoreError::Authn(e) => authn_to_status(e),
         CoreError::Authz(AuthzError::PermissionDenied(m)) => Status::permission_denied(m),
         CoreError::Mutation(e) => mutation_to_status(e),
@@ -45,18 +45,18 @@ pub fn to_status(err: CoreError) -> Status {
     }
 }
 
-fn vcs_to_status(err: VcsError) -> Status {
+fn jj_to_status(err: JjError) -> Status {
     match err {
-        VcsError::ObjectNotFound
-        | VcsError::DeclNotFound(_)
-        | VcsError::SchemaNotFound(_)
-        | VcsError::BookmarkNotFound(_)
-        | VcsError::TagNotFound(_) => Status::not_found(err.to_string()),
-        VcsError::BookmarkExists(_) => Status::already_exists(err.to_string()),
-        VcsError::NothingToUndo | VcsError::NotConflicted { .. } | VcsError::BadRef(_) => {
+        JjError::ObjectNotFound
+        | JjError::DeclNotFound(_)
+        | JjError::SchemaNotFound(_)
+        | JjError::BookmarkNotFound(_)
+        | JjError::TagNotFound(_) => Status::not_found(err.to_string()),
+        JjError::BookmarkExists(_) => Status::already_exists(err.to_string()),
+        JjError::NothingToUndo | JjError::NotConflicted { .. } | JjError::BadRef(_) => {
             Status::failed_precondition(err.to_string())
         }
-        VcsError::ObjectDb(_) | VcsError::Corrupt(_) | VcsError::Other(_) => {
+        JjError::ObjectDb(_) | JjError::Corrupt(_) | JjError::Other(_) => {
             Status::internal(err.to_string())
         }
     }

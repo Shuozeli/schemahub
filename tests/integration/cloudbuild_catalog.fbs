@@ -1,0 +1,17 @@
+include "acme/core/supplier/supplier.fbs";
+
+namespace cloudbuild.catalog;
+
+enum SkuState : byte {
+  Unknown = 0,
+  Active = 1,
+  Retired = 2
+}
+
+table Sku {
+  id: string (key);
+  supplier: Supplier;
+  state: SkuState = Active;
+}
+
+root_type Sku;

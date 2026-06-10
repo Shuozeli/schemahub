@@ -1,4 +1,4 @@
-//! `schemahub-vcs` — the format-agnostic version-control layer
+//! `schemahub-jj` — the format-agnostic JJ layer
 //! (crate-structure.md §3.2), built on the **real Jujutsu library** (`jj-lib`).
 //!
 //! This crate implements jj-lib's [`Backend`](jj_lib::backend::Backend)
@@ -53,11 +53,11 @@ const META_NAME: &str = "__meta__";
 /// Operation-metadata attribute key under which the schemahub-resolved audit
 /// author (the authenticated identity for the request, set by the server's
 /// `resolve_author`) is stored on every op-log entry. Read back by
-/// [`Vcs::list_operations`] and exposed in [`OpRecord::author`].
+/// [`Jj::list_operations`] and exposed in [`OpRecord::author`].
 pub(crate) const AUTHOR_ATTRIBUTE: &str = "schemahub.author";
 
 #[derive(Debug, Error)]
-pub enum VcsError {
+pub enum JjError {
     #[error("object store error: {0}")]
     ObjectDb(object_db::ObjectDbError),
     #[error("object not found")]
@@ -80,11 +80,11 @@ pub enum VcsError {
     NotConflicted { decl: String },
     #[error("corrupt repository data: {0}")]
     Corrupt(String),
-    #[error("vcs error: {0}")]
+    #[error("jj error: {0}")]
     Other(String),
 }
 
-pub type VcsResult<T> = Result<T, VcsError>;
+pub type JjResult<T> = Result<T, JjError>;
 
 /// The full ref namespace for resolving reads (`at_ref` in the read API): a
 /// bookmark name, a tag name, or a raw commit id (hex).
@@ -124,7 +124,7 @@ pub struct OpRecord {
     pub timestamp: String,
 }
 
-/// A commit/change graph node returned by [`Vcs::commit_log`].
+/// A commit/change graph node returned by [`Jj::commit_log`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitRecord {
     pub commit_id: String,
@@ -135,17 +135,17 @@ pub struct CommitRecord {
     pub timestamp: String,
 }
 
-/// The schemahub-shaped VCS handle — the contract `schemahub-core` consumes.
+/// The schemahub-shaped JJ handle — the contract `schemahub-core` consumes.
 ///
 /// All methods are synchronous; the jj async backend is bridged via a dedicated
 /// runtime owned by the inner [`Store`] (see `repo.rs`). A `(project, repo)`
 /// pair scopes the op-log and bookmarks; content objects dedup globally.
-pub struct Vcs {
+pub struct Jj {
     store: Store,
 }
 
-impl Vcs {
-    /// Construct the VCS over a concrete object store.
+impl Jj {
+    /// Construct the JJ layer over a concrete object store.
     pub fn new(db: Arc<dyn ObjectDb>) -> Self {
         Self {
             store: Store::new(db),
@@ -160,7 +160,7 @@ impl Vcs {
     // ── Ref resolution ────────────────────────────────────────────────────────
 
     /// Resolve a [`RefSpec`] to a [`CommitId`] against the repo's current view.
-    fn resolve_ref(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> VcsResult<CommitId> {
+    fn resolve_ref(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> JjResult<CommitId> {
         let view = repo.view();
         match at {
             RefSpec::Bookmark(name) => {
@@ -169,7 +169,7 @@ impl Vcs {
                     .added_ids()
                     .next()
                     .cloned()
-                    .ok_or_else(|| VcsError::BookmarkNotFound(name.clone()))
+                    .ok_or_else(|| JjError::BookmarkNotFound(name.clone()))
             }
             RefSpec::Tag(name) => {
                 let target = view.get_local_tag(RefName::new(name));
@@ -177,39 +177,39 @@ impl Vcs {
                     .added_ids()
                     .next()
                     .cloned()
-                    .ok_or_else(|| VcsError::TagNotFound(name.clone()))
+                    .ok_or_else(|| JjError::TagNotFound(name.clone()))
             }
             RefSpec::Commit(id_hex) => {
-                CommitId::try_from_hex(id_hex).ok_or_else(|| VcsError::BadRef(id_hex.clone()))
+                CommitId::try_from_hex(id_hex).ok_or_else(|| JjError::BadRef(id_hex.clone()))
             }
         }
     }
 
     /// Resolve a ref for a write, tolerating a missing bookmark (returns None so
     /// a fresh bookmark can be created).
-    fn try_resolve(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> VcsResult<Option<CommitId>> {
+    fn try_resolve(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> JjResult<Option<CommitId>> {
         match self.resolve_ref(repo, at) {
             Ok(id) => Ok(Some(id)),
-            Err(VcsError::BookmarkNotFound(_)) | Err(VcsError::TagNotFound(_)) => Ok(None),
+            Err(JjError::BookmarkNotFound(_)) | Err(JjError::TagNotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    fn map_jj<T, E: std::fmt::Display>(r: Result<T, E>) -> VcsResult<T> {
-        r.map_err(|e| VcsError::Other(e.to_string()))
+    fn map_jj<T, E: std::fmt::Display>(r: Result<T, E>) -> JjResult<T> {
+        r.map_err(|e| JjError::Other(e.to_string()))
     }
 
     // ── Reads ─────────────────────────────────────────────────────────────────
 
     /// Reassemble a schema file's objects (meta + clean decls) at a ref.
-    /// Conflicted declarations are omitted; inspect them via [`Vcs::read_conflict`].
+    /// Conflicted declarations are omitted; inspect them via [`Jj::read_conflict`].
     pub fn load_schema(
         &self,
         project: &str,
         repo: &str,
         schema_path: &str,
         at_ref: &RefSpec,
-    ) -> VcsResult<SchemaObjects> {
+    ) -> JjResult<SchemaObjects> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
@@ -249,7 +249,7 @@ impl Vcs {
             }
         }
         if !found_schema {
-            return Err(VcsError::SchemaNotFound(schema_path.to_string()));
+            return Err(JjError::SchemaNotFound(schema_path.to_string()));
         }
         Ok(SchemaObjects { meta, decls })
     }
@@ -260,7 +260,7 @@ impl Vcs {
         project: &str,
         repo: &str,
         at_ref: &RefSpec,
-    ) -> VcsResult<Vec<String>> {
+    ) -> JjResult<Vec<String>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
@@ -287,13 +287,13 @@ impl Vcs {
         repo: &str,
         schema_path: &str,
         at_ref: &RefSpec,
-    ) -> VcsResult<Vec<String>> {
+    ) -> JjResult<Vec<String>> {
         let objs = self.load_schema(project, repo, schema_path, at_ref)?;
         Ok(objs.decls.keys().cloned().collect())
     }
 
     /// Fetch one declaration's blob at a ref. Errors if the declaration is
-    /// conflicted (use [`Vcs::read_conflict`]).
+    /// conflicted (use [`Jj::read_conflict`]).
     pub fn get_declaration(
         &self,
         project: &str,
@@ -301,7 +301,7 @@ impl Vcs {
         schema_path: &str,
         decl: &str,
         at_ref: &RefSpec,
-    ) -> VcsResult<DeclBlob> {
+    ) -> JjResult<DeclBlob> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
@@ -316,18 +316,18 @@ impl Vcs {
             Ok(Some(TreeValue::File { id, .. })) => {
                 Ok(DeclBlob::new(self.read_file(&jj_repo, &id)?))
             }
-            Ok(Some(_)) => Err(VcsError::Corrupt(format!(
+            Ok(Some(_)) => Err(JjError::Corrupt(format!(
                 "{schema_path}/{decl} is not a file"
             ))),
-            Ok(None) => Err(VcsError::DeclNotFound(decl.to_string())),
-            Err(_) => Err(VcsError::NotConflicted {
+            Ok(None) => Err(JjError::DeclNotFound(decl.to_string())),
+            Err(_) => Err(JjError::NotConflicted {
                 decl: format!("{decl} is conflicted; use read_conflict"),
             }),
         }
     }
 
     /// Read a file blob by jj FileId.
-    fn read_file(&self, repo: &Arc<ReadonlyRepo>, id: &FileId) -> VcsResult<Vec<u8>> {
+    fn read_file(&self, repo: &Arc<ReadonlyRepo>, id: &FileId) -> JjResult<Vec<u8>> {
         use tokio::io::AsyncReadExt as _;
         let bytes = self.store.block_on(async {
             let mut reader = repo
@@ -345,7 +345,7 @@ impl Vcs {
     }
 
     /// Write a file blob, returning its jj FileId.
-    fn write_file(&self, repo: &Arc<ReadonlyRepo>, bytes: &[u8]) -> VcsResult<FileId> {
+    fn write_file(&self, repo: &Arc<ReadonlyRepo>, bytes: &[u8]) -> JjResult<FileId> {
         let id = self.store.block_on(async {
             let mut cursor = std::io::Cursor::new(bytes);
             repo.store()
@@ -370,7 +370,7 @@ impl Vcs {
         effect: MutationEffect,
         author: &str,
         message: &str,
-    ) -> VcsResult<WriteResult> {
+    ) -> JjResult<WriteResult> {
         self.commit_write_multi(
             project,
             repo,
@@ -382,7 +382,7 @@ impl Vcs {
         )
     }
 
-    /// Like [`Vcs::commit_write`] but touches several schema files atomically in
+    /// Like [`Jj::commit_write`] but touches several schema files atomically in
     /// one commit / one operation.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_write_multi(
@@ -394,7 +394,7 @@ impl Vcs {
         effects: Vec<(String, MutationEffect)>,
         author: &str,
         message: &str,
-    ) -> VcsResult<WriteResult> {
+    ) -> JjResult<WriteResult> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
 
@@ -484,7 +484,7 @@ impl Vcs {
         builder: &mut jj_lib::merged_tree_builder::MergedTreeBuilder,
         schema_path: &str,
         effect: &MutationEffect,
-    ) -> VcsResult<()> {
+    ) -> JjResult<()> {
         if let Some(meta) = &effect.meta {
             let id = self.write_file(repo, meta.as_bytes())?;
             builder.set_or_remove(decl_path(schema_path, META_NAME)?, resolved_file(id));
@@ -507,7 +507,7 @@ impl Vcs {
         base: Option<&jj_lib::commit::Commit>,
         theirs: &jj_lib::merged_tree::MergedTree,
         ours: &jj_lib::merged_tree::MergedTree,
-    ) -> VcsResult<jj_lib::merged_tree::MergedTree> {
+    ) -> JjResult<jj_lib::merged_tree::MergedTree> {
         let base_tree = match base {
             Some(c) => c.tree(),
             None => repo.store().empty_merged_tree(),
@@ -528,7 +528,7 @@ impl Vcs {
     /// The conflicted declaration names in a tree. Each conflict is a
     /// `<schema>/<decl>` path; we return the bare `<decl>` basename (matching the
     /// `commit_write` contract — the touched schema file is known to the caller).
-    fn conflicted_decls(&self, tree: &jj_lib::merged_tree::MergedTree) -> VcsResult<Vec<String>> {
+    fn conflicted_decls(&self, tree: &jj_lib::merged_tree::MergedTree) -> JjResult<Vec<String>> {
         let mut out = Vec::new();
         for (path, value) in tree.conflicts() {
             Self::map_jj(value)?; // surface read errors
@@ -552,14 +552,14 @@ impl Vcs {
             .set_local_bookmark_target(RefName::new(bookmark), RefTarget::normal(commit));
     }
 
-    fn commit_tx(&self, tx: jj_lib::transaction::Transaction, description: &str) -> VcsResult<()> {
+    fn commit_tx(&self, tx: jj_lib::transaction::Transaction, description: &str) -> JjResult<()> {
         Self::map_jj(self.store.block_on(tx.commit(description.to_string()))).map(|_| ())
     }
 
     /// Stamp the schemahub-resolved audit author onto a transaction's op-log
     /// metadata. jj's `UserSettings::operation_username` would otherwise
     /// supply a stable but anonymous \"jj\" / hostname value; the
-    /// `AUTHOR_ATTRIBUTE` is preferred by [`Vcs::list_operations`] over
+    /// `AUTHOR_ATTRIBUTE` is preferred by [`Jj::list_operations`] over
     /// jj's default so the op-log records *who* drove the change.
     fn record_author(tx: &mut jj_lib::transaction::Transaction, author: &str) {
         if !author.is_empty() {
@@ -577,7 +577,7 @@ impl Vcs {
         name: &str,
         from: &RefSpec,
         author: &str,
-    ) -> VcsResult<String> {
+    ) -> JjResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
@@ -585,7 +585,7 @@ impl Vcs {
             .get_local_bookmark(RefName::new(name))
             .is_present()
         {
-            return Err(VcsError::BookmarkExists(name.to_string()));
+            return Err(JjError::BookmarkExists(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, from)?;
         let mut tx = jj_repo.start_transaction();
@@ -604,7 +604,7 @@ impl Vcs {
         name: &str,
         to: &RefSpec,
         author: &str,
-    ) -> VcsResult<String> {
+    ) -> JjResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
@@ -612,7 +612,7 @@ impl Vcs {
             .get_local_bookmark(RefName::new(name))
             .is_absent()
         {
-            return Err(VcsError::BookmarkNotFound(name.to_string()));
+            return Err(JjError::BookmarkNotFound(name.to_string()));
         }
         let commit = self.resolve_ref(&jj_repo, to)?;
         let mut tx = jj_repo.start_transaction();
@@ -630,7 +630,7 @@ impl Vcs {
         repo: &str,
         name: &str,
         author: &str,
-    ) -> VcsResult<()> {
+    ) -> JjResult<()> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
@@ -638,7 +638,7 @@ impl Vcs {
             .get_local_bookmark(RefName::new(name))
             .is_absent()
         {
-            return Err(VcsError::BookmarkNotFound(name.to_string()));
+            return Err(JjError::BookmarkNotFound(name.to_string()));
         }
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
@@ -652,7 +652,7 @@ impl Vcs {
         &self,
         project: &str,
         repo: &str,
-    ) -> VcsResult<Vec<(String, Vec<String>)>> {
+    ) -> JjResult<Vec<(String, Vec<String>)>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         Ok(jj_repo
@@ -675,7 +675,7 @@ impl Vcs {
         name: &str,
         at: &RefSpec,
         author: &str,
-    ) -> VcsResult<String> {
+    ) -> JjResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit = self.resolve_ref(&jj_repo, at)?;
@@ -688,11 +688,11 @@ impl Vcs {
     }
 
     /// Delete a tag.
-    pub fn delete_tag(&self, project: &str, repo: &str, name: &str, author: &str) -> VcsResult<()> {
+    pub fn delete_tag(&self, project: &str, repo: &str, name: &str, author: &str) -> JjResult<()> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo.view().get_local_tag(RefName::new(name)).is_absent() {
-            return Err(VcsError::TagNotFound(name.to_string()));
+            return Err(JjError::TagNotFound(name.to_string()));
         }
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
@@ -702,7 +702,7 @@ impl Vcs {
     }
 
     /// List tags (name → commit id) at the current view.
-    pub fn list_tags(&self, project: &str, repo: &str) -> VcsResult<Vec<(String, String)>> {
+    pub fn list_tags(&self, project: &str, repo: &str) -> JjResult<Vec<(String, String)>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         Ok(jj_repo
@@ -721,7 +721,7 @@ impl Vcs {
 
     /// List the operation log for a repo, ordered oldest→newest along the
     /// current head's parent chain (design.md §4.4).
-    pub fn list_operations(&self, project: &str, repo: &str) -> VcsResult<Vec<OpRecord>> {
+    pub fn list_operations(&self, project: &str, repo: &str) -> JjResult<Vec<OpRecord>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let loader = jj_repo.loader();
@@ -775,7 +775,7 @@ impl Vcs {
     /// The current displayed state is content op `C_(n-u)`; this call advances to
     /// `C_(n-u-1)`, or to the empty/initial state once the oldest write is undone.
     /// `NothingToUndo` once there is nothing older to roll back to.
-    pub fn undo(&self, project: &str, repo: &str, author: &str) -> VcsResult<String> {
+    pub fn undo(&self, project: &str, repo: &str, author: &str) -> JjResult<String> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let loader = jj_repo.loader();
@@ -813,7 +813,7 @@ impl Vcs {
 
         // No content to roll back at all.
         if content_ops.is_empty() {
-            return Err(VcsError::NothingToUndo);
+            return Err(JjError::NothingToUndo);
         }
 
         // Target the change `leading_undos + 1` steps back from the newest write.
@@ -822,7 +822,7 @@ impl Vcs {
         // depth  > len: already at empty — nothing left to undo.
         let depth = leading_undos + 1;
         if depth > content_ops.len() {
-            return Err(VcsError::NothingToUndo);
+            return Err(JjError::NothingToUndo);
         }
         // The op identifying the change being undone (the one whose effect we are
         // rolling past): the content op currently displayed, at index `leading_undos`.
@@ -878,7 +878,7 @@ impl Vcs {
         repo: &str,
         at_ref: &RefSpec,
         limit: usize,
-    ) -> VcsResult<Vec<CommitRecord>> {
+    ) -> JjResult<Vec<CommitRecord>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let start = self.resolve_ref(&jj_repo, at_ref)?;
@@ -924,7 +924,7 @@ impl Vcs {
         schema_path: &str,
         decl: &str,
         at_ref: &RefSpec,
-    ) -> VcsResult<ConflictSides> {
+    ) -> JjResult<ConflictSides> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
@@ -936,7 +936,7 @@ impl Vcs {
         let path = decl_path(schema_path, decl)?;
         let value = Self::map_jj(self.store.block_on(tree.path_value(&path)))?;
         if value.is_resolved() {
-            return Err(VcsError::NotConflicted {
+            return Err(JjError::NotConflicted {
                 decl: decl.to_string(),
             });
         }
@@ -959,7 +959,7 @@ impl Vcs {
         &self,
         repo: &Arc<ReadonlyRepo>,
         value: &TreeValue,
-    ) -> VcsResult<Option<DeclBlob>> {
+    ) -> JjResult<Option<DeclBlob>> {
         match value {
             TreeValue::File { id, .. } => Ok(Some(DeclBlob::new(self.read_file(repo, id)?))),
             _ => Ok(None),
@@ -979,12 +979,12 @@ impl Vcs {
         resolved: DeclBlob,
         author: &str,
         message: &str,
-    ) -> VcsResult<WriteResult> {
+    ) -> JjResult<WriteResult> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let tip = self
             .resolve_ref(&jj_repo, &RefSpec::bookmark(bookmark))
-            .map_err(|_| VcsError::BookmarkNotFound(bookmark.to_string()))?;
+            .map_err(|_| JjError::BookmarkNotFound(bookmark.to_string()))?;
         let tip_commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&tip)))?;
 
         let file_id = self.write_file(&jj_repo, resolved.as_bytes())?;
@@ -1029,15 +1029,15 @@ impl Vcs {
         src: &str,
         dst: &str,
         author: &str,
-    ) -> VcsResult<WriteResult> {
+    ) -> JjResult<WriteResult> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
         let src_id = self
             .resolve_ref(&jj_repo, &RefSpec::bookmark(src))
-            .map_err(|_| VcsError::BookmarkNotFound(src.to_string()))?;
+            .map_err(|_| JjError::BookmarkNotFound(src.to_string()))?;
         let dst_id = self
             .resolve_ref(&jj_repo, &RefSpec::bookmark(dst))
-            .map_err(|_| VcsError::BookmarkNotFound(dst.to_string()))?;
+            .map_err(|_| JjError::BookmarkNotFound(dst.to_string()))?;
 
         let dst_commit = Self::map_jj(
             self.store
@@ -1086,7 +1086,7 @@ impl Vcs {
     /// object reachable from the repos' bookmark/tag/head targets and the full
     /// op-log (so undo keeps working), then sweeps unreachable
     /// File/Tree/Commit/View objects. Returns the number of objects swept.
-    pub fn gc(&self, repos: &[(String, String)]) -> VcsResult<usize> {
+    pub fn gc(&self, repos: &[(String, String)]) -> JjResult<usize> {
         use std::collections::HashSet;
 
         let mut reachable_commits: HashSet<String> = HashSet::new();
@@ -1137,7 +1137,7 @@ impl Vcs {
         let mut queue: Vec<String> = reachable_commits.iter().cloned().collect();
         while let Some(c_hex) = queue.pop() {
             let cid = CommitId::try_from_hex(&c_hex).ok_or_else(|| {
-                VcsError::Corrupt(format!("malformed reachable commit hex: {c_hex}"))
+                JjError::Corrupt(format!("malformed reachable commit hex: {c_hex}"))
             })?;
             if cid == root_id {
                 continue;
@@ -1177,7 +1177,7 @@ impl Vcs {
         tree_id: &jj_lib::backend::TreeId,
         trees: &mut std::collections::HashSet<String>,
         files: &mut std::collections::HashSet<String>,
-    ) -> VcsResult<()> {
+    ) -> JjResult<()> {
         if !trees.insert(tree_id.hex()) {
             return Ok(());
         }
@@ -1201,11 +1201,7 @@ impl Vcs {
         Ok(())
     }
 
-    fn sweep(
-        &self,
-        kind: ObjectKind,
-        keep: &std::collections::HashSet<String>,
-    ) -> VcsResult<usize> {
+    fn sweep(&self, kind: ObjectKind, keep: &std::collections::HashSet<String>) -> JjResult<usize> {
         let mut swept = 0;
         for id in self.store.db.list_objects(kind)? {
             if !keep.contains(&id.to_hex()) {
@@ -1244,10 +1240,10 @@ fn decode_decl_name(component: &str) -> String {
 /// `__meta__`. The decl-name component is encoded so names containing `/` (or
 /// `%`) map to a single jj path component under the schema subtree and decode
 /// back to the exact original name. The schema-file level is NOT encoded.
-fn decl_path(schema: &str, name: &str) -> VcsResult<RepoPathBuf> {
+fn decl_path(schema: &str, name: &str) -> JjResult<RepoPathBuf> {
     let encoded = encode_decl_name(name);
     RepoPathBuf::from_internal_string(format!("{schema}/{encoded}"))
-        .map_err(|e| VcsError::Corrupt(format!("bad path {schema}/{encoded}: {e}")))
+        .map_err(|e| JjError::Corrupt(format!("bad path {schema}/{encoded}: {e}")))
 }
 
 /// A resolved (non-conflicted) file tree value for `MergedTreeBuilder`.

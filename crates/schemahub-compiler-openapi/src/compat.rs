@@ -25,8 +25,8 @@ use schemahub_types::blob::DeclBlob;
 use schemahub_types::compat::{CompatibilityDirection, CompatibilityRules, CompatibilityViolation};
 
 use crate::ast::{
-    ComponentSchemaBlob, DeclPayload, HttpMethod, JsonSchemaDef, OperationDef, ParameterDef,
-    ParameterOrRef, PathItemBlob, SchemaOrRef,
+    ComponentSchemaBlob, DeclPayload, HttpMethod, JsonSchemaDef, OperationDef, ParameterOrRef,
+    PathItemBlob, SchemaOrRef,
 };
 use crate::blob::decode_decl;
 use crate::diff::decl_key;
@@ -207,9 +207,7 @@ fn inline_params(op: &OperationDef) -> Vec<(String, bool)> {
     op.parameters
         .iter()
         .filter_map(|p| match p {
-            ParameterOrRef::Inline(ParameterDef { name, required, .. }) => {
-                Some((name.clone(), *required))
-            }
+            ParameterOrRef::Inline(param) => Some((param.name.clone(), param.required)),
             ParameterOrRef::Ref(_) => None,
         })
         .collect()

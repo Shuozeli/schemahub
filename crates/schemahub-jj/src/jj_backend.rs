@@ -272,7 +272,7 @@ impl Backend for DbBackend {
     }
 
     fn gc(&self, _index: &dyn Index, _keep_newer: SystemTime) -> BackendResult<()> {
-        // Reachability-based GC is implemented at the schemahub `Vcs::gc` level
+        // Reachability-based GC is implemented at the schemahub `Jj::gc` level
         // over the `ObjectDb`; jj's per-backend gc is a no-op here.
         Ok(())
     }

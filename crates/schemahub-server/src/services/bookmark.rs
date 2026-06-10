@@ -1,14 +1,14 @@
 //! `RefService` — commits, diff, branches (== bookmarks), tags, merge
 //! (design.md §6, §12). Branch RPCs are kept working over the jj bookmark model
 //! (branch name == bookmark name). Commit graph reads walk the real
-//! commit/change graph via `Core::log` (`Vcs::commit_log`).
+//! commit/change graph via `Core::log` (`Jj::commit_log`).
 
 use std::pin::Pin;
 use std::sync::Arc;
 
 use schemahub_core::Core;
+use schemahub_jj::{JjError, RefSpec};
 use schemahub_types::{DeclChange, SchemaPath};
-use schemahub_vcs::{RefSpec, VcsError};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -66,7 +66,7 @@ impl RefService for BookmarkHandler {
         let token = token_from(&request)?;
         let r = request.into_inner();
         // Walk the real commit graph from `from` (default: default branch HEAD),
-        // already returned newest-first by the VCS.
+        // already returned newest-first by the JJ layer.
         let from = wire::version_ref_to_refspec(&r.from, DEFAULT_BOOKMARK);
         let entries = self
             .core
@@ -86,7 +86,7 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::DiffResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        // Diff is a read; authorize before touching the VCS so anonymous
+        // Diff is a read; authorize before touching the JJ layer so anonymous
         // reads on private projects are refused (design.md §6).
         self.core
             .authorize_repo_action(
@@ -109,12 +109,12 @@ impl RefService for BookmarkHandler {
         } else {
             let mut names = std::collections::BTreeSet::new();
             for side in [&head, &base] {
-                match self.core.vcs().list_schemas(&r.project, &r.repo, side) {
+                match self.core.jj().list_schemas(&r.project, &r.repo, side) {
                     Ok(s) => names.extend(s),
                     Err(
-                        VcsError::BookmarkNotFound(_)
-                        | VcsError::TagNotFound(_)
-                        | VcsError::SchemaNotFound(_),
+                        JjError::BookmarkNotFound(_)
+                        | JjError::TagNotFound(_)
+                        | JjError::SchemaNotFound(_),
                     ) => {}
                     Err(e) => return Err(to_status(e.into())),
                 }

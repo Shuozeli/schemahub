@@ -1,4 +1,4 @@
-//! End-to-end integration tests for the Jujutsu-style version-control workflows
+//! End-to-end integration tests for JJ-backed branch/tag/history workflows
 //! of the schema registry, driven through the real in-process gRPC server:
 //! bookmarks/branches, tags, merge, diff, history/undo, and idempotency.
 //!
@@ -21,6 +21,7 @@ message User {
 /// Build an `apply_mutation` request that adds an OPTIONAL (singular) field to a
 /// protobuf message. An optional add is FULL-compatible, so it is allowed even on
 /// the protected `main` bookmark.
+#[allow(clippy::too_many_arguments)]
 fn add_field_request(
     project: &str,
     repo: &str,
@@ -889,5 +890,180 @@ async fn search_honors_at_ref() {
             .iter()
             .any(|r| r.declaration.as_ref().is_some_and(|d| d.name == "Account")),
         "Account should NOT be visible on main after rename"
+    );
+}
+
+// ── 10. Current OCC / tag-name semantics ─────────────────────────────────────
+
+#[tokio::test]
+async fn stale_base_revision_on_apply_mutation_is_currently_accepted() {
+    // Arrange: create a schema on main and remember that initial commit as a
+    // stale client base, then advance main once.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let initial = create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        pb::SchemaFormat::Protobuf,
+        USER_PROTO,
+        "occ-create",
+    )
+    .await
+    .new_commit;
+    c.schema
+        .apply_mutation(add_field_request(
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "email",
+            3,
+            "occ-advance-main",
+        ))
+        .await
+        .expect("advance main");
+
+    // Act: submit a second mutation with base_revision pinned to the old HEAD.
+    let mut stale_request = add_field_request(
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        "User",
+        "phone",
+        4,
+        "occ-stale-write",
+    );
+    stale_request.base_revision = initial;
+    let stale_write = c.schema.apply_mutation(stale_request).await;
+
+    // Assert: current behavior accepts the stale write and applies it on top of
+    // the branch's latest HEAD instead of returning ABORTED/FAILED_PRECONDITION.
+    let stale_write = stale_write
+        .expect("stale base_revision is currently not enforced")
+        .into_inner();
+    assert!(
+        !stale_write.new_commit.is_empty(),
+        "accepted stale write should still return a commit"
+    );
+    let source = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("main"),
+    )
+    .await;
+    assert!(
+        source.contains("email") && source.contains("phone"),
+        "stale write should have landed on current HEAD; got:\n{source}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_tag_creation_currently_retargets_existing_tag() {
+    // Arrange: create a schema, tag the initial commit, then advance main.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let initial = create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        pb::SchemaFormat::Protobuf,
+        USER_PROTO,
+        "tag-create",
+    )
+    .await
+    .new_commit;
+    let first_tag = c
+        .refs
+        .create_tag(pb::CreateTagRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "release".into(),
+            target: Some(vref_commit(&initial)),
+            message: String::new(),
+        })
+        .await
+        .expect("create initial tag")
+        .into_inner()
+        .tag
+        .expect("initial tag info");
+    let advanced = c
+        .schema
+        .apply_mutation(add_field_request(
+            "acme",
+            "core",
+            "main",
+            "user.proto",
+            "User",
+            "email",
+            3,
+            "tag-advance-main",
+        ))
+        .await
+        .expect("advance main after tag")
+        .into_inner();
+
+    // Act: create the same tag name again at the newer commit.
+    let second_tag = c
+        .refs
+        .create_tag(pb::CreateTagRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "release".into(),
+            target: Some(vref_commit(&advanced.new_commit)),
+            message: String::new(),
+        })
+        .await;
+
+    // Assert: current behavior succeeds and retargets the existing tag name.
+    let second_tag = second_tag
+        .expect("duplicate tag names are currently mutable")
+        .into_inner()
+        .tag
+        .expect("duplicate tag info");
+    assert_eq!(first_tag.commit_hash, initial, "initial tag target changed");
+    assert_eq!(
+        second_tag.commit_hash, advanced.new_commit,
+        "duplicate create should report the newer target"
+    );
+    let tags = c
+        .refs
+        .list_tags(pb::ListTagsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name_prefix: "release".into(),
+        })
+        .await
+        .expect("list tags")
+        .into_inner()
+        .tags;
+    assert_eq!(
+        tags.len(),
+        1,
+        "tag namespace should contain one release tag"
+    );
+    assert_eq!(
+        tags[0].commit_hash, advanced.new_commit,
+        "release tag should now point at the second target"
+    );
+    let source_at_tag = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_tag("release"),
+    )
+    .await;
+    assert!(
+        source_at_tag.contains("email"),
+        "retargeted tag should resolve to the newer schema; got:\n{source_at_tag}"
     );
 }

@@ -15,6 +15,19 @@ mod common;
 use common::*;
 use schemahub_api::schemahub_v1 as pb;
 
+const CLOUDBUILD_COMMON_PROTO: &str =
+    include_str!("../../../tests/integration/cloudbuild_common.proto");
+const CLOUDBUILD_USER_PROTO: &str =
+    include_str!("../../../tests/integration/cloudbuild_user.proto");
+const CLOUDBUILD_ORDER_PROTO: &str =
+    include_str!("../../../tests/integration/cloudbuild_order.proto");
+const LEGACY_ACCOUNT_PROTO: &str = include_str!("../../../tests/integration/legacy_account.proto");
+const CLOUDBUILD_MONEY_FBS: &str = include_str!("../../../tests/integration/cloudbuild_money.fbs");
+const CLOUDBUILD_SUPPLIER_FBS: &str =
+    include_str!("../../../tests/integration/cloudbuild_supplier.fbs");
+const CLOUDBUILD_CATALOG_FBS: &str =
+    include_str!("../../../tests/integration/cloudbuild_catalog.fbs");
+
 // ── Small builders for the op envelope ────────────────────────────────────────
 
 /// Wrap a `protobuf_mutation::Operation` into the top-level `ApplyMutationRequest`
@@ -24,6 +37,18 @@ fn proto_op(
     op: pb::protobuf_mutation::Operation,
 ) -> pb::apply_mutation_request::Operation {
     pb::apply_mutation_request::Operation::ProtobufOp(pb::ProtobufMutation {
+        schema_path: schema_path.into(),
+        operation: Some(op),
+    })
+}
+
+/// Wrap a `flat_buffers_mutation::Operation` into the top-level
+/// `ApplyMutationRequest` operation oneof for `schema_path`.
+fn fbs_op(
+    schema_path: &str,
+    op: pb::flat_buffers_mutation::Operation,
+) -> pb::apply_mutation_request::Operation {
+    pb::apply_mutation_request::Operation::FbsOp(pb::FlatBuffersMutation {
         schema_path: schema_path.into(),
         operation: Some(op),
     })
@@ -553,6 +578,82 @@ async fn unprotected_branch_allows_breaking_remove_field() {
     );
 }
 
+#[tokio::test]
+async fn protobuf_removed_field_reserves_name_and_number_at_server_boundary() {
+    // Arrange: use an unprotected branch so the compatibility gate does not
+    // reject the removal before the compiler can reserve the field identity.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        pb::SchemaFormat::Protobuf,
+        BASE_PROTO,
+        "reserve-base",
+    )
+    .await;
+    c.refs
+        .create_branch(pb::CreateBranchRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "dev".into(),
+            from: Some(vref_branch("main")),
+        })
+        .await
+        .expect("create dev branch");
+    apply(
+        &mut c.schema,
+        "acme",
+        "core",
+        "dev",
+        "reserve-remove-name",
+        false,
+        proto_op("user.proto", remove_field("User", "name")),
+    )
+    .await
+    .expect("remove field on dev");
+
+    // Act: reusing the removed field number should fail because RemoveField
+    // reserves it.
+    let err = apply(
+        &mut c.schema,
+        "acme",
+        "core",
+        "dev",
+        "reserve-reuse-number",
+        false,
+        proto_op("user.proto", add_field("User", "display_name", "string", 2)),
+    )
+    .await
+    .expect_err("reserved field number should reject reuse");
+    let pulled = pull_source(
+        &mut c.explore,
+        "acme",
+        "core",
+        "user.proto",
+        vref_branch("dev"),
+    )
+    .await;
+
+    // Assert.
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got {err:?}");
+    assert!(
+        err.message().contains("reserved"),
+        "expected reserved-field error, got {err:?}"
+    );
+    assert!(
+        pulled.contains("reserved 2"),
+        "field number not reserved:\n{pulled}"
+    );
+    assert!(
+        pulled.contains("reserved \"name\""),
+        "field name not reserved:\n{pulled}"
+    );
+}
+
 // ── 4. Multi-op + multi-file transactions ─────────────────────────────────────
 
 #[tokio::test]
@@ -979,5 +1080,629 @@ async fn follow_type_resolves_imported_message() {
     assert!(
         base_decls.contains(&"Address".to_string()),
         "target decl missing; got: {base_decls:?}"
+    );
+}
+
+#[tokio::test]
+async fn protobuf_cloud_build_closure_and_tagged_descriptors_are_stable() {
+    // Arrange: a root schema imports user/profile.proto, which imports
+    // common/types.proto. This mirrors cloud build descriptor generation: the
+    // root artifact must include the whole transitive closure, not just the
+    // root file.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "common/types.proto",
+        pb::SchemaFormat::Protobuf,
+        CLOUDBUILD_COMMON_PROTO,
+        "cloud-pb-common",
+    )
+    .await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user/profile.proto",
+        pb::SchemaFormat::Protobuf,
+        CLOUDBUILD_USER_PROTO,
+        "cloud-pb-user",
+    )
+    .await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "orders/purchase.proto",
+        pb::SchemaFormat::Protobuf,
+        CLOUDBUILD_ORDER_PROTO,
+        "cloud-pb-order",
+    )
+    .await;
+
+    // Act: direct dependencies should only include the immediate import.
+    let direct = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_branch("main")),
+            transitive: false,
+        })
+        .await
+        .expect("list direct dependencies")
+        .into_inner()
+        .dependencies;
+    let direct_paths: Vec<String> = direct.into_iter().map(|d| d.imported_schema).collect();
+
+    // Assert.
+    assert_eq!(
+        direct_paths,
+        vec!["acme/core/user/profile.proto".to_string()],
+        "direct dependency set changed"
+    );
+
+    // Act: transitive dependencies should include the nested common schema.
+    let transitive = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_branch("main")),
+            transitive: true,
+        })
+        .await
+        .expect("list transitive dependencies")
+        .into_inner()
+        .dependencies;
+    let transitive_paths: Vec<String> = transitive.into_iter().map(|d| d.imported_schema).collect();
+
+    // Assert.
+    assert!(
+        transitive_paths.contains(&"acme/core/user/profile.proto".to_string()),
+        "missing direct import in transitive set: {transitive_paths:?}"
+    );
+    assert!(
+        transitive_paths.contains(&"acme/core/common/types.proto".to_string()),
+        "missing nested import in transitive set: {transitive_paths:?}"
+    );
+
+    // Arrange: pin the current repo state with a tag, then mutate main.
+    c.refs
+        .create_tag(pb::CreateTagRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "build-2026-06-02".into(),
+            target: Some(vref_branch("main")),
+            message: "cloud build input".into(),
+        })
+        .await
+        .expect("create build tag");
+
+    let tag_before = c
+        .codegen
+        .get_descriptors(pb::GetDescriptorsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_tag("build-2026-06-02")),
+        })
+        .await
+        .expect("tag descriptors before")
+        .into_inner();
+    assert!(
+        !tag_before.descriptor_bytes.is_empty(),
+        "tag descriptor should be non-empty"
+    );
+    assert!(
+        !tag_before.at_commit.is_empty(),
+        "tag descriptor should report resolved commit"
+    );
+    let commit_before = c
+        .codegen
+        .get_descriptors(pb::GetDescriptorsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_commit(&tag_before.at_commit)),
+        })
+        .await
+        .expect("commit descriptors before")
+        .into_inner();
+    assert_eq!(
+        tag_before.descriptor_bytes, commit_before.descriptor_bytes,
+        "tag and its resolved commit should produce identical descriptors"
+    );
+
+    apply(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "cloud-pb-order-add-build-id",
+        false,
+        proto_op(
+            "orders/purchase.proto",
+            add_field("PurchaseOrder", "build_id", "string", 4),
+        ),
+    )
+    .await
+    .expect("compatible add field on main");
+
+    // Act: resolving the same tag after main moved must return identical bytes.
+    let tag_after = c
+        .codegen
+        .get_descriptors(pb::GetDescriptorsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_tag("build-2026-06-02")),
+        })
+        .await
+        .expect("tag descriptors after")
+        .into_inner();
+    let main_after = c
+        .codegen
+        .get_descriptors(pb::GetDescriptorsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "orders/purchase.proto".into(),
+            at: Some(vref_branch("main")),
+        })
+        .await
+        .expect("main descriptors after")
+        .into_inner();
+
+    // Assert.
+    assert_eq!(
+        tag_before.descriptor_bytes, tag_after.descriptor_bytes,
+        "tag-pinned descriptor bytes changed after main moved"
+    );
+    assert_eq!(
+        tag_before.at_commit, tag_after.at_commit,
+        "tag resolved to a different commit after main moved"
+    );
+    assert_ne!(
+        tag_after.descriptor_bytes, main_after.descriptor_bytes,
+        "main descriptor should reflect the new field while the tag stays pinned"
+    );
+}
+
+#[tokio::test]
+async fn flatbuffers_cloud_build_include_closure_is_in_descriptor_bundle() {
+    // Arrange: catalog.fbs includes supplier.fbs, which includes money.fbs.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "common/money.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        CLOUDBUILD_MONEY_FBS,
+        "cloud-fbs-money",
+    )
+    .await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "supplier/supplier.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        CLOUDBUILD_SUPPLIER_FBS,
+        "cloud-fbs-supplier",
+    )
+    .await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "catalog/sku.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        CLOUDBUILD_CATALOG_FBS,
+        "cloud-fbs-catalog",
+    )
+    .await;
+
+    // Act.
+    let direct = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "catalog/sku.fbs".into(),
+            at: Some(vref_branch("main")),
+            transitive: false,
+        })
+        .await
+        .expect("list direct fbs dependencies")
+        .into_inner()
+        .dependencies;
+    let transitive = c
+        .explore
+        .list_dependencies(pb::ListDependenciesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "catalog/sku.fbs".into(),
+            at: Some(vref_branch("main")),
+            transitive: true,
+        })
+        .await
+        .expect("list transitive fbs dependencies")
+        .into_inner()
+        .dependencies;
+    let descriptors = c
+        .codegen
+        .get_descriptors(pb::GetDescriptorsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            schema_path: "catalog/sku.fbs".into(),
+            at: Some(vref_branch("main")),
+        })
+        .await
+        .expect("get fbs descriptors")
+        .into_inner();
+    let bundle = String::from_utf8(descriptors.descriptor_bytes).expect("fbs bundle is utf-8");
+
+    // Assert: direct vs transitive dependency sets differ.
+    let direct_paths: Vec<String> = direct.into_iter().map(|d| d.imported_schema).collect();
+    assert_eq!(
+        direct_paths,
+        vec!["acme/core/supplier/supplier.fbs".to_string()],
+        "direct fbs dependency set changed"
+    );
+    let transitive_paths: Vec<String> = transitive.into_iter().map(|d| d.imported_schema).collect();
+    assert!(
+        transitive_paths.contains(&"acme/core/supplier/supplier.fbs".to_string()),
+        "missing direct fbs import in transitive set: {transitive_paths:?}"
+    );
+    assert!(
+        transitive_paths.contains(&"acme/core/common/money.fbs".to_string()),
+        "missing nested fbs import in transitive set: {transitive_paths:?}"
+    );
+
+    // Assert: descriptor bundle contains every schema in the closure.
+    for needle in [
+        "catalog/sku.fbs",
+        "supplier/supplier.fbs",
+        "common/money.fbs",
+        "table Sku",
+        "table Supplier",
+        "table Money",
+        "struct Decimal",
+    ] {
+        assert!(bundle.contains(needle), "bundle lost `{needle}`:\n{bundle}");
+    }
+}
+
+#[tokio::test]
+async fn flatbuffers_preview_codegen_rust_returns_build_artifact() {
+    // Arrange: keep this schema deliberately simple because this test is a
+    // server/codegen smoke, while richer FlatBuffers AST features are covered by
+    // round-trip and descriptor-bundle tests.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let src = r#"namespace build.output;
+
+table BuildItem {
+  id: string;
+  count: int;
+}
+
+root_type BuildItem;
+"#;
+    create_schema(
+        &mut c.schema,
+        "build",
+        "artifacts",
+        "main",
+        "build_item.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        src,
+        "fbs-codegen-preview",
+    )
+    .await;
+
+    // Act.
+    let preview = c
+        .codegen
+        .preview_codegen(pb::PreviewCodegenRequest {
+            project: "build".into(),
+            repo: "artifacts".into(),
+            schema_path: "build_item.fbs".into(),
+            at: Some(vref_branch("main")),
+            language: pb::Language::Rust as i32,
+        })
+        .await
+        .expect("preview flatbuffers rust codegen")
+        .into_inner();
+    let code = String::from_utf8(preview.content).expect("generated rust is utf-8");
+
+    // Assert.
+    assert!(
+        !preview.is_archive,
+        "single-file preview should not be archive"
+    );
+    assert!(
+        !preview.at_commit.is_empty(),
+        "preview should report resolved commit"
+    );
+    assert!(
+        code.contains("BuildItem"),
+        "generated rust should mention BuildItem; got:\n{code}"
+    );
+}
+
+#[tokio::test]
+async fn flatbuffers_table_mutations_round_trip_and_struct_mutation_is_rejected() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let src = r#"namespace inventory;
+
+struct Vec2 {
+  x: float;
+  y: float;
+}
+
+table Item {
+  id: string (key);
+  old_rank: int;
+  position: Vec2;
+}
+
+root_type Item;
+"#;
+    create_schema(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "item.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        src,
+        "fbs-mutation-base",
+    )
+    .await;
+
+    // Act: table field add, rename, and deprecate are accepted.
+    apply(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "fbs-add-field",
+        false,
+        fbs_op(
+            "item.fbs",
+            pb::flat_buffers_mutation::Operation::AddField(pb::FbsAddField {
+                table_name: "Item".into(),
+                field_name: "price_cents".into(),
+                field_type: "int".into(),
+                default_value: "0".into(),
+                doc_comment: String::new(),
+            }),
+        ),
+    )
+    .await
+    .expect("add fbs table field");
+    apply(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "fbs-rename-field",
+        false,
+        fbs_op(
+            "item.fbs",
+            pb::flat_buffers_mutation::Operation::RenameField(pb::FbsRenameField {
+                table_name: "Item".into(),
+                old_field_name: "old_rank".into(),
+                new_field_name: "legacy_rank".into(),
+            }),
+        ),
+    )
+    .await
+    .expect("rename fbs table field");
+    apply(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "fbs-deprecate-field",
+        false,
+        fbs_op(
+            "item.fbs",
+            pb::flat_buffers_mutation::Operation::DeprecateField(pb::FbsDeprecateField {
+                table_name: "Item".into(),
+                field_name: "legacy_rank".into(),
+            }),
+        ),
+    )
+    .await
+    .expect("deprecate fbs table field");
+    let pulled = pull_source(
+        &mut c.explore,
+        "warehouse",
+        "catalog",
+        "item.fbs",
+        vref_branch("main"),
+    )
+    .await;
+
+    // Assert.
+    assert!(
+        pulled.contains("price_cents: int = 0"),
+        "added field missing:\n{pulled}"
+    );
+    assert!(
+        pulled.contains("legacy_rank: int (deprecated)"),
+        "renamed/deprecated field missing:\n{pulled}"
+    );
+    assert!(
+        !pulled.contains("old_rank"),
+        "old field name should be gone:\n{pulled}"
+    );
+
+    // Act: structs are immutable; adding a field to Vec2 must fail.
+    let err = apply(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "fbs-struct-add-rejected",
+        false,
+        fbs_op(
+            "item.fbs",
+            pb::flat_buffers_mutation::Operation::AddField(pb::FbsAddField {
+                table_name: "Vec2".into(),
+                field_name: "z".into(),
+                field_type: "float".into(),
+                default_value: String::new(),
+                doc_comment: String::new(),
+            }),
+        ),
+    )
+    .await
+    .expect_err("struct mutation should be rejected");
+
+    // Assert.
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got {err:?}");
+    assert!(
+        err.message().contains("struct"),
+        "error should explain struct immutability, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn flatbuffers_union_member_mutation_is_explicitly_unimplemented_at_server_boundary() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let src = r#"namespace inventory;
+
+table Item {
+  id: string;
+}
+
+table Bundle {
+  id: string;
+}
+
+union Entity {
+  Item
+}
+
+root_type Item;
+"#;
+    create_schema(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "entity.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        src,
+        "fbs-union-base",
+    )
+    .await;
+
+    // Act.
+    let err = apply(
+        &mut c.schema,
+        "warehouse",
+        "catalog",
+        "main",
+        "fbs-union-add-member",
+        false,
+        fbs_op(
+            "entity.fbs",
+            pb::flat_buffers_mutation::Operation::AddUnionMember(pb::FbsAddUnionMember {
+                union_name: "Entity".into(),
+                member_type: "Bundle".into(),
+            }),
+        ),
+    )
+    .await
+    .expect_err("union member mutation should be unimplemented");
+
+    // Assert.
+    assert_eq!(err.code(), tonic::Code::Unimplemented, "got {err:?}");
+    assert!(
+        err.message().contains("union member add/remove"),
+        "unexpected unimplemented message: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn proto2_fixture_round_trips_through_server() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+
+    // Act.
+    create_schema(
+        &mut c.schema,
+        "legacy",
+        "accounts",
+        "main",
+        "legacy_account.proto",
+        pb::SchemaFormat::Protobuf,
+        LEGACY_ACCOUNT_PROTO,
+        "legacy-proto2-create",
+    )
+    .await;
+    let pulled = pull_source(
+        &mut c.explore,
+        "legacy",
+        "accounts",
+        "legacy_account.proto",
+        vref_branch("main"),
+    )
+    .await;
+    let names = list_decl_names(
+        &mut c.explore,
+        "legacy",
+        "accounts",
+        "legacy_account.proto",
+        vref_branch("main"),
+    )
+    .await;
+
+    // Assert.
+    for needle in [
+        "syntax = \"proto2\"",
+        "required string id",
+        "optional string email",
+        "default = \"unknown@example.com\"",
+        "extensions 100 to 536870911",
+        "option allow_alias = true",
+        "ENABLED = 1",
+        "extend LegacyAccount",
+        "external_reference",
+        "service LegacyAccountService",
+    ] {
+        assert!(
+            pulled.contains(needle),
+            "proto2 output lost `{needle}`:\n{pulled}"
+        );
+    }
+    assert!(
+        names.contains(&"LegacyAccount".to_string()),
+        "message declaration missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"LegacyAccountService".to_string()),
+        "service declaration missing: {names:?}"
     );
 }

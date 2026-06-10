@@ -4,7 +4,7 @@
 //! Lifecycle (create/update/delete-from-source) is format-agnostic: the server
 //! parses `source` with the compiler selected by file extension, turns the
 //! resulting [`ParsedSchema`] into a [`MutationEffect`], and commits via the
-//! VCS. Granular mutations route through `Core::apply_mutation`, which runs the
+//! JJ. Granular mutations route through `Core::apply_mutation`, which runs the
 //! auth + compatibility gate (design.md §5.1 steps 2–10).
 
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use std::sync::Arc;
 use schemahub_core::{
     detect_format_from_name, load_base, Core, MutationRequest, TransactionRequest,
 };
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, MutationEffect, SchemaObjects};
-use schemahub_vcs::RefSpec;
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
@@ -84,10 +84,10 @@ impl SchemaService for SchemaHandler {
             .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         // First write may target a fresh bookmark; `load_base` tolerates a
-        // missing bookmark/schema but propagates real VCS errors (corrupt
+        // missing bookmark/schema but propagates real JJ errors (corrupt
         // object, IO failure) so we don't silently overwrite real content.
         let base = load_base(
-            self.core.vcs(),
+            self.core.jj(),
             &r.project,
             &r.repo,
             &r.schema_name,
@@ -98,7 +98,7 @@ impl SchemaService for SchemaHandler {
         let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
-            .vcs()
+            .jj()
             .commit_write(
                 &r.project,
                 &r.repo,
@@ -128,9 +128,9 @@ impl SchemaService for SchemaHandler {
             .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         // `load_base` tolerates a not-yet-existing bookmark or schema (a
-        // first-write update is legal) but propagates real VCS errors.
+        // first-write update is legal) but propagates real JJ errors.
         let base = load_base(
-            self.core.vcs(),
+            self.core.jj(),
             &r.project,
             &r.repo,
             &r.schema_name,
@@ -141,7 +141,7 @@ impl SchemaService for SchemaHandler {
         let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
-            .vcs()
+            .jj()
             .commit_write(
                 &r.project,
                 &r.repo,
@@ -167,14 +167,14 @@ impl SchemaService for SchemaHandler {
         let token = token_from(&request)?;
         let r = request.into_inner();
         // Deleting a schema file is a Write — design.md §6 protected-bookmark
-        // policy is enforced by the VCS layer; auth gates the repo overall.
+        // policy is enforced by the JJ layer; auth gates the repo overall.
         self.core
             .authorize_repo_action(token.as_deref(), Action::Write, &r.project, &r.repo)
             .map_err(to_status)?;
         let base_ref = RefSpec::bookmark(r.branch.clone());
         let base = self
             .core
-            .vcs()
+            .jj()
             .load_schema(&r.project, &r.repo, &r.schema_name, &base_ref)
             .map_err(|e| to_status(e.into()))?;
         // Remove every declaration in the file (empties the subtree).
@@ -186,7 +186,7 @@ impl SchemaService for SchemaHandler {
         let author = resolve_author(&self.core, token.as_deref())?;
         let write = self
             .core
-            .vcs()
+            .jj()
             .commit_write(
                 &r.project,
                 &r.repo,

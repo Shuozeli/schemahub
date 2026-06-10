@@ -2,8 +2,10 @@
 //! each read a direct object lookup; the core maps the stored blobs through the
 //! compiler into summaries / details / type refs.
 
+use std::collections::{HashSet, VecDeque};
+
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, DeclDetail, DeclSummary, Import, SchemaPath, TypeRef};
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::{CoreError, CoreResult};
@@ -27,7 +29,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.list_schemas(project, repo, at)?)
+        Ok(self.jj.list_schemas(project, repo, at)?)
     }
 
     /// List declaration summaries in a schema file at a ref (branch / tag /
@@ -48,11 +50,11 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         let names =
-            self.vcs
+            self.jj
                 .list_declarations(&schema.project, &schema.repo, &schema.schema_name, at)?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let blob = self.vcs.get_declaration(
+            let blob = self.jj.get_declaration(
                 &schema.project,
                 &schema.repo,
                 &schema.schema_name,
@@ -81,7 +83,7 @@ impl Core {
             &schema.repo,
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let blob = self.vcs.get_declaration(
+        let blob = self.jj.get_declaration(
             &schema.project,
             &schema.repo,
             &schema.schema_name,
@@ -110,7 +112,7 @@ impl Core {
             &schema.repo,
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let blob = self.vcs.get_declaration(
+        let blob = self.jj.get_declaration(
             &schema.project,
             &schema.repo,
             &schema.schema_name,
@@ -119,7 +121,7 @@ impl Core {
         )?;
         let refs = compiler.type_refs(&blob)?;
         let meta = self
-            .vcs
+            .jj
             .load_schema(&schema.project, &schema.repo, &schema.schema_name, at)?
             .meta;
         let imports = compiler.imports(&meta)?;
@@ -131,6 +133,7 @@ impl Core {
         &self,
         schema: &SchemaPath,
         at: &RefSpec,
+        transitive: bool,
         token: Option<&str>,
     ) -> CoreResult<Vec<Import>> {
         authorize(
@@ -143,10 +146,58 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         let meta = self
-            .vcs
+            .jj
             .load_schema(&schema.project, &schema.repo, &schema.schema_name, at)?
             .meta;
-        Ok(compiler.imports(&meta)?)
+        let direct = compiler.imports(&meta)?;
+        if !transitive {
+            return Ok(direct);
+        }
+
+        let mut out = Vec::new();
+        let mut seen_imports = HashSet::new();
+        let mut visited_schemas = HashSet::from([schema.clone()]);
+        let mut queue = VecDeque::new();
+
+        for import in direct {
+            if seen_imports.insert(import.path.clone()) {
+                queue.push_back(import.clone());
+                out.push(import);
+            }
+        }
+
+        while let Some(import) = queue.pop_front() {
+            let Some(dep_path) = parse_logical_import_path(&import.path) else {
+                continue;
+            };
+            if !visited_schemas.insert(dep_path.clone()) {
+                continue;
+            }
+
+            let dep_ref = if import.resolved_commit.is_empty() {
+                at.clone()
+            } else {
+                RefSpec::commit(import.resolved_commit.clone())
+            };
+            let dep_compiler = self.compiler_for(&dep_path.schema_name)?;
+            let dep_meta = self
+                .jj
+                .load_schema(
+                    &dep_path.project,
+                    &dep_path.repo,
+                    &dep_path.schema_name,
+                    &dep_ref,
+                )?
+                .meta;
+            for dep_import in dep_compiler.imports(&dep_meta)? {
+                if seen_imports.insert(dep_import.path.clone()) {
+                    queue.push_back(dep_import.clone());
+                    out.push(dep_import);
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Reconstruct canonical source for a schema file at a ref (GetSchemaSource).
@@ -166,7 +217,7 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         let objs = self
-            .vcs
+            .jj
             .load_schema(&schema.project, &schema.repo, &schema.schema_name, at)?;
         Ok(compiler.print(&objs)?)
     }
@@ -191,10 +242,8 @@ impl Core {
         )?;
         let needle = query.to_lowercase();
         let mut hits = Vec::new();
-        for schema_name in self.vcs.list_schemas(project, repo, at)? {
-            let names = self
-                .vcs
-                .list_declarations(project, repo, &schema_name, at)?;
+        for schema_name in self.jj.list_schemas(project, repo, at)? {
+            let names = self.jj.list_declarations(project, repo, &schema_name, at)?;
             for decl_name in names {
                 if decl_name.to_lowercase().contains(&needle) {
                     hits.push(SearchHit {
@@ -226,20 +275,17 @@ impl Core {
         )?;
         let needle = query.to_lowercase();
         let mut hits = Vec::new();
-        for schema_name in self.vcs.list_schemas(project, repo, at)? {
+        for schema_name in self.jj.list_schemas(project, repo, at)? {
             let compiler = match self.compiler_for(&schema_name) {
                 Ok(c) => c,
                 Err(_) => continue, // unknown format file in the repo — skip it
             };
-            for decl_name in self
-                .vcs
-                .list_declarations(project, repo, &schema_name, at)?
-            {
+            for decl_name in self.jj.list_declarations(project, repo, &schema_name, at)? {
                 if !decl_name.to_lowercase().contains(&needle) {
                     continue;
                 }
                 let blob = self
-                    .vcs
+                    .jj
                     .get_declaration(project, repo, &schema_name, &decl_name, at)?;
                 hits.push(DeclLocation {
                     schema_name: schema_name.clone(),
@@ -262,4 +308,15 @@ impl Core {
             .cloned()
             .ok_or_else(|| CoreError::UnknownFormat(format_id.to_string()))
     }
+}
+
+fn parse_logical_import_path(path: &str) -> Option<SchemaPath> {
+    let mut parts = path.splitn(3, '/');
+    let project = parts.next()?;
+    let repo = parts.next()?;
+    let schema = parts.next()?;
+    if project.is_empty() || repo.is_empty() || schema.is_empty() {
+        return None;
+    }
+    Some(SchemaPath::new(project, repo, schema))
 }

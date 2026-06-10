@@ -165,7 +165,7 @@ impl ExplorationService for ExplorationHandler {
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
         let imports = self
             .core
-            .list_dependencies(&schema, &at, token.as_deref())
+            .list_dependencies(&schema, &at, r.transitive, token.as_deref())
             .map_err(to_status)?;
         let dependencies = imports
             .into_iter()

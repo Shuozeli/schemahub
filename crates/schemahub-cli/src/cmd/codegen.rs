@@ -1,7 +1,8 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
-    codegen_service_client::CodegenServiceClient, GetDescriptorsRequest, VersionRef,
+    codegen_service_client::CodegenServiceClient, GetDescriptorsRequest, Language,
+    PreviewCodegenRequest, VersionRef,
 };
 use tonic::transport::Channel;
 
@@ -71,30 +72,39 @@ pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Re
         CodegenAction::Preview {
             schema_path,
             branch,
-            lang: _,
+            lang,
         } => {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
             let resp = client
-                .get_descriptors(bearer(
-                    GetDescriptorsRequest {
+                .preview_codegen(bearer(
+                    PreviewCodegenRequest {
                         project: parts.0,
                         repo: parts.1,
                         schema_path: parts.2,
                         at: Some(VersionRef {
                             r#ref: Some(super::parse_ref(&branch)),
                         }),
+                        language: parse_language(&lang)? as i32,
                     },
                     token,
                 )?)
                 .await
-                .context("GetDescriptors RPC")?;
+                .context("PreviewCodegen RPC")?;
 
             let inner = resp.into_inner();
-            let source = String::from_utf8(inner.descriptor_bytes.to_vec())
-                .unwrap_or_else(|_| "(binary descriptor — not printable)".to_string());
+            let source = String::from_utf8(inner.content.to_vec())
+                .unwrap_or_else(|_| "(binary codegen artifact — not printable)".to_string());
             print!("{source}");
         }
     }
     Ok(())
+}
+
+fn parse_language(lang: &str) -> anyhow::Result<Language> {
+    match lang.to_ascii_lowercase().as_str() {
+        "" | "rust" | "rs" => Ok(Language::Rust),
+        "typescript" | "ts" => Ok(Language::Typescript),
+        other => anyhow::bail!("unsupported codegen language {other:?}"),
+    }
 }

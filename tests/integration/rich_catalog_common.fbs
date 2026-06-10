@@ -1,0 +1,9 @@
+namespace local.rich.common;
+
+table Money {
+  currency_code: string (required, id: 0);
+  units: long (id: 1);
+  nanos: int (id: 2);
+}
+
+root_type Money;

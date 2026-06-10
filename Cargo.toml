@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/schemahub-types",
-    "crates/schemahub-vcs",
+    "crates/schemahub-jj",
     "crates/schemahub-core",
     "crates/schemahub-api",
     "crates/schemahub-compiler-protobuf",
@@ -18,8 +18,8 @@ tonic       = "0.12"
 tonic-build = "0.12"
 prost       = "0.13"
 prost-types = "0.13"
-# jj-lib is the real Jujutsu VCS library; schemahub-vcs implements its
-# Backend + OpStore traits over our ObjectDb (see schemahub-vcs/DECISIONS.md).
+# jj-lib is the real Jujutsu library; schemahub-jj implements its
+# Backend + OpStore traits over our ObjectDb (see schemahub-jj/DECISIONS.md).
 jj-lib      = { version = "0.41", default-features = false }
 pollster    = "0.4"
 async-trait = "0.1"
@@ -37,7 +37,7 @@ thiserror   = "1"
 sha2        = "0.10"
 hex         = "0.4"
 uuid        = { version = "1", features = ["v4"] }
-# Postgres backend for schemahub-vcs (optional, behind the `postgres` feature).
+# Postgres backend for schemahub-jj (optional, behind the `postgres` feature).
 # `runtime-tokio` + `tls-rustls` is the modern equivalent of the old
 # `runtime-tokio-rustls` combo feature.
 sqlx        = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }

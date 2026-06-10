@@ -21,7 +21,7 @@
 //!
 //! ## Sync ↔ async bridge
 //!
-//! The [`ObjectDb`] trait is sync (the broader schemahub-vcs surface — `Vcs`,
+//! The [`ObjectDb`] trait is sync (the broader schemahub-jj surface — `Jj`,
 //! `Store`, the jj `Backend` impl — runs on a `pollster::block_on` substrate,
 //! NOT a tokio runtime). sqlx is async-only on tokio, so we own a **dedicated
 //! current-thread tokio runtime per `PgObjectDb` instance** and call
@@ -435,7 +435,7 @@ impl ObjectDb for PgObjectDb {
 // features) does not require a Postgres instance. Run with:
 //
 //   SCHEMAHUB_TEST_POSTGRES_URL=postgres://cyuan:cyuan@docker.yuacx.com:5432/postgres \
-//       cargo test -p schemahub-vcs --features postgres-integration
+//       cargo test -p schemahub-jj --features postgres-integration
 
 #[cfg(all(test, feature = "postgres-integration"))]
 mod tests {
@@ -666,7 +666,7 @@ mod tests {
         let ids = t.db.list_ops(repo).unwrap();
 
         // Assert — Postgres `inserted_at BIGSERIAL` preserves insertion order
-        // for a single writer, the contract `Vcs::list_operations` relies on.
+        // for a single writer, the contract `Jj::list_operations` relies on.
         assert_eq!(ids, vec![a, b, c]);
     }
 

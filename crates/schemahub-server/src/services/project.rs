@@ -7,7 +7,7 @@
 //! which runs the configured `AuthnProvider` + `AuthzPolicy` before touching
 //! the role / project stores.
 //!
-//! Repo lifecycle is still implicit in the jj VCS model (a `(project, repo)`
+//! Repo lifecycle is still implicit in the jj JJ model (a `(project, repo)`
 //! springs into existence on the first write); `CreateRepo` / `GetRepo` /
 //! `UpdateRepo` echo back the requested config until a persisted repo
 //! registry lands.
@@ -99,7 +99,7 @@ impl ProjectService for ProjectHandler {
         _request: Request<pb::DeleteProjectRequest>,
     ) -> Result<Response<pb::DeleteProjectResponse>, Status> {
         Err(Status::unimplemented(
-            "project deletion is not exposed by the VCS layer in v1",
+            "project deletion is not exposed by the JJ layer in v1",
         ))
     }
 
@@ -187,7 +187,7 @@ impl ProjectService for ProjectHandler {
         request: Request<pb::ListReposRequest>,
     ) -> Result<Response<pb::ListReposResponse>, Status> {
         // Enumerating repos requires a persisted repo registry, which the
-        // VCS layer doesn't keep — implicit-on-first-write means we can't
+        // JJ layer doesn't keep — implicit-on-first-write means we can't
         // distinguish \"empty project\" from \"project with no writes yet\".
         // Returning \`vec![]\` would lie to clients; surface the gap.
         let _ = token_from(&request)?;
@@ -202,7 +202,7 @@ impl ProjectService for ProjectHandler {
         _request: Request<pb::DeleteRepoRequest>,
     ) -> Result<Response<pb::DeleteRepoResponse>, Status> {
         Err(Status::unimplemented(
-            "repo deletion is not exposed by the VCS layer in v1",
+            "repo deletion is not exposed by the JJ layer in v1",
         ))
     }
 

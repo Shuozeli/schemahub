@@ -1,7 +1,7 @@
 //! Per-repo configuration: protected bookmarks + compatibility direction
 //! (design.md §7). Ported from v1 `repo_config.rs`, but held in-memory by the
 //! core rather than persisted through a storage backend — `schemahub-server`
-//! loads it from `schemahub.toml` and seeds it at startup. The VCS layer never
+//! loads it from `schemahub.toml` and seeds it at startup. The JJ layer never
 //! sees this config; it is purely the core's compatibility-gating policy.
 
 use std::collections::HashMap;

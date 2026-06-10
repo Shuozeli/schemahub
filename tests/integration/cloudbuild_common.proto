@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package cloudbuild.common.v1;
+
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}
+
+message AuditInfo {
+  string actor = 1;
+  int64 revision = 2;
+}

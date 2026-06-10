@@ -42,7 +42,7 @@ impl AdminService for AdminHandler {
                 "GC requires project and repo (global GC is v2)",
             ));
         }
-        // Dry-run is not separately modeled by the VCS GC; honor it by skipping.
+        // Dry-run is not separately modeled by the JJ layer GC; honor it by skipping.
         let swept = if r.dry_run {
             0
         } else {

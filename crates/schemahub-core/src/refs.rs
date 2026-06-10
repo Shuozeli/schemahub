@@ -1,9 +1,9 @@
 //! Bookmark / tag / merge orchestration (design.md §12). Thin authorized
-//! wrappers over the VCS; merge produces first-class conflicts, never errors
+//! wrappers over the JJ layer; merge produces first-class conflicts, never errors
 //! (design.md §6).
 
+use schemahub_jj::RefSpec;
 use schemahub_types::Action;
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
@@ -29,9 +29,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self
-            .vcs
-            .create_bookmark(project, repo, name, from, author)?)
+        Ok(self.jj.create_bookmark(project, repo, name, from, author)?)
     }
 
     /// Move a bookmark to the commit `to` resolves to.
@@ -52,7 +50,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.move_bookmark(project, repo, name, to, author)?)
+        Ok(self.jj.move_bookmark(project, repo, name, to, author)?)
     }
 
     /// Delete a bookmark (branch). Requires `ManageRepo` — removing a branch is
@@ -73,7 +71,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.delete_bookmark(project, repo, name, author)?)
+        Ok(self.jj.delete_bookmark(project, repo, name, author)?)
     }
 
     /// List bookmarks (name → target commit ids).
@@ -91,7 +89,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.list_bookmarks(project, repo)?)
+        Ok(self.jj.list_bookmarks(project, repo)?)
     }
 
     /// Create a tag (immutable name → commit pin).
@@ -112,7 +110,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.create_tag(project, repo, name, at, author)?)
+        Ok(self.jj.create_tag(project, repo, name, at, author)?)
     }
 
     /// Delete a tag. Requires `Force` (Maintainer+) — tags are immutable pins
@@ -134,7 +132,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.delete_tag(project, repo, name, author)?)
+        Ok(self.jj.delete_tag(project, repo, name, author)?)
     }
 
     /// List tags (name → commit id).
@@ -152,7 +150,7 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.list_tags(project, repo)?)
+        Ok(self.jj.list_tags(project, repo)?)
     }
 
     /// Merge bookmark `src` into `dst` (design.md §6). Conflicts become stored
@@ -174,7 +172,7 @@ impl Core {
             project,
             repo,
         )?;
-        let write = self.vcs.merge(project, repo, src, dst, author)?;
+        let write = self.jj.merge(project, repo, src, dst, author)?;
         Ok(MutationResponse {
             commit_id: write.commit_id,
             change_id: write.change_id,

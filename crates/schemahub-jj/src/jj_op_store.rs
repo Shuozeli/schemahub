@@ -184,7 +184,7 @@ impl OpStore for DbOpStore {
 
     async fn gc(&self, _head_ids: &[OperationId], _keep_newer: SystemTime) -> OpStoreResult<()> {
         // Op-log retention is required for `undo`; schemahub keeps the full
-        // op-log and runs object GC at the `Vcs::gc` level instead.
+        // op-log and runs object GC at the `Jj::gc` level instead.
         Ok(())
     }
 }

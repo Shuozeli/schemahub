@@ -1,4 +1,4 @@
-//! Core orchestration tests (AAA style) over a `MemoryObjectDb`-backed `Vcs`
+//! Core orchestration tests (AAA style) over a `MemoryObjectDb`-backed `Jj`
 //! and the real `schemahub-compiler-protobuf` (a dev-dependency used only to
 //! produce real op envelopes / parse real `.proto` — core itself stays
 //! format-agnostic).
@@ -9,10 +9,10 @@ use bytes::Bytes;
 use schemahub_compiler_protobuf::{
     OpAddField, OpChangeCardinality, OpCreateMessage, ProtoOp, ProtobufCompiler,
 };
+use schemahub_jj::{Jj, MemoryObjectDb, RefSpec};
 use schemahub_types::{
     Compiler, DeclKind, Mutation, MutationEffect, NoopAuthn, NoopAuthz, SchemaObjects, SchemaPath,
 };
-use schemahub_vcs::{MemoryObjectDb, RefSpec, Vcs};
 
 use crate::config::{RepoConfig, RepoConfigStore};
 use crate::request::{MutationRequest, TransactionRequest};
@@ -28,15 +28,15 @@ fn schema_path() -> SchemaPath {
     SchemaPath::new(PROJECT, REPO, SCHEMA)
 }
 
-/// A Core wired to an in-memory VCS, the protobuf compiler, Noop auth, and the
+/// A Core wired to an in-memory JJ, the protobuf compiler, Noop auth, and the
 /// given repo config store.
 fn core_with_config(configs: RepoConfigStore) -> Core {
     // Arrange the registry with the real protobuf compiler.
     let mut registry = CompilerRegistry::new();
     registry.register(Arc::new(ProtobufCompiler::new()));
-    let vcs = Arc::new(Vcs::new(Arc::new(MemoryObjectDb::new())));
+    let jj = Arc::new(Jj::new(Arc::new(MemoryObjectDb::new())));
     Core::with_config(
-        vcs,
+        jj,
         registry,
         Arc::new(NoopAuthn),
         Arc::new(NoopAuthz),
@@ -71,7 +71,7 @@ fn request(bookmark: &str, op: ProtoOp) -> MutationRequest {
 }
 
 /// Seed an initial `message User { int32 id = 1; }` on `main` directly through
-/// the VCS, so flow tests start from a known clean state. Returns the commit id.
+/// the JJ layer, so flow tests start from a known clean state. Returns the commit id.
 fn seed_user_message(core: &Core) -> String {
     // Arrange: parse a real .proto into per-decl objects and commit them.
     let compiler = ProtobufCompiler::new();
@@ -83,7 +83,7 @@ fn seed_user_message(core: &Core) -> String {
         upserts: parsed.decls,
         removes: vec![],
     };
-    core.vcs()
+    core.jj()
         .commit_write(
             PROJECT,
             REPO,
@@ -453,7 +453,7 @@ fn multi_file_transaction_commits_both_files_in_one_commit() {
 
     let at = RefSpec::commit(resp.commit_id.clone());
     let schemas = core
-        .vcs()
+        .jj()
         .list_schemas(PROJECT, REPO, &at)
         .expect("list schemas at the new commit");
     assert_eq!(schemas, vec!["a.proto".to_string(), "b.proto".to_string()]);

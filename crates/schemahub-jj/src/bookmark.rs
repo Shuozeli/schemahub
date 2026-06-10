@@ -4,7 +4,7 @@
 //! Bookmarks are movable named pointers in the [`View`](crate::model::View);
 //! tags are immutable name→commit pins. Protected bookmarks (exact names + glob
 //! suffixes like `release/*`) are where compatibility is enforced by the core —
-//! the VCS only provides the matcher.
+//! the JJ layer only provides the matcher.
 
 /// Whether `name` matches any pattern in `patterns`. Supports a trailing `*`
 /// glob (e.g. `release/*` matches `release/1.0`) and exact names. A bare `*`

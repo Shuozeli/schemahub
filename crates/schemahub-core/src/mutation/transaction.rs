@@ -9,12 +9,12 @@
 //! within each file). Each touched file is loaded, its ops are applied through
 //! the compiler to yield one [`MutationEffect`](schemahub_types::MutationEffect),
 //! and every effect is committed atomically through
-//! [`Vcs::commit_write_multi`](schemahub_vcs::Vcs::commit_write_multi) — one
+//! [`Jj::commit_write_multi`](schemahub_jj::Jj::commit_write_multi) — one
 //! commit, one operation. All ops in a transaction must still share a single
 //! `format_id` (a transaction does not mix formats).
 
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, Mutation, MutationEffect};
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::{CoreError, CoreResult};
@@ -84,11 +84,11 @@ impl Core {
         let base_ref = RefSpec::bookmark(req.bookmark.clone());
         let config = self.repo_configs.get(&plan.project, &plan.repo);
         let protected = !req.force
-            && schemahub_vcs::bookmark::is_protected(&req.bookmark, &config.protected_bookmarks);
+            && schemahub_jj::bookmark::is_protected(&req.bookmark, &config.protected_bookmarks);
 
         let mut effects: Vec<(String, MutationEffect)> = Vec::with_capacity(plan.by_file.len());
         for (schema_name, ops) in &plan.by_file {
-            let base = load_base(&self.vcs, &plan.project, &plan.repo, schema_name, &base_ref)?;
+            let base = load_base(&self.jj, &plan.project, &plan.repo, schema_name, &base_ref)?;
             let effect = compiler.apply_mutations(&base, ops)?;
             if protected {
                 compat::gate(compiler.as_ref(), &config.compat_rules(), &base, &effect)?;
@@ -97,7 +97,7 @@ impl Core {
         }
 
         // 7. One commit / one operation across ALL touched files.
-        let write = self.vcs.commit_write_multi(
+        let write = self.jj.commit_write_multi(
             &plan.project,
             &plan.repo,
             &req.bookmark,

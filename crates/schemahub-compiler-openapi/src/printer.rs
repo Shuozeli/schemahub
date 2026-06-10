@@ -52,7 +52,7 @@ pub fn print_schema_objects(schema: &SchemaObjects) -> Result<String, PrintError
     for blob in schema.decls.values() {
         match decode_decl(blob)?.kind {
             DeclPayload::PathItem(b) => paths.push(b),
-            DeclPayload::ComponentSchema(b) => schemas.push(b),
+            DeclPayload::ComponentSchema(b) => schemas.push(*b),
             DeclPayload::ComponentParameter(b) => parameters.push(b),
             DeclPayload::ComponentResponse(b) => responses.push(b),
             DeclPayload::ComponentRequestBody(b) => request_bodies.push(b),

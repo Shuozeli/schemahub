@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 schemahub-types = { path = "../schemahub-types" }
-schemahub-vcs   = { path = "../schemahub-vcs" }
+schemahub-jj   = { path = "../schemahub-jj" }
 thiserror       = { workspace = true }
 # `bytes` appears in the public API (generate_descriptors → Bytes), mirroring
 # the Compiler trait's signature in schemahub-types.

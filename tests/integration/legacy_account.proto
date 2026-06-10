@@ -1,0 +1,28 @@
+syntax = "proto2";
+
+package legacy.account.v1;
+
+message LegacyAccount {
+  required string id = 1;
+  optional string email = 2 [default = "unknown@example.com"];
+  repeated string aliases = 3;
+  extensions 100 to max;
+
+  enum State {
+    option allow_alias = true;
+    UNKNOWN = 0;
+    ACTIVE = 1;
+    ENABLED = 1;
+    DISABLED = 2;
+  }
+
+  optional State state = 4 [default = ACTIVE];
+}
+
+extend LegacyAccount {
+  optional string external_reference = 100;
+}
+
+service LegacyAccountService {
+  rpc GetAccount(LegacyAccount) returns (LegacyAccount);
+}

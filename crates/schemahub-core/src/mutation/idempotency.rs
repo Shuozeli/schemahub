@@ -2,7 +2,7 @@
 //!
 //! A literal network retry carrying the same `idempotency_key` must return the
 //! stored result rather than re-applying the mutation. This is *not* durable
-//! identity — that is the `ChangeId` the VCS assigns. The store here only
+//! identity — that is the `ChangeId` the JJ layer assigns. The store here only
 //! collapses retries within the process lifetime; the server may back it with a
 //! durable table later.
 

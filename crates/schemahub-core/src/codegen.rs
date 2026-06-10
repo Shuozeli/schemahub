@@ -3,8 +3,8 @@
 
 use bytes::Bytes;
 
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, Language, SchemaPath};
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
@@ -21,6 +21,17 @@ impl Core {
         bookmark: &str,
         token: Option<&str>,
     ) -> CoreResult<Bytes> {
+        self.generate_descriptors_at(schema, &RefSpec::bookmark(bookmark), token)
+    }
+
+    /// Generate descriptors at any ref (branch, tag, or commit). This is the
+    /// cloud-build path: descriptor caches need a stable resolved commit key.
+    pub fn generate_descriptors_at(
+        &self,
+        schema: &SchemaPath,
+        at: &RefSpec,
+        token: Option<&str>,
+    ) -> CoreResult<Bytes> {
         authorize(
             self.authn.as_ref(),
             self.authz.as_ref(),
@@ -30,12 +41,7 @@ impl Core {
             &schema.repo,
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let closure = closure::build(
-            &self.vcs,
-            compiler.as_ref(),
-            schema,
-            &RefSpec::bookmark(bookmark),
-        )?;
+        let closure = closure::build(&self.jj, compiler.as_ref(), schema, at)?;
         Ok(compiler.generate_descriptors(&closure)?)
     }
 
@@ -51,7 +57,7 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&req.schema.schema_name)?;
         let closure = closure::build(
-            &self.vcs,
+            &self.jj,
             compiler.as_ref(),
             &req.schema,
             &RefSpec::bookmark(&req.bookmark),
@@ -68,13 +74,27 @@ impl Core {
         lang: Language,
         token: Option<&str>,
     ) -> CoreResult<String> {
-        self.generate_code(
-            CodegenRequest {
-                schema: schema.clone(),
-                bookmark: bookmark.to_string(),
-                lang,
-            },
+        self.preview_codegen_at(schema, &RefSpec::bookmark(bookmark), lang, token)
+    }
+
+    /// Render generated code at any ref (branch, tag, or commit).
+    pub fn preview_codegen_at(
+        &self,
+        schema: &SchemaPath,
+        at: &RefSpec,
+        lang: Language,
+        token: Option<&str>,
+    ) -> CoreResult<String> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
             token,
-        )
+            Action::Read,
+            &schema.project,
+            &schema.repo,
+        )?;
+        let compiler = self.compiler_for(&schema.schema_name)?;
+        let closure = closure::build(&self.jj, compiler.as_ref(), schema, at)?;
+        Ok(compiler.generate_code(&closure, lang)?)
     }
 }

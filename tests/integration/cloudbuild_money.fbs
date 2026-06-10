@@ -1,0 +1,13 @@
+namespace cloudbuild.common;
+
+struct Decimal {
+  units: long;
+  nanos: int;
+}
+
+table Money {
+  currency_code: string (required);
+  amount: Decimal;
+}
+
+root_type Money;

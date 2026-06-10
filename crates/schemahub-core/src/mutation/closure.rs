@@ -1,7 +1,7 @@
 //! Transitive import-closure computation for codegen (design.md §10).
 //!
 //! BFS over the `imports` declared in each schema file's `__meta__`, resolving
-//! every import's pinned `resolved_commit` via `vcs.load_schema(.. Commit ..)`,
+//! every import's pinned `resolved_commit` via `jj.load_schema(.. Commit ..)`,
 //! with cycle detection. Produces a [`SchemaClosure`] the compiler turns into
 //! descriptors / generated code.
 //!
@@ -12,14 +12,14 @@
 
 use std::collections::HashSet;
 
+use schemahub_jj::{Jj, RefSpec};
 use schemahub_types::{Compiler, SchemaClosure, SchemaPath};
-use schemahub_vcs::{RefSpec, Vcs};
 
 use crate::error::CoreResult;
 
 /// Build the transitive closure rooted at `root` resolved at `root_ref`.
 pub(crate) fn build(
-    vcs: &Vcs,
+    jj: &Jj,
     compiler: &dyn Compiler,
     root: &SchemaPath,
     root_ref: &RefSpec,
@@ -34,7 +34,7 @@ pub(crate) fn build(
             continue; // cycle / already resolved
         }
 
-        let objs = vcs.load_schema(&path.project, &path.repo, &path.schema_name, &at)?;
+        let objs = jj.load_schema(&path.project, &path.repo, &path.schema_name, &at)?;
         let imports = compiler.imports(&objs.meta)?;
         closure.entries.insert(path.clone(), objs);
 

@@ -1,7 +1,7 @@
 //! Single-mutation flow (design.md §5.1).
 
+use schemahub_jj::RefSpec;
 use schemahub_types::Action;
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::{CoreError, CoreResult};
@@ -49,7 +49,7 @@ impl Core {
 
         // 4. Load the base schema (tolerating first-write / fresh bookmark).
         let base_ref = RefSpec::bookmark(req.bookmark.clone());
-        let base = load_base(&self.vcs, &project, &repo, &schema_name, &base_ref)?;
+        let base = load_base(&self.jj, &project, &repo, &schema_name, &base_ref)?;
 
         // 5. Apply the typed op via the compiler.
         let effect = compiler.apply_mutation(&base, &req.mutation)?;
@@ -57,14 +57,14 @@ impl Core {
         // 6. Compatibility gate on protected bookmarks (unless --force).
         let config = self.repo_configs.get(&project, &repo);
         if !req.force
-            && schemahub_vcs::bookmark::is_protected(&req.bookmark, &config.protected_bookmarks)
+            && schemahub_jj::bookmark::is_protected(&req.bookmark, &config.protected_bookmarks)
         {
             compat::gate(compiler.as_ref(), &config.compat_rules(), &base, &effect)?;
         }
 
         // 7. Commit the effect under one operation; concurrency yields conflicts,
         //    never a CAS rejection (design.md §5.1).
-        let write = self.vcs.commit_write(
+        let write = self.jj.commit_write(
             &project,
             &repo,
             &req.bookmark,

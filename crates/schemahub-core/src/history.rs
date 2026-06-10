@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
+use schemahub_jj::RefSpec;
 use schemahub_types::{Action, DeclChange, SchemaPath};
-use schemahub_vcs::RefSpec;
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
@@ -15,9 +15,9 @@ use crate::Core;
 const DEFAULT_LOG_LIMIT: usize = 100;
 
 impl Core {
-    /// The operation log for a repo (the audit record) — `vcs.list_operations`.
+    /// The operation log for a repo (the audit record) — `jj.list_operations`.
     ///
-    /// `limit = Some(n)` returns the latest `n` operations (the VCS returns
+    /// `limit = Some(n)` returns the latest `n` operations (the JJ layer returns
     /// oldest→newest, so we trim the front, preserving relative order). `None`
     /// returns the full log.
     pub fn op_log(
@@ -35,7 +35,7 @@ impl Core {
             project,
             repo,
         )?;
-        let mut ops = self.vcs.list_operations(project, repo)?;
+        let mut ops = self.jj.list_operations(project, repo)?;
         if let Some(n) = limit {
             if ops.len() > n {
                 let drop = ops.len() - n;
@@ -45,7 +45,7 @@ impl Core {
         Ok(ops)
     }
 
-    /// Undo the last operation — `vcs.undo`. Returns the id of the operation that
+    /// Undo the last operation — `jj.undo`. Returns the id of the operation that
     /// was undone. Requires `Write` (it mutates the repo's view).
     pub fn undo(
         &self,
@@ -62,13 +62,13 @@ impl Core {
             project,
             repo,
         )?;
-        Ok(self.vcs.undo(project, repo, author)?)
+        Ok(self.jj.undo(project, repo, author)?)
     }
 
     /// The commit/change history graph (design.md §12 `log`).
     ///
     /// Walks the *real* commit/change graph from `at_ref` (newest→oldest) via
-    /// [`Vcs::commit_log`], surfacing each commit's content-addressed `commit_id`,
+    /// [`Jj::commit_log`], surfacing each commit's content-addressed `commit_id`,
     /// stable jj `change_id`, real `parents`, `author`, `message`, and
     /// `timestamp`. This is distinct from [`Core::op_log`], which is the
     /// operation-log audit view. Defaults to the repo's default bookmark when no
@@ -92,7 +92,7 @@ impl Core {
         let default_ref = RefSpec::bookmark(self.repo_configs.get(project, repo).default_bookmark);
         let at = at_ref.unwrap_or(&default_ref);
         let limit = limit.unwrap_or(DEFAULT_LOG_LIMIT);
-        let commits = self.vcs.commit_log(project, repo, at, limit)?;
+        let commits = self.jj.commit_log(project, repo, at, limit)?;
         Ok(commits
             .into_iter()
             .map(|c| LogEntry {
@@ -126,10 +126,10 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         let old = self
-            .vcs
+            .jj
             .load_schema(&schema.project, &schema.repo, &schema.schema_name, from)?;
         let new = self
-            .vcs
+            .jj
             .load_schema(&schema.project, &schema.repo, &schema.schema_name, to)?;
 
         let mut names: BTreeSet<&String> = BTreeSet::new();

@@ -2,7 +2,7 @@
 
 Audit of `v2-rearchitecture` @ `516639f`. Baseline before fixes: `cargo build
 --workspace` clean, `cargo test --workspace` = 288 passed / 0 failed / 0
-ignored. `cargo build --workspace --features schemahub-vcs/postgres` clean.
+ignored. `cargo build --workspace --features schemahub-jj/postgres` clean.
 
 ## Status (after Phase 3 — 2026-05-30)
 
@@ -32,8 +32,8 @@ Priorities:
 
 ### GC silently swallows load errors and then sweeps
 
-- **Location:** `crates/schemahub-vcs/src/lib.rs:1051-1054` (op load) and
-  `lib.rs:1089-1092` (commit load) in `Vcs::gc`.
+- **Location:** `crates/schemahub-jj/src/lib.rs:1051-1054` (op load) and
+  `lib.rs:1089-1092` (commit load) in `Jj::gc`.
 - **Also:** `lib.rs:1083-1085` — invalid hex `CommitId::try_from_hex` returns
   `None` and is silently skipped.
 - **Problem:** GC marks reachable objects from every op view + every commit
@@ -47,7 +47,7 @@ Priorities:
 - **Fix:** Propagate the error (`?`) instead of `continue`. If the GC is
   asked to walk an op that genuinely vanished, that's an inconsistency that
   must be reported, not papered over by deleting more data. Also map
-  `try_from_hex` failures to `VcsError::Corrupt` instead of silently
+  `try_from_hex` failures to `JjError::Corrupt` instead of silently
   skipping.
 
 ---
@@ -59,8 +59,8 @@ Priorities:
 - **Location:** `crates/schemahub-server/src/services/schema.rs:88-92`
   (`create_schema`) and `:124-129` (`update_schema`).
 - **Problem:** Both handlers do
-  `core.vcs().load_schema(...).unwrap_or_default()` to "tolerate a missing
-  base (first write)". But `VcsError` has many variants —
+  `core.jj().load_schema(...).unwrap_or_default()` to "tolerate a missing
+  base (first write)". But `JjError` has many variants —
   `BookmarkNotFound`, `SchemaNotFound`, `TagNotFound` are the legitimate
   "fresh bookmark" cases; `Corrupt`, `ObjectDb`, `BadRef`, `Other` are real
   errors that this code drops on the floor. When the VCS is broken, the
@@ -215,7 +215,7 @@ Priorities:
 ### VCS ref ops silently drop the `author` parameter
 
 - **Location:**
-  `crates/schemahub-vcs/src/lib.rs:562` (`create_bookmark`), `:585`
+  `crates/schemahub-jj/src/lib.rs:562` (`create_bookmark`), `:585`
   (`move_bookmark`), `:606` (`delete_bookmark`), `:641` (`create_tag`),
   `:662` (`delete_tag`), `:824` (`undo`). Each one has
   `let _ = author;` and uses jj's default metadata for the op-log
@@ -328,7 +328,7 @@ Priorities:
 
 ### `tree_from_proto` / `tree_value_from_proto` unwrap on optional proto fields
 
-- **Location:** `crates/schemahub-vcs/src/jj_backend.rs:280`, `:281`,
+- **Location:** `crates/schemahub-jj/src/jj_backend.rs:280`, `:281`,
   `:317`.
 - **Problem:** Three `.unwrap()` calls on `proto.value` /
   `proto_entry.value` inside async backend code that handles
@@ -343,7 +343,7 @@ Priorities:
 
 ### Op-heads store silently drops invalid hex ids
 
-- **Location:** `crates/schemahub-vcs/src/jj_op_heads.rs:49`
+- **Location:** `crates/schemahub-jj/src/jj_op_heads.rs:49`
   (`filter_map(|hex| OperationId::try_from_hex(hex))`).
 - **Problem:** If the op-heads ref blob is corrupted (e.g. partial
   write), one bad line silently disappears and the head set
@@ -376,7 +376,7 @@ Priorities:
 
 ### `for add in value.adds() { if let Some(v) = add { … } }`
 
-- **Location:** `crates/schemahub-vcs/src/lib.rs:905-911`.
+- **Location:** `crates/schemahub-jj/src/lib.rs:905-911`.
 - **Problem:** Clippy: `unnecessary_filter_map` — the outer iter
   yields `Option<…>`; the manual `if let Some` is equivalent to
   `.flatten()` or `.filter_map(...)`.
@@ -384,7 +384,7 @@ Priorities:
 
 ### Redundant closure
 
-- **Location:** `crates/schemahub-vcs/src/jj_op_heads.rs:49`.
+- **Location:** `crates/schemahub-jj/src/jj_op_heads.rs:49`.
 - **Problem:** `|hex| OperationId::try_from_hex(hex)` — clippy
   suggests `OperationId::try_from_hex` directly.
 - **Fix:** Pass the function value. (Note: if we change to fail-fast
@@ -395,7 +395,7 @@ Priorities:
 - **Location:**
   `crates/schemahub-core/src/mutation/closure.rs:77`
   (`pub(crate) fn require_resolved`),
-  `crates/schemahub-vcs/src/jj_op_store.rs:335`
+  `crates/schemahub-jj/src/jj_op_store.rs:335`
   (`type _ReachableViews = HashSet<ViewId>`).
 - **Problem:** User rule: "no `#[allow(dead_code)]`". Both are
   speculative scaffolding with no caller.
@@ -418,7 +418,7 @@ Priorities:
 ### `pg_db.rs` spawns a fresh OS thread per DB call
 
 - **Location:**
-  `crates/schemahub-vcs/src/pg_db.rs:135-153` (`block_on`).
+  `crates/schemahub-jj/src/pg_db.rs:135-153` (`block_on`).
 - **Problem:** Every ObjectDb method call hops via
   `thread::spawn` + `oneshot` to escape the caller's tokio context
   and reach the dedicated runtime. At schema-registry QPS (low,
@@ -429,10 +429,10 @@ Priorities:
 
 - **Location:**
   `crates/schemahub-core/src/history.rs:38-44`.
-- **Problem:** `vcs.list_operations` returns oldest→newest, then we
+- **Problem:** `jj.list_operations` returns oldest→newest, then we
   `drain(..ops.len() - n)`. For a repo with thousands of ops, every
   paged op-log read is O(total).
-- **Fix:** Add `Vcs::list_operations_tail(n)` that walks the op
+- **Fix:** Add `Jj::list_operations_tail(n)` that walks the op
   parent chain back N steps. Defer unless someone reports it.
 
 ### Config silently skips malformed `[repos.*]` keys

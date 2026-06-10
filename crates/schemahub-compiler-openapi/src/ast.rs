@@ -270,13 +270,13 @@ pub struct JsonSchemaDef {
 /// A schema that is either inline or a `$ref`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SchemaOrRef {
-    Inline(JsonSchemaDef),
+    Inline(Box<JsonSchemaDef>),
     Ref(SchemaRef),
 }
 
 impl Default for SchemaOrRef {
     fn default() -> Self {
-        Self::Inline(JsonSchemaDef::default())
+        Self::Inline(Box::default())
     }
 }
 
@@ -322,7 +322,7 @@ impl Default for ParameterDef {
 /// A parameter that is either inline or a `$ref` to `components/parameters`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterOrRef {
-    Inline(ParameterDef),
+    Inline(Box<ParameterDef>),
     Ref(String),
 }
 
@@ -533,7 +533,7 @@ pub struct OpenApiDecl {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DeclPayload {
     PathItem(PathItemBlob),
-    ComponentSchema(ComponentSchemaBlob),
+    ComponentSchema(Box<ComponentSchemaBlob>),
     ComponentParameter(ComponentParameterBlob),
     ComponentResponse(ComponentResponseBlob),
     ComponentRequestBody(ComponentRequestBodyBlob),

@@ -3,7 +3,7 @@
 //!
 //! The op-heads store holds the current head(s) of the operation graph — the
 //! durable pointer that makes `undo`/`op restore` and reload-at-head work across
-//! `Vcs` instances. We keep it in the per-repo ref table (`set_ref`/`get_ref`),
+//! `Jj` instances. We keep it in the per-repo ref table (`set_ref`/`get_ref`),
 //! newline-joined hex ids. The lock is a no-op (single-writer embedded use); the
 //! design (§4.4) follows jj's normal concurrency model.
 

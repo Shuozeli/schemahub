@@ -1,4 +1,4 @@
-//! Admin operations: GC and rebuild-index — thin wrappers over the VCS
+//! Admin operations: GC and rebuild-index — thin wrappers over the JJ layer
 //! (design.md §8 reference integrity index is derived/rebuildable; GC is the
 //! mark-and-sweep over reachable objects, design.md §4.4).
 
@@ -24,13 +24,13 @@ impl Core {
                 repo,
             )?;
         }
-        Ok(self.vcs.gc(repos)?)
+        Ok(self.jj.gc(repos)?)
     }
 
     /// Rebuild the derived dependency/name index for a repo (design.md §8).
     ///
     /// The index is *derived* from objects reachable from bookmarks — there is no
-    /// separately persisted index in the current VCS, so reads (Search /
+    /// separately persisted index in the current JJ, so reads (Search /
     /// FollowType) recompute it on demand. This is therefore a no-op stub that
     /// authorizes and reports success; when a persisted index is added, the
     /// rebuild scan lands here. The server may expose it as `RebuildIndex`.

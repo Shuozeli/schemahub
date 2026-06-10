@@ -1,11 +1,11 @@
 //! Project + role registries — the data the real `AuthzPolicy` and the
 //! `ProjectService` RPCs both read from (design.md §6).
 //!
-//! Two small traits, decoupled from the [`ObjectDb`](schemahub_vcs::ObjectDb)
+//! Two small traits, decoupled from the [`ObjectDb`](schemahub_jj::ObjectDb)
 //! deliberately: the postgres-backed `ObjectDb` impl just landed and we keep
 //! that surface stable. Roles and project metadata live in their own store
 //! (the default is a file-backed JSON impl — see [`auth_files`](crate::auth_files));
-//! a future deployment can swap in a SQL impl without touching the VCS layer.
+//! a future deployment can swap in a SQL impl without touching the JJ layer.
 
 use schemahub_types::{Identity, Role, Visibility};
 

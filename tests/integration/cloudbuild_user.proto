@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package cloudbuild.user.v1;
+
+import "acme/core/common/types.proto";
+
+message UserProfile {
+  string id = 1;
+  string email = 2;
+  cloudbuild.common.v1.AuditInfo audit = 3;
+}

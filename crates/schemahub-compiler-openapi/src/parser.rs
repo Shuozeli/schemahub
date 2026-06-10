@@ -95,7 +95,9 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
                 };
                 decls.push((
                     format!("schema:{name}"),
-                    encode_decl(&OpenApiDecl::new(DeclPayload::ComponentSchema(blob))),
+                    encode_decl(&OpenApiDecl::new(DeclPayload::ComponentSchema(Box::new(
+                        blob,
+                    )))),
                 ));
             }
         }
@@ -307,7 +309,7 @@ fn parse_parameter_or_ref(val: &Value) -> ParameterOrRef {
             .to_owned();
         ParameterOrRef::Ref(name)
     } else {
-        ParameterOrRef::Inline(parse_parameter_def(val))
+        ParameterOrRef::Inline(Box::new(parse_parameter_def(val)))
     }
 }
 
@@ -472,7 +474,7 @@ fn parse_schema_or_ref(val: &Value) -> SchemaOrRef {
             external_import: None,
         })
     } else {
-        SchemaOrRef::Inline(parse_schema_def(val))
+        SchemaOrRef::Inline(Box::new(parse_schema_def(val)))
     }
 }
 

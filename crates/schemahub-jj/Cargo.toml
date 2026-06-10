@@ -1,5 +1,5 @@
 [package]
-name    = "schemahub-vcs"
+name    = "schemahub-jj"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,7 +14,7 @@ serde           = { workspace = true }
 serde_json      = { workspace = true }
 uuid            = { workspace = true }
 
-# DECISION (see DECISIONS.md): schemahub-vcs is built on the REAL Jujutsu
+# DECISION (see DECISIONS.md): schemahub-jj is built on the REAL Jujutsu
 # library. We implement `jj_lib::backend::Backend` (DbBackend) and
 # `jj_lib::op_store::OpStore` (DbOpStore) over our `ObjectDb`, and drive writes
 # through jj's RepoLoader/MutableRepo/Transaction/CommitBuilder/MergedTreeBuilder.

@@ -1,16 +1,16 @@
-//! Unit tests for the jj-style VCS model (AAA style).
+//! Unit tests for the jj-style JJ model (AAA style).
 
 use std::sync::Arc;
 
 use schemahub_types::{DeclBlob, MetaBlob, MutationEffect};
 
 use crate::object_db::{ObjectDb, ObjectKind};
-use crate::{MemoryObjectDb, RefSpec, Vcs};
+use crate::{Jj, MemoryObjectDb, RefSpec};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn mem_vcs() -> Vcs {
-    Vcs::new(Arc::new(MemoryObjectDb::new()))
+fn mem_jj() -> Jj {
+    Jj::new(Arc::new(MemoryObjectDb::new()))
 }
 
 fn upsert(name: &str, body: &str) -> MutationEffect {
@@ -22,7 +22,7 @@ fn upsert(name: &str, body: &str) -> MutationEffect {
 }
 
 /// Create an initial commit with two declarations on `main`.
-fn seed_two_decls(vcs: &Vcs) -> String {
+fn seed_two_decls(jj: &Jj) -> String {
     let effect = MutationEffect {
         meta: Some(MetaBlob::new(b"package test;".to_vec())),
         upserts: vec![
@@ -37,7 +37,7 @@ fn seed_two_decls(vcs: &Vcs) -> String {
         ],
         removes: vec![],
     };
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -88,11 +88,11 @@ fn put_object_is_content_addressed_and_dedups() {
 #[test]
 fn load_schema_reassembles_committed_declarations() {
     // Arrange
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
+    let jj = mem_jj();
+    seed_two_decls(&jj);
 
     // Act
-    let schema = vcs
+    let schema = jj
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
 
@@ -108,9 +108,9 @@ fn load_schema_reassembles_committed_declarations() {
 #[test]
 fn editing_one_decl_leaves_siblings_content_hash_unchanged() {
     // Arrange: seed two decls, capture the sibling's file id.
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
-    let sibling_before = vcs
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    let sibling_before = jj
         .get_declaration(
             "proj",
             "repo",
@@ -121,7 +121,7 @@ fn editing_one_decl_leaves_siblings_content_hash_unchanged() {
         .unwrap();
 
     // Act: edit only UserRequest.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -134,7 +134,7 @@ fn editing_one_decl_leaves_siblings_content_hash_unchanged() {
     .unwrap();
 
     // Assert: UserRequest changed; UserStatus blob is byte-identical (dedup).
-    let req_after = vcs
+    let req_after = jj
         .get_declaration(
             "proj",
             "repo",
@@ -143,7 +143,7 @@ fn editing_one_decl_leaves_siblings_content_hash_unchanged() {
             &RefSpec::bookmark("main"),
         )
         .unwrap();
-    let sibling_after = vcs
+    let sibling_after = jj
         .get_declaration(
             "proj",
             "repo",
@@ -160,13 +160,13 @@ fn editing_one_decl_leaves_siblings_content_hash_unchanged() {
 fn unchanged_sibling_file_object_is_not_duplicated() {
     // Arrange
     let db = Arc::new(MemoryObjectDb::new());
-    let vcs = Vcs::new(db.clone());
-    seed_two_decls(&vcs);
+    let jj = Jj::new(db.clone());
+    seed_two_decls(&jj);
     // The UserStatus blob bytes ("enum status v1").
     let status_id = db.put_object(ObjectKind::File, b"enum status v1").unwrap();
 
     // Act: edit UserRequest only.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -186,8 +186,8 @@ fn unchanged_sibling_file_object_is_not_duplicated() {
 #[test]
 fn removing_a_declaration_drops_it_from_schema() {
     // Arrange
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
+    let jj = mem_jj();
+    seed_two_decls(&jj);
 
     // Act
     let effect = MutationEffect {
@@ -195,7 +195,7 @@ fn removing_a_declaration_drops_it_from_schema() {
         upserts: vec![],
         removes: vec!["UserStatus".to_string()],
     };
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -208,7 +208,7 @@ fn removing_a_declaration_drops_it_from_schema() {
     .unwrap();
 
     // Assert
-    let decls = vcs
+    let decls = jj
         .list_declarations("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
     assert_eq!(decls, vec!["UserRequest".to_string()]);
@@ -219,11 +219,11 @@ fn removing_a_declaration_drops_it_from_schema() {
 #[test]
 fn each_write_appends_one_operation() {
     // Arrange
-    let vcs = mem_vcs();
+    let jj = mem_jj();
 
     // Act
-    seed_two_decls(&vcs);
-    vcs.commit_write(
+    seed_two_decls(&jj);
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -236,7 +236,7 @@ fn each_write_appends_one_operation() {
     .unwrap();
 
     // Assert: two operations, ordered oldest → newest.
-    let ops = vcs.list_operations("proj", "repo").unwrap();
+    let ops = jj.list_operations("proj", "repo").unwrap();
     assert_eq!(ops.len(), 2);
     assert!(ops[0].description.contains("seed"));
     assert!(ops[1].description.contains("edit"));
@@ -245,9 +245,9 @@ fn each_write_appends_one_operation() {
 #[test]
 fn undo_restores_the_prior_view() {
     // Arrange: seed, then edit (so there is a prior state to restore).
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
-    vcs.commit_write(
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -260,10 +260,10 @@ fn undo_restores_the_prior_view() {
     .unwrap();
 
     // Act
-    vcs.undo("proj", "repo", "alice").unwrap();
+    jj.undo("proj", "repo", "alice").unwrap();
 
     // Assert: main is back at v1 of UserRequest.
-    let req = vcs
+    let req = jj
         .get_declaration(
             "proj",
             "repo",
@@ -279,8 +279,8 @@ fn undo_restores_the_prior_view() {
 fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
     // Arrange: three sequential writes on main — create (req v1), then two edits
     // (req v2, req v3). Each write is its own content op.
-    let vcs = mem_vcs();
-    vcs.commit_write(
+    let jj = mem_jj();
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -291,7 +291,7 @@ fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
         "create",
     )
     .unwrap();
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -302,7 +302,7 @@ fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
         "edit to v2",
     )
     .unwrap();
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -313,8 +313,8 @@ fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
         "edit to v3",
     )
     .unwrap();
-    let read = |vcs: &Vcs| {
-        vcs.get_declaration(
+    let read = |jj: &Jj| {
+        jj.get_declaration(
             "proj",
             "repo",
             "user.proto",
@@ -325,16 +325,16 @@ fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
     };
 
     // Act 1: first undo rolls back the newest change (v3 -> v2).
-    vcs.undo("proj", "repo", "alice").unwrap();
-    let after_first = read(&vcs).unwrap();
+    jj.undo("proj", "repo", "alice").unwrap();
+    let after_first = read(&jj).unwrap();
 
     // Act 2: second undo continues walking back (v2 -> v1), NOT redoing the first.
-    vcs.undo("proj", "repo", "alice").unwrap();
-    let after_second = read(&vcs).unwrap();
+    jj.undo("proj", "repo", "alice").unwrap();
+    let after_second = read(&jj).unwrap();
 
     // Act 3: third undo rolls past the create, leaving the empty/initial state.
-    vcs.undo("proj", "repo", "alice").unwrap();
-    let after_third = read(&vcs);
+    jj.undo("proj", "repo", "alice").unwrap();
+    let after_third = read(&jj);
 
     // Assert: monotonic walk-back through every prior state.
     assert_eq!(after_first, b"msg req v2", "1st undo should land on v2");
@@ -346,8 +346,8 @@ fn repeated_undo_walks_back_through_each_prior_state_monotonically() {
     );
 
     // Assert: a fourth undo has nothing older to roll back to.
-    let fourth = vcs.undo("proj", "repo", "alice");
-    assert!(matches!(fourth, Err(crate::VcsError::NothingToUndo)));
+    let fourth = jj.undo("proj", "repo", "alice");
+    assert!(matches!(fourth, Err(crate::JjError::NothingToUndo)));
 }
 
 #[test]
@@ -355,10 +355,10 @@ fn undo_with_no_prior_operation_errors() {
     // Arrange: a brand-new repo with no writes — there is no content op to undo.
     // (Linear-undo walk-back DOES roll a single seed write back to the empty
     // state; the error case is when there is nothing recorded at all.)
-    let vcs = mem_vcs();
+    let jj = mem_jj();
 
     // Act
-    let result = vcs.undo("proj", "repo", "alice");
+    let result = jj.undo("proj", "repo", "alice");
 
     // Assert
     assert!(result.is_err());
@@ -370,7 +370,7 @@ fn undo_with_no_prior_operation_errors() {
 fn decl_name_with_slash_and_colon_round_trips_and_keeps_sibling_dedup() {
     // Arrange: a repo whose schema file holds an OpenAPI-style `path:/users`
     // declaration (name contains both `:` and `/`) alongside a plain sibling.
-    let vcs = mem_vcs();
+    let jj = mem_jj();
     let effect = MutationEffect {
         meta: Some(MetaBlob::new(b"openapi: 3.0.3".to_vec())),
         upserts: vec![
@@ -387,7 +387,7 @@ fn decl_name_with_slash_and_colon_round_trips_and_keeps_sibling_dedup() {
     };
 
     // Act: write, then read the schema back and fetch the slashed decl directly.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -398,13 +398,13 @@ fn decl_name_with_slash_and_colon_round_trips_and_keeps_sibling_dedup() {
         "seed openapi",
     )
     .unwrap();
-    let schema = vcs
+    let schema = jj
         .load_schema("proj", "repo", "api.yaml", &RefSpec::bookmark("main"))
         .unwrap();
-    let names = vcs
+    let names = jj
         .list_declarations("proj", "repo", "api.yaml", &RefSpec::bookmark("main"))
         .unwrap();
-    let path_decl = vcs
+    let path_decl = jj
         .get_declaration(
             "proj",
             "repo",
@@ -434,7 +434,7 @@ fn decl_name_with_slash_and_colon_round_trips_and_keeps_sibling_dedup() {
 #[test]
 fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
     // Arrange: two decls, one with a `/` in its name; capture the sibling.
-    let vcs = mem_vcs();
+    let jj = mem_jj();
     let effect = MutationEffect {
         meta: Some(MetaBlob::new(b"openapi: 3.0.3".to_vec())),
         upserts: vec![
@@ -449,7 +449,7 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
         ],
         removes: vec![],
     };
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -460,7 +460,7 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
         "seed",
     )
     .unwrap();
-    let sibling_before = vcs
+    let sibling_before = jj
         .get_declaration(
             "proj",
             "repo",
@@ -471,7 +471,7 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
         .unwrap();
 
     // Act: edit only `path:/users`.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -485,7 +485,7 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
 
     // Assert: the edited slashed decl changed; the slashed sibling is unchanged
     // (per-declaration dedup still holds for names containing `/`).
-    let edited = vcs
+    let edited = jj
         .get_declaration(
             "proj",
             "repo",
@@ -494,7 +494,7 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
             &RefSpec::bookmark("main"),
         )
         .unwrap();
-    let sibling_after = vcs
+    let sibling_after = jj
         .get_declaration(
             "proj",
             "repo",
@@ -512,11 +512,11 @@ fn editing_a_slashed_decl_leaves_its_sibling_unchanged() {
 #[test]
 fn concurrent_edits_to_different_decls_merge_cleanly() {
     // Arrange: a shared base with two decls.
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
 
     // Act: two writers, both basing off `base`, edit DIFFERENT decls.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -527,7 +527,7 @@ fn concurrent_edits_to_different_decls_merge_cleanly() {
         "A edits req",
     )
     .unwrap();
-    let second = vcs
+    let second = jj
         .commit_write(
             "proj",
             "repo",
@@ -542,7 +542,7 @@ fn concurrent_edits_to_different_decls_merge_cleanly() {
 
     // Assert: no conflict; both edits present.
     assert!(second.conflicted_decls.is_empty());
-    let schema = vcs
+    let schema = jj
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
     assert_eq!(
@@ -558,11 +558,11 @@ fn concurrent_edits_to_different_decls_merge_cleanly() {
 #[test]
 fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
     // Arrange: shared base.
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
 
     // Act: two writers edit the SAME decl differently off the same base.
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -573,7 +573,7 @@ fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
         "A",
     )
     .unwrap();
-    let second = vcs
+    let second = jj
         .commit_write(
             "proj",
             "repo",
@@ -588,7 +588,7 @@ fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
 
     // Assert: the declaration landed conflicted, recorded but not rejected.
     assert_eq!(second.conflicted_decls, vec!["UserRequest".to_string()]);
-    let sides = vcs
+    let sides = jj
         .read_conflict(
             "proj",
             "repo",
@@ -606,9 +606,9 @@ fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
 #[test]
 fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
     // Arrange: produce a conflict on UserRequest.
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
-    vcs.commit_write(
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -619,7 +619,7 @@ fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
         "A",
     )
     .unwrap();
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -632,7 +632,7 @@ fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
     .unwrap();
 
     // Act
-    vcs.resolve_conflict(
+    jj.resolve_conflict(
         "proj",
         "repo",
         "main",
@@ -645,7 +645,7 @@ fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
     .unwrap();
 
     // Assert: UserRequest reads cleanly as the resolved blob.
-    let req = vcs
+    let req = jj
         .get_declaration(
             "proj",
             "repo",
@@ -662,11 +662,11 @@ fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
 #[test]
 fn create_and_list_bookmark() {
     // Arrange
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
 
     // Act
-    vcs.create_bookmark(
+    jj.create_bookmark(
         "proj",
         "repo",
         "feature/x",
@@ -676,7 +676,7 @@ fn create_and_list_bookmark() {
     .unwrap();
 
     // Assert
-    let bms = vcs.list_bookmarks("proj", "repo").unwrap();
+    let bms = jj.list_bookmarks("proj", "repo").unwrap();
     let names: Vec<&str> = bms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"main"));
     assert!(names.contains(&"feature/x"));
@@ -685,11 +685,11 @@ fn create_and_list_bookmark() {
 #[test]
 fn create_and_list_tag() {
     // Arrange
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
 
     // Act
-    vcs.create_tag(
+    jj.create_tag(
         "proj",
         "repo",
         "v1.0.0",
@@ -699,7 +699,7 @@ fn create_and_list_tag() {
     .unwrap();
 
     // Assert
-    let tags = vcs.list_tags("proj", "repo").unwrap();
+    let tags = jj.list_tags("proj", "repo").unwrap();
     assert_eq!(tags, vec![("v1.0.0".to_string(), base)]);
 }
 
@@ -708,9 +708,9 @@ fn create_and_list_tag() {
 #[test]
 fn merge_disjoint_decl_edits_is_clean() {
     // Arrange: base on main, branch off, each side edits a different decl.
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
-    vcs.create_bookmark(
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.create_bookmark(
         "proj",
         "repo",
         "feat",
@@ -719,7 +719,7 @@ fn merge_disjoint_decl_edits_is_clean() {
     )
     .unwrap();
     // main edits UserRequest
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -731,7 +731,7 @@ fn merge_disjoint_decl_edits_is_clean() {
     )
     .unwrap();
     // feat edits UserStatus
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "feat",
@@ -744,11 +744,11 @@ fn merge_disjoint_decl_edits_is_clean() {
     .unwrap();
 
     // Act
-    let result = vcs.merge("proj", "repo", "feat", "main", "carol").unwrap();
+    let result = jj.merge("proj", "repo", "feat", "main", "carol").unwrap();
 
     // Assert: clean merge with both edits.
     assert!(result.conflicted_decls.is_empty());
-    let schema = vcs
+    let schema = jj
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
     assert_eq!(
@@ -764,9 +764,9 @@ fn merge_disjoint_decl_edits_is_clean() {
 #[test]
 fn merge_same_decl_edits_produces_conflict_not_error() {
     // Arrange
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
-    vcs.create_bookmark(
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.create_bookmark(
         "proj",
         "repo",
         "feat",
@@ -774,7 +774,7 @@ fn merge_same_decl_edits_produces_conflict_not_error() {
         "alice",
     )
     .unwrap();
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -785,7 +785,7 @@ fn merge_same_decl_edits_produces_conflict_not_error() {
         "main edit",
     )
     .unwrap();
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "feat",
@@ -798,7 +798,7 @@ fn merge_same_decl_edits_produces_conflict_not_error() {
     .unwrap();
 
     // Act
-    let result = vcs.merge("proj", "repo", "feat", "main", "carol").unwrap();
+    let result = jj.merge("proj", "repo", "feat", "main", "carol").unwrap();
 
     // Assert
     assert_eq!(result.conflicted_decls, vec!["UserRequest".to_string()]);
@@ -810,12 +810,12 @@ fn merge_same_decl_edits_produces_conflict_not_error() {
 fn gc_sweeps_unreachable_objects_and_keeps_reachable_ones() {
     // Arrange: a reachable commit, plus an orphan object reachable from nothing.
     let db = Arc::new(MemoryObjectDb::new());
-    let vcs = Vcs::new(db.clone());
-    seed_two_decls(&vcs);
+    let jj = Jj::new(db.clone());
+    seed_two_decls(&jj);
     let orphan = db
         .put_object(ObjectKind::File, b"orphaned blob never referenced")
         .unwrap();
-    let reachable = vcs
+    let reachable = jj
         .get_declaration(
             "proj",
             "repo",
@@ -826,13 +826,13 @@ fn gc_sweeps_unreachable_objects_and_keeps_reachable_ones() {
         .unwrap();
 
     // Act
-    let swept = vcs.gc(&[("proj".to_string(), "repo".to_string())]).unwrap();
+    let swept = jj.gc(&[("proj".to_string(), "repo".to_string())]).unwrap();
 
     // Assert: the orphan is gone, the reachable decl survives.
     assert!(swept >= 1);
     assert!(!db.has_object(ObjectKind::File, &orphan).unwrap());
     // Re-reading the reachable declaration still works.
-    let req = vcs
+    let req = jj
         .get_declaration(
             "proj",
             "repo",
@@ -849,12 +849,12 @@ fn gc_sweeps_unreachable_objects_and_keeps_reachable_ones() {
 #[test]
 fn redb_backend_supports_full_write_read_cycle() {
     // Arrange
-    let dir = std::env::temp_dir().join(format!("schemahub-vcs-test-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("schemahub-jj-test-{}", uuid::Uuid::new_v4()));
     let db = crate::RedbObjectDb::open(&dir).unwrap();
-    let vcs = Vcs::new(Arc::new(db));
+    let jj = Jj::new(Arc::new(db));
 
     // Act
-    vcs.commit_write(
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -867,7 +867,7 @@ fn redb_backend_supports_full_write_read_cycle() {
     .unwrap();
 
     // Assert
-    let schema = vcs
+    let schema = jj
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
     assert_eq!(
@@ -880,12 +880,12 @@ fn redb_backend_supports_full_write_read_cycle() {
 
 #[test]
 fn redb_state_survives_reopening_the_database() {
-    // Arrange: write through one Vcs over a redb file, then drop it.
-    let dir = std::env::temp_dir().join(format!("schemahub-vcs-persist-{}", uuid::Uuid::new_v4()));
+    // Arrange: write through one Jj over a redb file, then drop it.
+    let dir = std::env::temp_dir().join(format!("schemahub-jj-persist-{}", uuid::Uuid::new_v4()));
     {
         let db = crate::RedbObjectDb::open(&dir).unwrap();
-        let vcs = Vcs::new(Arc::new(db));
-        vcs.commit_write(
+        let jj = Jj::new(Arc::new(db));
+        jj.commit_write(
             "proj",
             "repo",
             "main",
@@ -896,11 +896,11 @@ fn redb_state_survives_reopening_the_database() {
             "seed",
         )
         .unwrap();
-    } // Vcs (and its jj RepoLoader / op-heads) dropped here.
+    } // Jj (and its jj RepoLoader / op-heads) dropped here.
 
-    // Act: open a brand-new Vcs over the SAME redb file.
+    // Act: open a brand-new Jj over the SAME redb file.
     let db = crate::RedbObjectDb::open(&dir).unwrap();
-    let vcs2 = Vcs::new(Arc::new(db));
+    let vcs2 = Jj::new(Arc::new(db));
     let decl = vcs2
         .get_declaration(
             "proj",
@@ -923,9 +923,9 @@ fn redb_state_survives_reopening_the_database() {
 #[test]
 fn commit_log_walks_the_real_commit_graph_newest_first() {
     // Arrange: two commits on main (seed, then an edit).
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
-    vcs.commit_write(
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    jj.commit_write(
         "proj",
         "repo",
         "main",
@@ -938,7 +938,7 @@ fn commit_log_walks_the_real_commit_graph_newest_first() {
     .unwrap();
 
     // Act
-    let log = vcs
+    let log = jj
         .commit_log("proj", "repo", &RefSpec::bookmark("main"), 10)
         .unwrap();
 
@@ -955,10 +955,10 @@ fn commit_log_walks_the_real_commit_graph_newest_first() {
 #[test]
 fn commit_log_respects_the_limit() {
     // Arrange: three commits.
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
+    let jj = mem_jj();
+    seed_two_decls(&jj);
     for i in 0..2 {
-        vcs.commit_write(
+        jj.commit_write(
             "proj",
             "repo",
             "main",
@@ -972,7 +972,7 @@ fn commit_log_respects_the_limit() {
     }
 
     // Act
-    let log = vcs
+    let log = jj
         .commit_log("proj", "repo", &RefSpec::bookmark("main"), 1)
         .unwrap();
 
@@ -985,17 +985,17 @@ fn commit_log_respects_the_limit() {
 #[test]
 fn delete_bookmark_removes_it_from_the_view() {
     // Arrange
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
-    vcs.create_bookmark("proj", "repo", "feature/y", &RefSpec::commit(base), "alice")
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.create_bookmark("proj", "repo", "feature/y", &RefSpec::commit(base), "alice")
         .unwrap();
 
     // Act
-    vcs.delete_bookmark("proj", "repo", "feature/y", "alice")
+    jj.delete_bookmark("proj", "repo", "feature/y", "alice")
         .unwrap();
 
     // Assert
-    let names: Vec<String> = vcs
+    let names: Vec<String> = jj
         .list_bookmarks("proj", "repo")
         .unwrap()
         .into_iter()
@@ -1007,11 +1007,11 @@ fn delete_bookmark_removes_it_from_the_view() {
 #[test]
 fn delete_missing_bookmark_errors() {
     // Arrange
-    let vcs = mem_vcs();
-    seed_two_decls(&vcs);
+    let jj = mem_jj();
+    seed_two_decls(&jj);
 
     // Act
-    let result = vcs.delete_bookmark("proj", "repo", "nope", "alice");
+    let result = jj.delete_bookmark("proj", "repo", "nope", "alice");
 
     // Assert
     assert!(result.is_err());
@@ -1020,16 +1020,16 @@ fn delete_missing_bookmark_errors() {
 #[test]
 fn delete_tag_removes_it_from_the_view() {
     // Arrange
-    let vcs = mem_vcs();
-    let base = seed_two_decls(&vcs);
-    vcs.create_tag("proj", "repo", "v9", &RefSpec::commit(base), "alice")
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.create_tag("proj", "repo", "v9", &RefSpec::commit(base), "alice")
         .unwrap();
 
     // Act
-    vcs.delete_tag("proj", "repo", "v9", "alice").unwrap();
+    jj.delete_tag("proj", "repo", "v9", "alice").unwrap();
 
     // Assert
-    assert!(vcs.list_tags("proj", "repo").unwrap().is_empty());
+    assert!(jj.list_tags("proj", "repo").unwrap().is_empty());
 }
 
 // ── Multi-file atomic write ──────────────────────────────────────────────────
@@ -1037,7 +1037,7 @@ fn delete_tag_removes_it_from_the_view() {
 #[test]
 fn commit_write_multi_touches_several_files_in_one_commit() {
     // Arrange: a fresh repo.
-    let vcs = mem_vcs();
+    let jj = mem_jj();
     let effects = vec![
         (
             "user.proto".to_string(),
@@ -1058,7 +1058,7 @@ fn commit_write_multi_touches_several_files_in_one_commit() {
     ];
 
     // Act
-    let write = vcs
+    let write = jj
         .commit_write_multi(
             "proj",
             "repo",
@@ -1073,13 +1073,13 @@ fn commit_write_multi_touches_several_files_in_one_commit() {
     // Assert: both files are present at the single resulting commit, and exactly
     // one operation was recorded.
     assert!(write.conflicted_decls.is_empty());
-    let user = vcs
+    let user = jj
         .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
         .unwrap();
-    let order = vcs
+    let order = jj
         .load_schema("proj", "repo", "order.proto", &RefSpec::bookmark("main"))
         .unwrap();
     assert_eq!(user.decls.get("User").unwrap().as_bytes(), b"msg user");
     assert_eq!(order.decls.get("Order").unwrap().as_bytes(), b"msg order");
-    assert_eq!(vcs.list_operations("proj", "repo").unwrap().len(), 1);
+    assert_eq!(jj.list_operations("proj", "repo").unwrap().len(), 1);
 }

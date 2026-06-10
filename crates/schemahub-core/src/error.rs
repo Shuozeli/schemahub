@@ -9,8 +9,8 @@ pub enum CoreError {
     UnknownFormat(String),
     #[error("could not detect a format for schema '{0}'")]
     UndetectableFormat(String),
-    #[error("vcs error: {0}")]
-    Vcs(#[from] schemahub_vcs::VcsError),
+    #[error("jj error: {0}")]
+    Jj(#[from] schemahub_jj::JjError),
     #[error("authentication error: {0}")]
     Authn(#[from] schemahub_types::AuthnError),
     #[error("authorization error: {0}")]

@@ -2,6 +2,8 @@
 //! integration tests can build the same `Core` + tonic service stack in-process
 //! (crate-structure.md §3.6, §6 testing strategy).
 
+#![allow(clippy::result_large_err)]
+
 pub mod config;
 pub mod error;
 pub mod services;
@@ -17,8 +19,8 @@ use schemahub_core::{
     BearerTokenAuthn, CompilerRegistry, Core, FileProjectStore, FileRoleStore, ProjectMeta,
     ProjectStore, RoleBasedAuthz, RoleStore,
 };
+use schemahub_jj::{Jj, ObjectDb};
 use schemahub_types::{AuthnProvider, AuthzPolicy, Identity, NoopAuthn, NoopAuthz, Role};
-use schemahub_vcs::{ObjectDb, Vcs};
 
 use tonic::transport::server::Router;
 use tonic::transport::Server;
@@ -60,12 +62,12 @@ pub fn build_core(db: Arc<dyn ObjectDb>, config: &Config) -> Arc<Core> {
     registry.register(Arc::new(FlatBuffersCompiler::new()));
     registry.register(Arc::new(OpenApiCompiler::new()));
 
-    let vcs = Arc::new(Vcs::new(db));
+    let jj = Arc::new(Jj::new(db));
     let repo_configs = config.repo_config_store();
 
     if !config.auth_enabled() {
         return Arc::new(Core::with_config(
-            vcs,
+            jj,
             registry,
             Arc::new(NoopAuthn),
             Arc::new(NoopAuthz),
@@ -99,7 +101,7 @@ pub fn build_core(db: Arc<dyn ObjectDb>, config: &Config) -> Arc<Core> {
     ));
 
     Arc::new(Core::with_stores(
-        vcs,
+        jj,
         registry,
         authn,
         authz,
