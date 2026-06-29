@@ -16,6 +16,7 @@ A general-purpose schema registry server. Manage Protobuf, FlatBuffers, and Open
 - [Auth](#auth)
 - [Storage](#storage)
 - [Configuration](#configuration)
+- [Web console](#web-console)
 - [Limitations in v1](#limitations-in-v1)
 
 ---
@@ -26,7 +27,7 @@ schemahub stores schemas as structured, parsed representations rather than raw f
 
 **What it is not**: a file server for `.proto` files. Schemas live in the registry; your build pipeline pulls descriptors from it.
 
-See `docs/design.md` for the architecture deep-dive, `docs/grpc-api.md` for the wire contract, `docs/crate-structure.md` for the workspace layout, and `docs/openapi-ast.md` for the OpenAPI AST.
+See `docs/design.md` for the architecture deep-dive, `docs/grpc-api.md` for the wire contract, `docs/crate-structure.md` for the workspace layout, `docs/openapi-ast.md` for the OpenAPI AST, `docs/ui-design.md` for the web-console product design, and `docs/gui.md` for the implemented React GUI architecture and usage.
 
 ---
 
@@ -631,6 +632,35 @@ token  = "Bearer eyJ..."
 ```
 
 Resolution order (first wins): CLI flags → environment variables (`SCHEMAHUB_SERVER`, `SCHEMAHUB_TOKEN`) → config file profile → built-in defaults.
+
+---
+
+## Web console
+
+An experimental React console lives in `apps/schemahub-gui`. It is a Vite + React + TypeScript + Mantine app with a typed `SchemaHubClient` boundary and mock data for the first read-mostly auditor workflow.
+
+Current screens include project listing, repo dashboard, schema detail, compare, history, admin config, and codegen preview. The GUI is not connected to the Rust gRPC server yet; `MockSchemaHubClient` stands in for a future HTTP/BFF or gRPC-web client.
+
+Run it locally:
+
+```bash
+cd apps/schemahub-gui
+pnpm install
+pnpm run dev
+```
+
+Run it on Tailscale:
+
+```bash
+cd apps/schemahub-gui
+export TAILSCALE_IP="$(tailscale ip -4)"
+export TAILSCALE_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
+pnpm run dev -- --force
+```
+
+Open `http://$TAILSCALE_HOST:5173/`.
+
+See `docs/gui.md` for the GUI architecture, route map, Tailscale setup, troubleshooting, and the planned path from mock data to the live gRPC server. See `docs/ui-design.md` for the product and component design.
 
 ---
 
