@@ -346,7 +346,7 @@ service CodegenService {
 ```
 
 - **`GetDescriptors`** reconstructs the native descriptor artifact from the AST closure: Protobuf → `FileDescriptorSet` bytes; FlatBuffers → reconstructed `.fbs`; OpenAPI → resolved YAML (multi-document stream for multi-file closures). Response: `{ descriptor_bytes, SchemaFormat format, at_commit }`. **AS-BUILT** — `format` is derived from the schema-file extension; `at_commit` is currently left empty.
-- **`PreviewCodegen`** renders generated source for a `Language`. Response `{ bytes content, bool is_archive, at_commit }`; `is_archive` is currently always `false`. Unsupported language/format → `UNIMPLEMENTED` (e.g. OpenAPI `generate_code` returns `UnsupportedLanguage`).
+- **`PreviewCodegen`** renders generated source for a `Language`. Request includes `rust_pluggable_buffer` (FlatBuffers Rust only) to generate `FlatBufferRead`-based readers and `root_as_<name>_in(&buffer)` helpers. Response `{ bytes content, bool is_archive, at_commit }`; `is_archive` is currently always `false`. Unsupported language/format → `UNIMPLEMENTED` (e.g. OpenAPI `generate_code` returns `UnsupportedLanguage`).
 
 ---
 
@@ -460,10 +460,10 @@ schemahub resolve <project/repo/schema> <declaration> [--branch main] [--from <f
 schemahub diff <project/repo> <base..head> [--schema-path ""]
 
 schemahub codegen get     <project/repo/schema> [--branch] [--lang] [--out ./gen]
-schemahub codegen preview <project/repo/schema> [--branch] [--lang]
+schemahub codegen preview <project/repo/schema> [--branch] [--lang] [--rust-pluggable-buffer]
 ```
 
-> **AS-BUILT — CLI scope.** Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). Top-level `diff` lives at the root (`schemahub diff …`), not under `branch`; `merge` lives under `branch merge`. `op log` is the only `op` subcommand. `project` ships subcommands for `create` and `member {add,remove,set-role}` (wired to the RBAC layer). Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env (clap `env` feature), or `~/.schemahub` profile (`--profile`). CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch.
+> **AS-BUILT — CLI scope.** Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). Top-level `diff` lives at the root (`schemahub diff …`), not under `branch`; `merge` lives under `branch merge`. `op log` is the only `op` subcommand. `project` ships subcommands for `create` and `member {add,remove,set-role}` (wired to the RBAC layer). Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env (clap `env` feature), or `~/.schemahub` profile (`--profile`). CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch. `codegen preview --rust-pluggable-buffer` is honored only for FlatBuffers Rust output.
 
 ---
 

@@ -89,5 +89,6 @@ pub trait Compiler: Send + Sync + 'static {
         &self,
         closure: &SchemaClosure,
         lang: Language,
+        options: &crate::CodegenOptions,
     ) -> Result<String, CodegenError>;
 }

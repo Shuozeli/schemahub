@@ -36,6 +36,9 @@ pub enum CodegenAction {
         branch: String,
         #[arg(long, default_value = "")]
         lang: String,
+        /// FlatBuffers Rust only: generate readers over a pluggable byte-buffer abstraction
+        #[arg(long)]
+        rust_pluggable_buffer: bool,
     },
 }
 
@@ -73,6 +76,7 @@ pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Re
             schema_path,
             branch,
             lang,
+            rust_pluggable_buffer,
         } => {
             let parts = parse_schema_path_3(&schema_path)?;
             let mut client = CodegenServiceClient::new(channel);
@@ -86,6 +90,7 @@ pub async fn run(args: CodegenArgs, channel: Channel, token: &str) -> anyhow::Re
                             r#ref: Some(super::parse_ref(&branch)),
                         }),
                         language: parse_language(&lang)? as i32,
+                        rust_pluggable_buffer,
                     },
                     token,
                 )?)

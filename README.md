@@ -227,10 +227,10 @@ Omit `--from` to render the conflict's competing sides (the `base` and each `sid
 
 ```
 schemahub codegen get     [--branch B | --at @<sha> | --at tag:<name>] <project/repo/schema>
-schemahub codegen preview [--branch B] <project/repo/schema>
+schemahub codegen preview [--branch B] [--lang rust] [--rust-pluggable-buffer] <project/repo/schema>
 ```
 
-`get` downloads the schema descriptor (`FileDescriptorSet` for Protobuf, reconstructed `.fbs` bundle for FlatBuffers, resolved YAML for OpenAPI) and prints it to stdout, following transitive imports automatically. `preview` renders generated source for the chosen language — implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`.
+`get` downloads the schema descriptor (`FileDescriptorSet` for Protobuf, reconstructed `.fbs` bundle for FlatBuffers, resolved YAML for OpenAPI) and prints it to stdout, following transitive imports automatically. `preview` renders generated source for the chosen language — implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`. `--rust-pluggable-buffer` is FlatBuffers Rust only: it asks the sibling `flatc-rs-codegen` backend to generate `FlatBufferRead`-based readers and `root_as_<name>_in(&buffer)` helpers for custom byte-buffer providers.
 
 Ref formats accepted by `--at` / `--branch`:
 - `main` (branch name, default)
@@ -315,7 +315,7 @@ message VersionRef {
 | RPC | Description |
 |---|---|
 | `GetDescriptors` | Return a reconstructed descriptor for a schema and all its transitive imports. Protobuf → `FileDescriptorSet`; FlatBuffers → reconstructed `.fbs` bundle; OpenAPI → resolved YAML. |
-| `PreviewCodegen` | Render generated source code server-side for the requested language. Implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`. Response carries the rendered text (no files written). |
+| `PreviewCodegen` | Render generated source code server-side for the requested language. Implemented for Protobuf and FlatBuffers; OpenAPI returns `UNIMPLEMENTED`. Response carries the rendered text (no files written). `rust_pluggable_buffer=true` enables FlatBuffers Rust pluggable-buffer readers. |
 
 ### ProjectService
 

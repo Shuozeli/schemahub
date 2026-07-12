@@ -4,7 +4,7 @@
 use bytes::Bytes;
 
 use schemahub_jj::RefSpec;
-use schemahub_types::{Action, Language, SchemaPath};
+use schemahub_types::{Action, CodegenOptions, Language, SchemaPath};
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
@@ -62,7 +62,7 @@ impl Core {
             &req.schema,
             &RefSpec::bookmark(&req.bookmark),
         )?;
-        Ok(compiler.generate_code(&closure, req.lang)?)
+        Ok(compiler.generate_code(&closure, req.lang, &req.options)?)
     }
 
     /// Convenience: generate code without a request wrapper (used by the CLI
@@ -74,7 +74,13 @@ impl Core {
         lang: Language,
         token: Option<&str>,
     ) -> CoreResult<String> {
-        self.preview_codegen_at(schema, &RefSpec::bookmark(bookmark), lang, token)
+        self.preview_codegen_at(
+            schema,
+            &RefSpec::bookmark(bookmark),
+            lang,
+            &CodegenOptions::default(),
+            token,
+        )
     }
 
     /// Render generated code at any ref (branch, tag, or commit).
@@ -83,6 +89,7 @@ impl Core {
         schema: &SchemaPath,
         at: &RefSpec,
         lang: Language,
+        options: &CodegenOptions,
         token: Option<&str>,
     ) -> CoreResult<String> {
         authorize(
@@ -95,6 +102,6 @@ impl Core {
         )?;
         let compiler = self.compiler_for(&schema.schema_name)?;
         let closure = closure::build(&self.jj, compiler.as_ref(), schema, at)?;
-        Ok(compiler.generate_code(&closure, lang)?)
+        Ok(compiler.generate_code(&closure, lang, options)?)
     }
 }

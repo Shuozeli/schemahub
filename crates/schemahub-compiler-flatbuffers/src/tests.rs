@@ -738,7 +738,11 @@ fn generate_code_rust_for_simple_table() {
         .insert(SchemaPath::new("p", "r", "s.fbs"), objects);
 
     // Act
-    let result = c.generate_code(&closure, schemahub_types::Language::Rust);
+    let result = c.generate_code(
+        &closure,
+        schemahub_types::Language::Rust,
+        &schemahub_types::CodegenOptions::default(),
+    );
 
     // Assert: either generates Rust, or surfaces a clear resolution limitation.
     match result {
@@ -758,7 +762,11 @@ fn generate_code_rejects_unsupported_language() {
         .insert(SchemaPath::new("p", "r", "s.fbs"), objects);
 
     // Act
-    let result = c.generate_code(&closure, schemahub_types::Language::Go);
+    let result = c.generate_code(
+        &closure,
+        schemahub_types::Language::Go,
+        &schemahub_types::CodegenOptions::default(),
+    );
 
     // Assert
     assert!(matches!(

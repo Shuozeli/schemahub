@@ -16,7 +16,10 @@ use flatc_rs_codegen::{
 };
 use flatc_rs_schema::resolved::ResolvedSchema;
 use flatc_rs_schema::{BaseType, Enum, Object, Schema, Service};
-use schemahub_types::{CodegenError, DescriptorError, Language, SchemaClosure, SchemaObjects};
+use schemahub_types::{
+    CodegenError, CodegenOptions as SchemaHubCodegenOptions, DescriptorError, Language,
+    SchemaClosure, SchemaObjects,
+};
 
 use crate::blob::{decode_decl, decode_meta, DeclPayload};
 use crate::printer::{print_decl, print_meta_header, print_root_type};
@@ -44,7 +47,11 @@ pub fn generate_descriptors(closure: &SchemaClosure) -> Result<Bytes, Descriptor
 
 /// Generate code for a language by resolving the closure's primary schema and
 /// delegating to `flatc-rs-codegen`.
-pub fn generate_code(closure: &SchemaClosure, lang: Language) -> Result<String, CodegenError> {
+pub fn generate_code(
+    closure: &SchemaClosure,
+    lang: Language,
+    options: &SchemaHubCodegenOptions,
+) -> Result<String, CodegenError> {
     match lang {
         Language::Rust | Language::TypeScript => {} // dart handled below too
         Language::Go | Language::Python | Language::Java => {
@@ -57,16 +64,36 @@ pub fn generate_code(closure: &SchemaClosure, lang: Language) -> Result<String, 
     let mut combined = Schema::default();
     let mut paths: Vec<_> = closure.entries.keys().cloned().collect();
     paths.sort();
+    let mut root_type = None;
     for path in &paths {
         let schema = &closure.entries[path];
-        let (objects, enums, services, _meta) =
+        let (objects, enums, services, meta) =
             reassemble(schema).map_err(|e| CodegenError::MalformedBlob(e.to_string()))?;
+        if meta.root_type.is_some() {
+            root_type = meta
+                .root_type
+                .map(|name| (name, meta.file_ident, meta.file_ext));
+        }
         combined.objects.extend(objects);
         combined.enums.extend(enums);
         combined.services.extend(services);
     }
 
     resolve_indices(&mut combined);
+    if let Some((root_name, file_ident, file_ext)) = root_type {
+        let root_short = root_name.rsplit('.').next().unwrap_or(&root_name);
+        if let Some((idx, root)) = combined.objects.iter().enumerate().find(|(_, object)| {
+            object
+                .name
+                .as_deref()
+                .is_some_and(|name| name == root_name || name == root_short)
+        }) {
+            combined.root_table_index = Some(idx);
+            combined.root_table = Some(root.clone());
+            combined.file_ident = file_ident;
+            combined.file_ext = file_ext;
+        }
+    }
 
     let resolved = ResolvedSchema::try_from_parsed(&combined).map_err(|e| {
         CodegenError::Other(format!(
@@ -77,8 +104,14 @@ pub fn generate_code(closure: &SchemaClosure, lang: Language) -> Result<String, 
     })?;
 
     match lang {
-        Language::Rust => generate_rust(&resolved, &CodeGenOptions::default())
-            .map_err(|e| CodegenError::Other(e.to_string())),
+        Language::Rust => generate_rust(
+            &resolved,
+            &CodeGenOptions {
+                rust_pluggable_buffer: options.rust_pluggable_buffer,
+                ..CodeGenOptions::default()
+            },
+        )
+        .map_err(|e| CodegenError::Other(e.to_string())),
         Language::TypeScript => generate_typescript(&resolved, &TsCodeGenOptions::default())
             .map_err(|e| CodegenError::Other(e.to_string())),
         // Dart is supported by the sibling but not exposed in `Language`; reachable

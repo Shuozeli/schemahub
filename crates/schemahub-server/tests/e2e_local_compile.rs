@@ -52,6 +52,22 @@ fn integration_fixture(name: &str) -> String {
     fs::read_to_string(path).expect("read integration fixture")
 }
 
+fn preview_request(
+    project: &str,
+    repo: &str,
+    schema_path: &str,
+    language: pb::Language,
+) -> pb::PreviewCodegenRequest {
+    pb::PreviewCodegenRequest {
+        project: project.into(),
+        repo: repo.into(),
+        schema_path: schema_path.into(),
+        at: Some(vref_branch("main")),
+        language: language as i32,
+        rust_pluggable_buffer: false,
+    }
+}
+
 #[tokio::test]
 async fn protobuf_preview_codegen_compiles_in_local_cargo_project() {
     // Arrange.
@@ -81,13 +97,12 @@ message BuildEvent {
     // Act.
     let preview = c
         .codegen
-        .preview_codegen(pb::PreviewCodegenRequest {
-            project: "local".into(),
-            repo: "compile".into(),
-            schema_path: "build_event.proto".into(),
-            at: Some(vref_branch("main")),
-            language: pb::Language::Rust as i32,
-        })
+        .preview_codegen(preview_request(
+            "local",
+            "compile",
+            "build_event.proto",
+            pb::Language::Rust,
+        ))
         .await
         .expect("preview protobuf rust codegen")
         .into_inner();
@@ -160,13 +175,12 @@ message BuildEnvelope {
     // Act.
     let preview = c
         .codegen
-        .preview_codegen(pb::PreviewCodegenRequest {
-            project: "local".into(),
-            repo: "compile".into(),
-            schema_path: "root.proto".into(),
-            at: Some(vref_branch("main")),
-            language: pb::Language::Rust as i32,
-        })
+        .preview_codegen(preview_request(
+            "local",
+            "compile",
+            "root.proto",
+            pb::Language::Rust,
+        ))
         .await
         .expect("preview protobuf closure rust codegen")
         .into_inner();
@@ -217,13 +231,12 @@ root_type BuildRecord;
     // Act.
     let preview = c
         .codegen
-        .preview_codegen(pb::PreviewCodegenRequest {
-            project: "local".into(),
-            repo: "compile".into(),
-            schema_path: "build_record.fbs".into(),
-            at: Some(vref_branch("main")),
-            language: pb::Language::Rust as i32,
-        })
+        .preview_codegen(preview_request(
+            "local",
+            "compile",
+            "build_record.fbs",
+            pb::Language::Rust,
+        ))
         .await
         .expect("preview flatbuffers rust codegen")
         .into_inner();
@@ -242,6 +255,79 @@ flatbuffers = "25.12.19"
 "#,
         &preview.content,
     );
+    cargo_check(tmp.path());
+}
+
+#[tokio::test]
+async fn flatbuffers_pluggable_buffer_preview_codegen_compiles_in_local_cargo_project() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let src = r#"namespace local.compile;
+
+table BuildRecord {
+  id: string;
+  count: int;
+}
+
+root_type BuildRecord;
+"#;
+    create_schema(
+        &mut c.schema,
+        "local",
+        "compile",
+        "main",
+        "pluggable_record.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        src,
+        "local-compile-flatbuffers-pluggable",
+    )
+    .await;
+
+    // Act.
+    let mut req = preview_request(
+        "local",
+        "compile",
+        "pluggable_record.fbs",
+        pb::Language::Rust,
+    );
+    req.rust_pluggable_buffer = true;
+    let preview = c
+        .codegen
+        .preview_codegen(req)
+        .await
+        .expect("preview flatbuffers pluggable-buffer rust codegen")
+        .into_inner();
+
+    // Assert: generated code exposes the pluggable reader runtime and compiles.
+    let code = String::from_utf8(preview.content.clone()).expect("generated rust is utf-8");
+    assert!(
+        code.contains("__flatc_rs_runtime"),
+        "generated Rust should include the pluggable-buffer runtime:\n{code}"
+    );
+    assert!(
+        code.contains("root_as_build_record_in"),
+        "generated Rust should include a buffer-generic root helper:\n{code}"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let flatc_runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../compilers/flatbuffers-rs/runtime")
+        .canonicalize()
+        .expect("flatc-rs-runtime path");
+    let cargo_toml = format!(
+        r#"[package]
+name = "schemahub-flatbuffers-pluggable-buffer-local-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+flatbuffers = "25.12.19"
+flatc-rs-runtime = {{ path = "{}" }}
+"#,
+        flatc_runtime.display()
+    );
+    write_compile_crate(tmp.path(), &cargo_toml, &preview.content);
     cargo_check(tmp.path());
 }
 
@@ -297,13 +383,12 @@ root_type BuildRecord;
     // Act.
     let preview = c
         .codegen
-        .preview_codegen(pb::PreviewCodegenRequest {
-            project: "local".into(),
-            repo: "compile".into(),
-            schema_path: "root.fbs".into(),
-            at: Some(vref_branch("main")),
-            language: pb::Language::Rust as i32,
-        })
+        .preview_codegen(preview_request(
+            "local",
+            "compile",
+            "root.fbs",
+            pb::Language::Rust,
+        ))
         .await
         .expect("preview flatbuffers closure rust codegen")
         .into_inner();
@@ -369,13 +454,12 @@ async fn rich_flatbuffers_include_closure_preview_codegen_compiles_and_reports_b
         .into_inner();
     let preview = c
         .codegen
-        .preview_codegen(pb::PreviewCodegenRequest {
-            project: "acme".into(),
-            repo: "core".into(),
-            schema_path: "catalog/rich_catalog.fbs".into(),
-            at: Some(vref_branch("main")),
-            language: pb::Language::Rust as i32,
-        })
+        .preview_codegen(preview_request(
+            "acme",
+            "core",
+            "catalog/rich_catalog.fbs",
+            pb::Language::Rust,
+        ))
         .await
         .expect("preview rich flatbuffers closure rust codegen")
         .into_inner();

@@ -3,7 +3,7 @@
 //! (`wire.rs`). Core never touches tonic/prost; these are plain structs.
 
 use schemahub_jj::OpRecord;
-use schemahub_types::{DeclSummary, Language, Mutation, SchemaPath};
+use schemahub_types::{CodegenOptions, DeclSummary, Language, Mutation, SchemaPath};
 
 /// A single-mutation request (design.md §5.1).
 #[derive(Clone, Debug)]
@@ -76,6 +76,7 @@ pub struct CodegenRequest {
     pub schema: SchemaPath,
     pub bookmark: String,
     pub lang: Language,
+    pub options: CodegenOptions,
 }
 
 // ── Exploration / history response shapes ───────────────────────────────────

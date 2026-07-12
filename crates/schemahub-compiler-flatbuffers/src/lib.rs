@@ -149,7 +149,8 @@ impl Compiler for FlatBuffersCompiler {
         &self,
         closure: &SchemaClosure,
         lang: Language,
+        options: &schemahub_types::CodegenOptions,
     ) -> Result<String, CodegenError> {
-        codegen::generate_code(closure, lang)
+        codegen::generate_code(closure, lang, options)
     }
 }

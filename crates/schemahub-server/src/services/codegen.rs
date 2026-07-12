@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use schemahub_core::Core;
-use schemahub_types::SchemaPath;
+use schemahub_types::{CodegenOptions, SchemaPath};
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
@@ -68,7 +68,15 @@ impl CodegenService for CodegenHandler {
         )?;
         let code = self
             .core
-            .preview_codegen_at(&schema, &at, lang, token.as_deref())
+            .preview_codegen_at(
+                &schema,
+                &at,
+                lang,
+                &CodegenOptions {
+                    rust_pluggable_buffer: r.rust_pluggable_buffer,
+                },
+                token.as_deref(),
+            )
             .map_err(to_status)?;
         let at_commit = resolve_at_commit(&self.core, &r.project, &r.repo, &r.at, token.as_deref());
         Ok(Response::new(pb::PreviewCodegenResponse {

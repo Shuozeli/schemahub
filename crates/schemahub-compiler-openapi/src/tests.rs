@@ -995,7 +995,11 @@ fn generate_code_is_unsupported() {
     let closure = SchemaClosure::new();
 
     // Act
-    let result = compiler.generate_code(&closure, Language::Rust);
+    let result = compiler.generate_code(
+        &closure,
+        Language::Rust,
+        &schemahub_types::CodegenOptions::default(),
+    );
 
     // Assert
     assert!(

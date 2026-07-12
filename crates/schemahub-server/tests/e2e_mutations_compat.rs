@@ -1000,6 +1000,7 @@ async fn codegen_descriptors_and_preview_rust() {
             schema_path: "ping.proto".into(),
             at: Some(vref_branch("main")),
             language: pb::Language::Rust as i32,
+            rust_pluggable_buffer: false,
         })
         .await
         .expect("preview_codegen")
@@ -1422,6 +1423,7 @@ root_type BuildItem;
             schema_path: "build_item.fbs".into(),
             at: Some(vref_branch("main")),
             language: pb::Language::Rust as i32,
+            rust_pluggable_buffer: false,
         })
         .await
         .expect("preview flatbuffers rust codegen")

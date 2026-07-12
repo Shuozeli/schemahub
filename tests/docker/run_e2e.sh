@@ -47,6 +47,7 @@ require_path "$COMPILERS_ROOT/protobuf-rs/codegen/Cargo.toml"
 require_path "$COMPILERS_ROOT/flatbuffers-rs/parser/Cargo.toml"
 require_path "$COMPILERS_ROOT/flatbuffers-rs/schema/Cargo.toml"
 require_path "$COMPILERS_ROOT/flatbuffers-rs/codegen/Cargo.toml"
+require_path "$COMPILERS_ROOT/flatbuffers-rs/runtime/Cargo.toml"
 
 mkdir -p \
   "$CONTEXT_DIR/shuozeli/codegen/schemahub" \
@@ -108,6 +109,17 @@ message Order {
 }
 EOF
 
+cat >"$WORK_DIR/build_record.fbs" <<'EOF'
+namespace acme.commerce;
+
+table BuildRecord {
+  id: string;
+  count: int;
+}
+
+root_type BuildRecord;
+EOF
+
 cli() {
   docker run --rm \
     --network "$NETWORK" \
@@ -141,6 +153,7 @@ assert_not_contains() {
 
 cli schema create /work/common.proto --project acme --repo commerce --name common.proto
 cli schema create /work/order.proto --project acme --repo commerce --name order.proto
+cli schema create /work/build_record.fbs --project acme --repo commerce --name build_record.fbs
 cli tag create acme/commerce release-2026-06-05 --branch main
 cli branch create acme/commerce feature/shipping-note --from main
 cli field add acme/commerce/order.proto Order shipping_note:string:3 --branch feature/shipping-note
@@ -188,6 +201,37 @@ EOF
 docker run --rm \
   --network "$NETWORK" \
   -e CARGO_TARGET_DIR=/tmp/schemahub-generated-target \
+  -v "$WORK_DIR:/work" \
+  -w /work \
+  "$IMAGE" \
+  cargo check --quiet
+
+cli codegen preview acme/commerce/build_record.fbs \
+  --branch main \
+  --lang rust \
+  --rust-pluggable-buffer >"$WORK_DIR/generated_fbs.rs"
+assert_contains "$(cat "$WORK_DIR/generated_fbs.rs")" "__flatc_rs_runtime" "FlatBuffers pluggable-buffer runtime"
+assert_contains "$(cat "$WORK_DIR/generated_fbs.rs")" "root_as_build_record_in" "FlatBuffers pluggable-buffer root helper"
+
+cat >"$WORK_DIR/Cargo.toml" <<'EOF'
+[package]
+name = "schemahub-docker-generated-flatbuffers-check"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+flatbuffers = "25.12.19"
+flatc-rs-runtime = { path = "/workspace/shuozeli/compilers/flatbuffers-rs/runtime" }
+EOF
+
+cat >"$WORK_DIR/src/lib.rs" <<'EOF'
+#![allow(warnings)]
+include!("../generated_fbs.rs");
+EOF
+
+docker run --rm \
+  --network "$NETWORK" \
+  -e CARGO_TARGET_DIR=/tmp/schemahub-generated-fbs-target \
   -v "$WORK_DIR:/work" \
   -w /work \
   "$IMAGE" \

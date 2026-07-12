@@ -123,6 +123,7 @@ impl Compiler for ProtobufCompiler {
         &self,
         closure: &SchemaClosure,
         lang: Language,
+        _options: &schemahub_types::CodegenOptions,
     ) -> Result<String, CodegenError> {
         codegen::generate_code(closure, lang)
     }

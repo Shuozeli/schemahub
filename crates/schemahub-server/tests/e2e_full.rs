@@ -283,6 +283,7 @@ async fn complete_protobuf_registry_workflow_compiles_generated_output() {
             schema_path: "order.proto".into(),
             at: Some(vref_branch("main")),
             language: pb::Language::Rust as i32,
+            rust_pluggable_buffer: false,
         })
         .await
         .expect("preview rust codegen")

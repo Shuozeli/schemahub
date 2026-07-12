@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod blob;
 pub mod change;
+pub mod codegen;
 pub mod compat;
 pub mod compiler;
 pub mod conflict;
@@ -24,6 +25,7 @@ pub use auth::{
 };
 pub use blob::{DeclBlob, MetaBlob};
 pub use change::DeclChange;
+pub use codegen::CodegenOptions;
 pub use compat::{CompatibilityDirection, CompatibilityRules, CompatibilityViolation};
 pub use compiler::Compiler;
 pub use conflict::ConflictSides;

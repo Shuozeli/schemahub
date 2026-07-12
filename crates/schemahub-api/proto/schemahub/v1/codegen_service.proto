@@ -42,6 +42,9 @@ message PreviewCodegenRequest {
   string     schema_path = 3;
   VersionRef at          = 4;
   Language   language    = 5;
+  // FlatBuffers Rust only: generate readers over a pluggable FlatBufferRead
+  // byte-buffer abstraction. Ignored by other formats/languages.
+  bool       rust_pluggable_buffer = 6;
 }
 
 message PreviewCodegenResponse {

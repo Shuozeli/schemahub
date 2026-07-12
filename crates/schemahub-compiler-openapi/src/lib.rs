@@ -276,6 +276,7 @@ impl Compiler for OpenApiCompiler {
         &self,
         _closure: &SchemaClosure,
         lang: Language,
+        _options: &schemahub_types::CodegenOptions,
     ) -> Result<String, CodegenError> {
         // OpenAPI server/client codegen is out of scope (deferred to v2).
         Err(CodegenError::UnsupportedLanguage(lang))

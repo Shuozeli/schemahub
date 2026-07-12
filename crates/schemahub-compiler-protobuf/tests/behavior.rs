@@ -556,7 +556,11 @@ fn generate_code_rust_produces_struct() {
 
     // Act
     let code = compiler
-        .generate_code(&closure, Language::Rust)
+        .generate_code(
+            &closure,
+            Language::Rust,
+            &schemahub_types::CodegenOptions::default(),
+        )
         .expect("codegen ok");
 
     // Assert
@@ -573,7 +577,11 @@ fn generate_code_unsupported_language_errors() {
     let closure = SchemaClosure::new();
 
     // Act
-    let result = compiler.generate_code(&closure, Language::Go);
+    let result = compiler.generate_code(
+        &closure,
+        Language::Go,
+        &schemahub_types::CodegenOptions::default(),
+    );
 
     // Assert
     assert!(matches!(
