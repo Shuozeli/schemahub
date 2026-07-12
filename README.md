@@ -637,9 +637,9 @@ Resolution order (first wins): CLI flags → environment variables (`SCHEMAHUB_S
 
 ## Web console
 
-An experimental React console lives in `apps/schemahub-gui`. It is a Vite + React + TypeScript + Mantine app with a typed `SchemaHubClient` boundary and mock data for the first read-mostly auditor workflow.
+An experimental React console lives in `apps/schemahub-gui`. It is a Vite + React + TypeScript + Mantine app with a typed `SchemaHubClient` boundary. It uses mock data by default and can read from the server's HTTP/JSON BFF when `VITE_SCHEMAHUB_API_BASE` is set.
 
-Current screens include project listing, repo dashboard, schema detail, compare, history, admin config, and codegen preview. The GUI is not connected to the Rust gRPC server yet; `MockSchemaHubClient` stands in for a future HTTP/BFF or gRPC-web client.
+Current screens include project listing, repo dashboard, schema detail, compare, history, admin config, and codegen preview.
 
 Run it locally:
 
@@ -649,13 +649,26 @@ pnpm install
 pnpm run dev
 ```
 
+Run the server with the HTTP BFF:
+
+```bash
+schemahub-server --listen 0.0.0.0:50051 --http-listen 0.0.0.0:8080
+```
+
+Run the GUI against that BFF:
+
+```bash
+cd apps/schemahub-gui
+VITE_SCHEMAHUB_API_BASE=http://localhost:8080 pnpm run dev
+```
+
 Run it on Tailscale:
 
 ```bash
 cd apps/schemahub-gui
 export TAILSCALE_IP="$(tailscale ip -4)"
 export TAILSCALE_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
-pnpm run dev -- --force
+VITE_SCHEMAHUB_API_BASE="http://$TAILSCALE_HOST:8080" pnpm run dev -- --force
 ```
 
 Open `http://$TAILSCALE_HOST:5173/`.

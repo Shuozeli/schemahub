@@ -13,7 +13,7 @@ import {
 import { useMutation } from '@tanstack/react-query';
 import { Code2, Download } from 'lucide-react';
 
-import { schemaHubClient } from '../api/mockClient';
+import { schemaHubClient } from '../api';
 import type { SchemaFormat } from '../api/types';
 import { CodeViewer } from './CodeViewer';
 
@@ -123,4 +123,3 @@ export function CodegenPreviewPanel({
     </Stack>
   );
 }
-

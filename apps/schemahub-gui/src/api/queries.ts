@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 
-import { schemaHubClient } from './mockClient';
+import { schemaHubClient } from './index';
 
 export function useProjects() {
   return useQuery({
@@ -52,4 +52,3 @@ export function useServerConfig() {
     queryFn: () => schemaHubClient.getServerConfig(),
   });
 }
-

@@ -2,7 +2,7 @@
 
 SchemaHub includes an experimental React console in `apps/schemahub-gui`. It is a read-mostly auditor/operator UI for inspecting projects, repos, schemas, refs, generated code previews, and audit history.
 
-The GUI is currently mock-first. It does not call the Rust gRPC server yet. The app is structured around a typed client interface so the mock client can later be replaced by an HTTP/BFF or gRPC-web adapter without rewriting the pages.
+The GUI is mock-first by default and can be pointed at the Rust server's HTTP/JSON BFF by setting `VITE_SCHEMAHUB_API_BASE`. The app is structured around a typed client interface so mock data and live data share the same page code.
 
 ## Architecture
 
@@ -13,7 +13,9 @@ apps/schemahub-gui
 |-- src/api/
 |   |-- types.ts              # Browser-facing DTOs
 |   |-- client.ts             # SchemaHubClient interface
+|   |-- httpClient.ts         # HTTP/BFF client implementation
 |   |-- mockClient.ts         # Mock data and async client implementation
+|   |-- index.ts              # Selects HTTP or mock client
 |   `-- queries.ts            # TanStack Query hooks
 |-- src/pages/                # Route-level screens
 |-- src/components/           # Reusable UI surfaces
@@ -44,10 +46,10 @@ Current implementation:
 Page -> useQuery/useMutation hook -> SchemaHubClient -> MockSchemaHubClient
 ```
 
-Future implementation:
+Live implementation:
 
 ```text
-Page -> useQuery/useMutation hook -> SchemaHubClient -> HttpSchemaHubClient/BFF -> schemahub gRPC server
+Page -> useQuery/useMutation hook -> SchemaHubClient -> HttpSchemaHubClient -> schemahub HTTP BFF -> Core
 ```
 
 The browser-facing DTOs intentionally differ from internal Rust storage types. Keep UI DTOs stable and workflow-oriented; adapt gRPC responses at the client or BFF boundary.
@@ -80,6 +82,12 @@ Run the development server:
 pnpm run dev
 ```
 
+Run the development server against a live SchemaHub HTTP BFF:
+
+```bash
+VITE_SCHEMAHUB_API_BASE=http://localhost:8080 pnpm run dev
+```
+
 Build the production bundle:
 
 ```bash
@@ -94,13 +102,21 @@ pnpm run preview
 
 ## Running on Tailscale
 
-For this workspace, bind Vite to the Tailscale interface and allow the MagicDNS hostname:
+Start SchemaHub with both gRPC and the HTTP BFF. The HTTP BFF is opt-in:
+
+```bash
+export TAILSCALE_IP="$(tailscale ip -4)"
+cargo run --release -p schemahub-server -- \
+  --listen "$TAILSCALE_IP:50051" \
+  --http-listen "$TAILSCALE_IP:8080"
+```
+
+Then bind Vite to the Tailscale interface, allow the MagicDNS hostname, and point it at the BFF:
 
 ```bash
 cd apps/schemahub-gui
-export TAILSCALE_IP="$(tailscale ip -4)"
 export TAILSCALE_HOST="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
-pnpm run dev -- --force
+VITE_SCHEMAHUB_API_BASE="http://$TAILSCALE_HOST:8080" pnpm run dev -- --force
 ```
 
 Open:
@@ -116,6 +132,8 @@ http://shuoze25-yuacx.tail8f3b66.ts.net:5173/
 ```
 
 `vite.config.ts` reads `TAILSCALE_IP` for `server.host` and `TAILSCALE_HOST` for `server.allowedHosts`.
+
+The HTTP BFF enables permissive CORS for local development. It is intended as a development bridge for the GUI, not a hardened public API gateway.
 
 ## Troubleshooting
 
@@ -149,13 +167,19 @@ pnpm run dev -- --force
 
 ## Connecting to the Real Server
 
-The intended path is:
+The server exposes a read-only HTTP/JSON BFF when started with `--http-listen`. The GUI selects the live client when `VITE_SCHEMAHUB_API_BASE` is set; otherwise it uses `MockSchemaHubClient`.
 
-1. Add an `HttpSchemaHubClient` that implements `SchemaHubClient`.
-2. Put browser transport details behind that client. Prefer a small BFF that calls the existing gRPC API.
-3. Keep TanStack Query keys and route params unchanged.
-4. Convert gRPC responses into the DTOs in `src/api/types.ts`.
-5. Add loading/error states for real network failures before enabling write workflows.
+Current BFF routes:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/projects` | Project list |
+| `GET /api/projects/:project/repos/:repo/dashboard?ref=main` | Repo dashboard |
+| `GET /api/projects/:project/repos/:repo/schemas/*schema_path?ref=main` | Schema detail |
+| `GET /api/projects/:project/repos/:repo/diff?base=main&head=feature` | Ref diff |
+| `GET /api/projects/:project/repos/:repo/history?ref=main&limit=25` | Commit and operation history |
+| `POST /api/codegen/preview` | Codegen preview |
+| `GET /api/admin/config` | Server config summary |
 
 Recommended BFF responsibilities:
 
@@ -169,7 +193,7 @@ Do not import Rust server internals into the React app. The GUI should remain a 
 
 ## Current Limitations
 
-- Uses `MockSchemaHubClient`, not the live gRPC API.
+- Live mode requires `schemahub-server --http-listen`; direct browser gRPC is not supported.
 - Workspace navigation is hard-coded to `acme/commerce`.
 - Mutating workflows are not implemented.
 - Search input is visual only.

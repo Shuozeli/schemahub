@@ -14,7 +14,7 @@ use anyhow::Context;
 use clap::Parser;
 use schemahub_jj::{ObjectDb, RedbObjectDb};
 
-use schemahub_server::{build_core, build_router, config::Config};
+use schemahub_server::{build_core, build_router, config::Config, http};
 
 #[derive(Parser, Debug)]
 #[command(name = "schemahub-server", about = "schemahub gRPC server", version)]
@@ -34,6 +34,9 @@ struct Args {
     /// Path to schemahub.toml (optional).
     #[arg(long, default_value = "schemahub.toml")]
     config: String,
+    /// Optional HTTP/JSON BFF listen address for the web console.
+    #[arg(long)]
+    http_listen: Option<String>,
 }
 
 #[tokio::main]
@@ -46,9 +49,20 @@ async fn main() -> anyhow::Result<()> {
     let core = build_core(db, &config);
 
     let addr = resolve_listen_addr(args.listen, &config)?;
+    let http_addr = resolve_http_listen_addr(args.http_listen)?;
 
     // Surface a MagicDNS-friendly hint when bound to the Tailscale IP.
     println!("schemahub-server listening on {addr}");
+    if let Some(addr) = http_addr {
+        println!("schemahub HTTP BFF listening on {addr}");
+        let http_core = core.clone();
+        let storage_backend = config.storage.backend.clone();
+        tokio::spawn(async move {
+            if let Err(err) = http::serve(http_core, storage_backend, addr).await {
+                eprintln!("schemahub HTTP BFF stopped: {err:#}");
+            }
+        });
+    }
 
     build_router(core, config.storage.backend.clone())
         .serve(addr)
@@ -123,4 +137,16 @@ fn resolve_listen_addr(explicit: Option<String>, config: &Config) -> anyhow::Res
         .addr
         .parse()
         .context("parsing config listen address")
+}
+
+fn resolve_http_listen_addr(explicit: Option<String>) -> anyhow::Result<Option<SocketAddr>> {
+    let Some(addr) = explicit else {
+        return Ok(None);
+    };
+    if addr.trim().is_empty() {
+        return Ok(None);
+    }
+    addr.parse()
+        .map(Some)
+        .context("parsing --http-listen address")
 }
