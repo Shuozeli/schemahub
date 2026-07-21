@@ -7,19 +7,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use schemahub_core::Core;
-use schemahub_jj::{JjError, RefSpec};
-use schemahub_types::{DeclChange, SchemaPath};
+use schemahub_jj::RefSpec;
+use schemahub_types::{Action, DeclChange};
 use tokio_stream::Stream;
+use tonic::metadata::MetadataValue;
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::ref_service_server::RefService;
 
 use crate::error::to_status;
-use crate::services::{resolve_author, token_from};
-use crate::wire;
+use crate::services::{refspec_or_repository_default, resolve_author, token_from};
 
-const DEFAULT_BOOKMARK: &str = "main";
+const MAX_COMMIT_STREAM_SCAN: usize = 10_000;
 
 pub struct BookmarkHandler {
     core: Arc<Core>,
@@ -67,17 +67,38 @@ impl RefService for BookmarkHandler {
         let r = request.into_inner();
         // Walk the real commit graph from `from` (default: default branch HEAD),
         // already returned newest-first by the JJ layer.
-        let from = wire::version_ref_to_refspec(&r.from, DEFAULT_BOOKMARK);
-        let entries = self
+        let from = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.from,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let (entries, at_commit) = self
             .core
-            .log(&r.project, &r.repo, Some(&from), None, token.as_deref())
+            .list_commits_resolved(
+                &r.project,
+                &r.repo,
+                Some(&from),
+                (!r.stop_at_commit.is_empty()).then_some(r.stop_at_commit.as_str()),
+                (!r.schema_path.is_empty()).then_some(r.schema_path.as_str()),
+                MAX_COMMIT_STREAM_SCAN,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        let stream = tokio_stream::iter(
+        let stream: Self::ListCommitsStream = Box::pin(tokio_stream::iter(
             entries
                 .into_iter()
                 .map(|e| Ok(log_entry_to_commit_info(&e))),
+        ));
+        let mut response = Response::new(stream);
+        response.metadata_mut().insert(
+            "x-schemahub-at-commit",
+            MetadataValue::try_from(at_commit.as_str())
+                .map_err(|_| Status::internal("resolved commit is not valid response metadata"))?,
         );
-        Ok(Response::new(Box::pin(stream)))
+        Ok(response)
     }
 
     async fn diff(
@@ -86,58 +107,47 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::DiffResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        // Diff is a read; authorize before touching the JJ layer so anonymous
-        // reads on private projects are refused (design.md §6).
-        self.core
-            .authorize_repo_action(
-                token.as_deref(),
-                schemahub_types::Action::Read,
+        let base = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.base,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let head = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.head,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let schema_name = (!r.schema_path.is_empty()).then_some(r.schema_path.as_str());
+        let diff = self
+            .core
+            .diff_repository_resolved(
                 &r.project,
                 &r.repo,
+                schema_name,
+                &base,
+                &head,
+                token.as_deref(),
             )
             .map_err(to_status)?;
-        let base = wire::version_ref_to_refspec(&r.base, DEFAULT_BOOKMARK);
-        let head = wire::version_ref_to_refspec(&r.head, DEFAULT_BOOKMARK);
-
-        // Determine the schema files to diff: the explicit one, or the union
-        // present at either side. A missing ref on either side is legal (the
-        // bookmark may not exist yet, or be empty) and yields no schemas
-        // for that side; everything else propagates as a real error so we
-        // don't silently turn an IO/corrupt failure into "empty diff".
-        let schema_paths: Vec<String> = if !r.schema_path.is_empty() {
-            vec![r.schema_path.clone()]
-        } else {
-            let mut names = std::collections::BTreeSet::new();
-            for side in [&head, &base] {
-                match self.core.jj().list_schemas(&r.project, &r.repo, side) {
-                    Ok(s) => names.extend(s),
-                    Err(
-                        JjError::BookmarkNotFound(_)
-                        | JjError::TagNotFound(_)
-                        | JjError::SchemaNotFound(_),
-                    ) => {}
-                    Err(e) => return Err(to_status(e.into())),
-                }
-            }
-            names.into_iter().collect()
-        };
-
-        let mut schema_diffs = Vec::new();
-        for sp in schema_paths {
-            let schema = SchemaPath::new(&r.project, &r.repo, &sp);
-            let changes = self
-                .core
-                .diff(&schema, &base, &head, token.as_deref())
-                .map_err(to_status)?;
-            if changes.is_empty() {
-                continue;
-            }
-            schema_diffs.push(pb::SchemaDiff {
-                schema_path: sp,
+        let schema_diffs = diff
+            .schema_diffs
+            .into_iter()
+            .map(|(schema_path, changes)| pb::SchemaDiff {
+                schema_path,
                 changes: changes.iter().map(decl_change_to_pb).collect(),
-            });
-        }
-        Ok(Response::new(pb::DiffResponse { schema_diffs }))
+            })
+            .collect();
+        Ok(Response::new(pb::DiffResponse {
+            schema_diffs,
+            base_commit: diff.base_commit,
+            head_commit: diff.head_commit,
+        }))
     }
 
     // ── Branches (== bookmarks) ─────────────────────────────────────────────────
@@ -148,7 +158,14 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::CreateBranchResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let from = wire::version_ref_to_refspec(&r.from, DEFAULT_BOOKMARK);
+        let from = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.from,
+            Action::Write,
+            token.as_deref(),
+        )?;
         let author = resolve_author(&self.core, token.as_deref())?;
         let head = self
             .core
@@ -242,7 +259,14 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::CreateTagResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.target, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.target,
+            Action::Write,
+            token.as_deref(),
+        )?;
         let author = resolve_author(&self.core, token.as_deref())?;
         let commit = self
             .core
@@ -324,11 +348,14 @@ impl RefService for BookmarkHandler {
         let author = resolve_author(&self.core, token.as_deref())?;
         let resp = self
             .core
-            .merge(
+            .merge_idempotent(
                 &r.project,
                 &r.repo,
                 &r.source_branch,
                 &r.target_branch,
+                (!r.base_revision.is_empty()).then_some(r.base_revision.as_str()),
+                (!r.idempotency_key.is_empty()).then_some(r.idempotency_key.as_str()),
+                (!r.message.is_empty()).then_some(r.message.as_str()),
                 &author,
                 token.as_deref(),
             )

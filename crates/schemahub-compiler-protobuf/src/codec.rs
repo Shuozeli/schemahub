@@ -170,6 +170,15 @@ impl<'a> Reader<'a> {
         Self { buf, pos: 0 }
     }
 
+    /// Whether the cursor consumed the complete input.
+    ///
+    /// Versioned containers use this to read fields appended in a
+    /// backward-compatible way: an older blob ends cleanly before the new
+    /// field, while a partially written new field still fails decoding.
+    pub fn is_at_end(&self) -> bool {
+        self.pos == self.buf.len()
+    }
+
     pub fn read_u8(&mut self) -> CodecResult<u8> {
         if self.pos >= self.buf.len() {
             return Err(CodecError("unexpected end of input".into()));

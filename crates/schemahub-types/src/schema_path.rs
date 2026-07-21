@@ -2,7 +2,7 @@ use std::fmt;
 
 /// Identifies a schema file within the registry.
 /// Corresponds to the project / repo / schema namespacing from the requirements.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct SchemaPath {
     pub project: String,
     pub repo: String,

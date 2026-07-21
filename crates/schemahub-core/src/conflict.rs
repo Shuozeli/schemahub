@@ -10,6 +10,28 @@ use crate::request::MutationResponse;
 use crate::Core;
 
 impl Core {
+    /// List unresolved declaration conflicts on one mutable bookmark after the
+    /// same repository read authorization used by render operations.
+    pub fn list_conflicts(
+        &self,
+        project: &str,
+        repo: &str,
+        bookmark: &str,
+        token: Option<&str>,
+    ) -> CoreResult<Vec<String>> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
+            token,
+            Action::Read,
+            project,
+            repo,
+        )?;
+        Ok(self
+            .jj
+            .list_conflicted_declarations(project, repo, &RefSpec::bookmark(bookmark))?)
+    }
+
     /// Render a conflicted declaration's competing sides for human/agent display
     /// (`jj.read_conflict` → `compiler.render_conflict`).
     pub fn render_conflict(

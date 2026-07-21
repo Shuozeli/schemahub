@@ -14,10 +14,15 @@ bytes           = { workspace = true }
 # the in-memory ProjectMeta type (declared in `auth_store`).
 serde           = { workspace = true }
 serde_json      = { workspace = true }
+uuid            = { workspace = true }
+sha2            = { workspace = true }
+hex             = { workspace = true }
+tracing         = { workspace = true }
 
 [dev-dependencies]
-# Used ONLY by tests to build real op envelopes / parse real .proto so the
-# mutation/exploration/codegen flows can be exercised end-to-end. Core itself
-# stays format-agnostic — this is never a normal dependency.
+# Used ONLY by tests to parse real schemas and build real op envelopes so the
+# format-agnostic mutation/exploration/codegen flows can be exercised end to
+# end. These are never normal dependencies.
 schemahub-compiler-protobuf = { path = "../schemahub-compiler-protobuf" }
+schemahub-compiler-openapi = { path = "../schemahub-compiler-openapi" }
 tempfile = { workspace = true }

@@ -11,3 +11,4 @@ bytes      = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+protoc-bin-vendored = "3"

@@ -1,0 +1,22 @@
+namespace telemetry.complex;
+
+enum SensorState : byte {
+  Unknown = 0,
+  Online = 1,
+  Offline = 2
+}
+
+enum ReadingFlags : ubyte (bit_flags) {
+  Calibrated = 1,
+  Estimated = 2,
+  Saturated = 4
+}
+
+table Sensor {
+  id: string (key);
+  state: SensorState = Online;
+  flags: ReadingFlags;
+  thresholds: [float];
+}
+
+root_type Sensor;

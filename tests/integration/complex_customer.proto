@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package commerce.platform.v1;
+
+import "complex/protobuf/common.proto";
+
+message Customer {
+  message Address {
+    string line1 = 1;
+    string city = 2;
+    Region region = 3;
+  }
+
+  string id = 1;
+  Address shipping_address = 2;
+  map<string, string> labels = 3;
+  optional string loyalty_id = 4;
+
+  oneof contact {
+    string email = 5;
+    string phone = 6;
+  }
+}

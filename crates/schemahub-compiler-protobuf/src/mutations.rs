@@ -15,7 +15,7 @@ use crate::typecompat::{scalar_field_type, type_change_allowed_typed};
 /// Apply a single mutation, returning its effect.
 pub fn apply_one(schema: &SchemaObjects, op: &Mutation) -> Result<MutationEffect, MutationError> {
     let parsed = ProtoOp::decode(&op.operation)?;
-    let mut state = WorkingState::load(schema)?;
+    let mut state = WorkingState::load(schema, false)?;
     state.apply(&parsed)?;
     Ok(state.into_effect(schema))
 }
@@ -25,11 +25,12 @@ pub fn apply_many(
     schema: &SchemaObjects,
     ops: &[Mutation],
 ) -> Result<MutationEffect, MutationError> {
-    let mut state = WorkingState::load(schema)?;
+    let mut state = WorkingState::load(schema, true)?;
     for op in ops {
         let parsed = ProtoOp::decode(&op.operation)?;
         state.apply(&parsed)?;
     }
+    state.validate_removed_references()?;
     Ok(state.into_effect(schema))
 }
 
@@ -42,10 +43,15 @@ struct WorkingState {
     meta_dirty: bool,
     touched: std::collections::BTreeSet<String>,
     removed: std::collections::BTreeSet<String>,
+    removed_enum_values: std::collections::BTreeSet<(String, String)>,
+    defer_reference_integrity: bool,
 }
 
 impl WorkingState {
-    fn load(schema: &SchemaObjects) -> Result<Self, MutationError> {
+    fn load(
+        schema: &SchemaObjects,
+        defer_reference_integrity: bool,
+    ) -> Result<Self, MutationError> {
         let mut messages = std::collections::BTreeMap::new();
         let mut enums = std::collections::BTreeMap::new();
         let mut services = std::collections::BTreeMap::new();
@@ -74,6 +80,8 @@ impl WorkingState {
             meta_dirty: false,
             touched: Default::default(),
             removed: Default::default(),
+            removed_enum_values: Default::default(),
+            defer_reference_integrity,
         })
     }
 
@@ -139,6 +147,12 @@ impl WorkingState {
         self.services
             .get_mut(name)
             .ok_or_else(|| MutationError::DeclarationNotFound(name.to_string()))
+    }
+
+    fn declaration_exists(&self, name: &str) -> bool {
+        self.messages.contains_key(name)
+            || self.enums.contains_key(name)
+            || self.services.contains_key(name)
     }
 
     fn apply(&mut self, op: &ProtoOp) -> Result<(), MutationError> {
@@ -325,7 +339,7 @@ impl WorkingState {
     // ── Message ops ───────────────────────────────────────────────────────────
 
     fn create_message(&mut self, o: &OpCreateMessage) -> Result<(), MutationError> {
-        if self.messages.contains_key(&o.message_name) {
+        if self.declaration_exists(&o.message_name) {
             return Err(MutationError::InvalidOperation(format!(
                 "message '{}' already exists",
                 o.message_name
@@ -338,11 +352,19 @@ impl WorkingState {
                 ..Default::default()
             },
         );
+        self.meta.message_order.push(o.message_name.clone());
+        self.meta_dirty = true;
         self.touch(&o.message_name);
         Ok(())
     }
 
     fn rename_message(&mut self, o: &OpRenameMessage) -> Result<(), MutationError> {
+        if o.old_name != o.new_name && self.declaration_exists(&o.new_name) {
+            return Err(MutationError::InvalidOperation(format!(
+                "cannot rename message '{}' to '{}': target already exists",
+                o.old_name, o.new_name
+            )));
+        }
         let mut m = self
             .messages
             .remove(&o.old_name)
@@ -381,13 +403,40 @@ impl WorkingState {
         for name in touched {
             self.touch(&name);
         }
+
+        let mut extension_changed = false;
+        for field in &mut self.meta.extension {
+            extension_changed |= rename_refs_in_field(field, &o.old_name, &o.new_name);
+        }
+        for name in &mut self.meta.message_order {
+            if name == &o.old_name {
+                *name = o.new_name.clone();
+                extension_changed = true;
+            }
+        }
+        if extension_changed {
+            self.meta_dirty = true;
+        }
         Ok(())
     }
 
     fn delete_message(&mut self, o: &OpDeleteMessage) -> Result<(), MutationError> {
-        if self.messages.remove(&o.message_name).is_none() {
+        if !self.messages.contains_key(&o.message_name) {
             return Err(MutationError::DeclarationNotFound(o.message_name.clone()));
         }
+        let references = self.references_to(&o.message_name, Some(&o.message_name));
+        if !self.defer_reference_integrity && !references.is_empty() {
+            return Err(referenced_declaration_error(
+                "message",
+                &o.message_name,
+                &references,
+            ));
+        }
+        self.messages.remove(&o.message_name);
+        self.meta
+            .message_order
+            .retain(|name| name != &o.message_name);
+        self.meta_dirty = true;
         self.removed.insert(o.message_name.clone());
         self.touched.remove(&o.message_name);
         Ok(())
@@ -396,7 +445,7 @@ impl WorkingState {
     // ── Enum ops ────────────────────────────────────────────────────────────
 
     fn create_enum(&mut self, o: &OpCreateEnum) -> Result<(), MutationError> {
-        if self.enums.contains_key(&o.enum_name) {
+        if self.declaration_exists(&o.enum_name) {
             return Err(MutationError::InvalidOperation(format!(
                 "enum '{}' already exists",
                 o.enum_name
@@ -409,20 +458,34 @@ impl WorkingState {
                 ..Default::default()
             },
         );
+        self.meta.enum_order.push(o.enum_name.clone());
+        self.meta_dirty = true;
         self.touch(&o.enum_name);
         Ok(())
     }
 
     fn delete_enum(&mut self, o: &OpDeleteEnum) -> Result<(), MutationError> {
-        if self.enums.remove(&o.enum_name).is_none() {
+        if !self.enums.contains_key(&o.enum_name) {
             return Err(MutationError::DeclarationNotFound(o.enum_name.clone()));
         }
+        let references = self.references_to(&o.enum_name, None);
+        if !self.defer_reference_integrity && !references.is_empty() {
+            return Err(referenced_declaration_error(
+                "enum",
+                &o.enum_name,
+                &references,
+            ));
+        }
+        self.enums.remove(&o.enum_name);
+        self.meta.enum_order.retain(|name| name != &o.enum_name);
+        self.meta_dirty = true;
         self.removed.insert(o.enum_name.clone());
         self.touched.remove(&o.enum_name);
         Ok(())
     }
 
     fn add_enum_value(&mut self, o: &OpAddEnumValue) -> Result<(), MutationError> {
+        let proto3 = self.meta.syntax.as_deref() == Some("proto3");
         let e = self.enum_mut(&o.enum_name)?;
         if e.value
             .iter()
@@ -431,6 +494,18 @@ impl WorkingState {
             return Err(MutationError::InvalidOperation(format!(
                 "enum value '{}' already exists",
                 o.value_name
+            )));
+        }
+        if e.reserved_name.iter().any(|name| name == &o.value_name) {
+            return Err(MutationError::InvalidOperation(format!(
+                "enum value name '{}' is reserved",
+                o.value_name
+            )));
+        }
+        if is_enum_number_reserved(e, o.number) {
+            return Err(MutationError::InvalidOperation(format!(
+                "enum value number {} is reserved",
+                o.number
             )));
         }
         if e.value.iter().any(|v| v.number == Some(o.number)) {
@@ -446,6 +521,12 @@ impl WorkingState {
                 )));
             }
         }
+        if proto3 && e.value.is_empty() && o.number != 0 {
+            return Err(MutationError::InvalidOperation(format!(
+                "the first value in proto3 enum '{}' must use number 0",
+                o.enum_name
+            )));
+        }
         e.value.push(EnumValueDescriptorProto {
             name: Some(o.value_name.clone()),
             number: Some(o.number),
@@ -457,6 +538,14 @@ impl WorkingState {
     }
 
     fn remove_enum_value(&mut self, o: &OpRemoveEnumValue) -> Result<(), MutationError> {
+        let references = self.enum_value_references(&o.enum_name, &o.value_name);
+        if !self.defer_reference_integrity && !references.is_empty() {
+            return Err(referenced_enum_value_error(
+                &o.enum_name,
+                &o.value_name,
+                &references,
+            ));
+        }
         let e = self.enum_mut(&o.enum_name)?;
         let idx = e
             .value
@@ -476,12 +565,23 @@ impl WorkingState {
         if let Some(name) = removed.name {
             e.reserved_name.push(name);
         }
+        self.removed_enum_values
+            .insert((o.enum_name.clone(), o.value_name.clone()));
         self.touch(&o.enum_name);
         Ok(())
     }
 
     fn rename_enum_value(&mut self, o: &OpRenameEnumValue) -> Result<(), MutationError> {
         let e = self.enum_mut(&o.enum_name)?;
+        if e.value
+            .iter()
+            .any(|v| v.name.as_deref() == Some(o.new_value_name.as_str()))
+        {
+            return Err(MutationError::InvalidOperation(format!(
+                "enum value '{}' already exists",
+                o.new_value_name
+            )));
+        }
         let v = e
             .value
             .iter_mut()
@@ -491,6 +591,34 @@ impl WorkingState {
                 field: o.old_value_name.clone(),
             })?;
         v.name = Some(o.new_value_name.clone());
+        let touched: Vec<String> = self
+            .messages
+            .iter_mut()
+            .filter_map(|(name, message)| {
+                rename_enum_value_refs_in_message(
+                    message,
+                    &o.enum_name,
+                    &o.old_value_name,
+                    &o.new_value_name,
+                )
+                .then(|| name.clone())
+            })
+            .collect();
+        for name in touched {
+            self.touch(&name);
+        }
+        let mut extension_changed = false;
+        for field in &mut self.meta.extension {
+            extension_changed |= rename_enum_value_ref_in_field(
+                field,
+                &o.enum_name,
+                &o.old_value_name,
+                &o.new_value_name,
+            );
+        }
+        if extension_changed {
+            self.meta_dirty = true;
+        }
         self.touch(&o.enum_name);
         Ok(())
     }
@@ -498,7 +626,7 @@ impl WorkingState {
     // ── Service / RPC ops ─────────────────────────────────────────────────────
 
     fn add_service(&mut self, o: &OpAddService) -> Result<(), MutationError> {
-        if self.services.contains_key(&o.service_name) {
+        if self.declaration_exists(&o.service_name) {
             return Err(MutationError::InvalidOperation(format!(
                 "service '{}' already exists",
                 o.service_name
@@ -511,6 +639,8 @@ impl WorkingState {
                 ..Default::default()
             },
         );
+        self.meta.service_order.push(o.service_name.clone());
+        self.meta_dirty = true;
         self.touch(&o.service_name);
         Ok(())
     }
@@ -519,18 +649,34 @@ impl WorkingState {
         if self.services.remove(&o.service_name).is_none() {
             return Err(MutationError::DeclarationNotFound(o.service_name.clone()));
         }
+        self.meta
+            .service_order
+            .retain(|name| name != &o.service_name);
+        self.meta_dirty = true;
         self.removed.insert(o.service_name.clone());
         self.touched.remove(&o.service_name);
         Ok(())
     }
 
     fn rename_service(&mut self, o: &OpRenameService) -> Result<(), MutationError> {
+        if o.old_name != o.new_name && self.declaration_exists(&o.new_name) {
+            return Err(MutationError::InvalidOperation(format!(
+                "cannot rename service '{}' to '{}': target already exists",
+                o.old_name, o.new_name
+            )));
+        }
         let mut s = self
             .services
             .remove(&o.old_name)
             .ok_or_else(|| MutationError::DeclarationNotFound(o.old_name.clone()))?;
         s.name = Some(o.new_name.clone());
         self.services.insert(o.new_name.clone(), s);
+        for name in &mut self.meta.service_order {
+            if name == &o.old_name {
+                *name = o.new_name.clone();
+            }
+        }
+        self.meta_dirty = true;
         self.removed.insert(o.old_name.clone());
         self.touched.remove(&o.old_name);
         self.touch(&o.new_name);
@@ -577,6 +723,15 @@ impl WorkingState {
 
     fn rename_rpc(&mut self, o: &OpRenameRpc) -> Result<(), MutationError> {
         let s = self.service_mut(&o.service_name)?;
+        if s.method
+            .iter()
+            .any(|method| method.name.as_deref() == Some(o.new_rpc_name.as_str()))
+        {
+            return Err(MutationError::InvalidOperation(format!(
+                "rpc '{}' already exists",
+                o.new_rpc_name
+            )));
+        }
         let m = s
             .method
             .iter_mut()
@@ -613,6 +768,9 @@ impl WorkingState {
     // ── Import op (file-level meta) ───────────────────────────────────────────
 
     fn update_import(&mut self, o: &OpUpdateImport) -> Result<(), MutationError> {
+        self.meta
+            .dependency_commit
+            .resize(self.meta.dependency.len(), String::new());
         if o.remove {
             if let Some(pos) = self
                 .meta
@@ -621,6 +779,7 @@ impl WorkingState {
                 .position(|d| d == &o.import_path)
             {
                 self.meta.dependency.remove(pos);
+                self.meta.dependency_commit.remove(pos);
                 // Re-index public/weak dependency indices that pointed past pos.
                 self.meta.public_dependency.retain(|&i| i != pos as i32);
                 self.meta.weak_dependency.retain(|&i| i != pos as i32);
@@ -635,11 +794,87 @@ impl WorkingState {
                     }
                 }
             }
-        } else if !self.meta.dependency.iter().any(|d| d == &o.import_path) {
+        } else if let Some(pos) = self
+            .meta
+            .dependency
+            .iter()
+            .position(|dependency| dependency == &o.import_path)
+        {
+            self.meta.dependency_commit[pos] = o.resolved_commit.clone();
+        } else {
             self.meta.dependency.push(o.import_path.clone());
+            self.meta.dependency_commit.push(o.resolved_commit.clone());
         }
         self.meta_dirty = true;
         Ok(())
+    }
+
+    fn references_to(&self, target: &str, skip_message: Option<&str>) -> Vec<String> {
+        let mut references = Vec::new();
+        for (name, message) in &self.messages {
+            if skip_message == Some(name.as_str()) {
+                continue;
+            }
+            if message_references_type(message, target) {
+                references.push(name.clone());
+            }
+        }
+        for (name, service) in &self.services {
+            if service_references_type(service, target) {
+                references.push(name.clone());
+            }
+        }
+        if self
+            .meta
+            .extension
+            .iter()
+            .any(|field| field_references_type(field, target))
+        {
+            references.push("file extension".to_string());
+        }
+        references
+    }
+
+    fn validate_removed_references(&self) -> Result<(), MutationError> {
+        for name in &self.removed {
+            let references = self.references_to(name, Some(name));
+            if !references.is_empty() {
+                return Err(referenced_declaration_error(
+                    "declaration",
+                    name,
+                    &references,
+                ));
+            }
+        }
+        for (enum_name, value_name) in &self.removed_enum_values {
+            let references = self.enum_value_references(enum_name, value_name);
+            if !references.is_empty() {
+                return Err(referenced_enum_value_error(
+                    enum_name,
+                    value_name,
+                    &references,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn enum_value_references(&self, enum_name: &str, value_name: &str) -> Vec<String> {
+        let mut references: Vec<String> = self
+            .messages
+            .iter()
+            .filter(|(_, message)| message_references_enum_value(message, enum_name, value_name))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if self
+            .meta
+            .extension
+            .iter()
+            .any(|field| field_references_enum_value(field, enum_name, value_name))
+        {
+            references.push("file extension".to_string());
+        }
+        references
     }
 }
 
@@ -650,6 +885,14 @@ fn is_number_reserved(msg: &DescriptorProto, number: i32) -> bool {
         let start = r.start.unwrap_or(i32::MAX);
         let end = r.end.unwrap_or(i32::MIN); // exclusive
         number >= start && number < end
+    })
+}
+
+fn is_enum_number_reserved(enumeration: &EnumDescriptorProto, number: i32) -> bool {
+    enumeration.reserved_range.iter().any(|range| {
+        let start = range.start.unwrap_or(i32::MAX);
+        let end = range.end.unwrap_or(i32::MIN);
+        number >= start && number <= end
     })
 }
 
@@ -695,22 +938,147 @@ fn rename_type_ref(type_ref: &str, old: &str, new: &str) -> Option<String> {
     }
 }
 
+fn type_ref_matches(type_ref: &str, target: &str) -> bool {
+    type_ref
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == target)
+}
+
+fn message_references_type(message: &DescriptorProto, target: &str) -> bool {
+    message
+        .field
+        .iter()
+        .chain(&message.extension)
+        .any(|field| field_references_type(field, target))
+        || message
+            .nested_type
+            .iter()
+            .any(|nested| message_references_type(nested, target))
+}
+
+fn field_references_type(field: &FieldDescriptorProto, target: &str) -> bool {
+    [&field.type_name, &field.extendee]
+        .into_iter()
+        .flatten()
+        .any(|name| type_ref_matches(name, target))
+}
+
+fn field_references_enum_value(
+    field: &FieldDescriptorProto,
+    enum_name: &str,
+    value_name: &str,
+) -> bool {
+    field
+        .type_name
+        .as_deref()
+        .is_some_and(|name| type_ref_matches(name, enum_name))
+        && field.default_value.as_deref() == Some(value_name)
+}
+
+fn message_references_enum_value(
+    message: &DescriptorProto,
+    enum_name: &str,
+    value_name: &str,
+) -> bool {
+    message
+        .field
+        .iter()
+        .chain(&message.extension)
+        .any(|field| field_references_enum_value(field, enum_name, value_name))
+        || message
+            .nested_type
+            .iter()
+            .any(|nested| message_references_enum_value(nested, enum_name, value_name))
+}
+
+fn service_references_type(service: &ServiceDescriptorProto, target: &str) -> bool {
+    service.method.iter().any(|method| {
+        method
+            .input_type
+            .as_deref()
+            .is_some_and(|name| type_ref_matches(name, target))
+            || method
+                .output_type
+                .as_deref()
+                .is_some_and(|name| type_ref_matches(name, target))
+    })
+}
+
+fn referenced_declaration_error(kind: &str, target: &str, references: &[String]) -> MutationError {
+    MutationError::InvalidOperation(format!(
+        "cannot delete {kind} '{target}': referenced by {}",
+        references.join(", ")
+    ))
+}
+
+fn referenced_enum_value_error(
+    enum_name: &str,
+    value_name: &str,
+    references: &[String],
+) -> MutationError {
+    MutationError::InvalidOperation(format!(
+        "cannot remove enum value '{enum_name}.{value_name}': referenced as a default by {}",
+        references.join(", ")
+    ))
+}
+
 /// Rewrite any field `type_name` in `msg` (and nested messages) that referenced
 /// `old` to `new`. Returns whether anything changed.
 fn rename_refs_in_message(msg: &mut DescriptorProto, old: &str, new: &str) -> bool {
     let mut changed = false;
-    for f in &mut msg.field {
-        if let Some(tn) = &f.type_name {
-            if let Some(renamed) = rename_type_ref(tn, old, new) {
-                f.type_name = Some(renamed);
-                changed = true;
-            }
-        }
+    for field in msg.field.iter_mut().chain(&mut msg.extension) {
+        changed |= rename_refs_in_field(field, old, new);
     }
     for nested in &mut msg.nested_type {
         changed |= rename_refs_in_message(nested, old, new);
     }
     changed
+}
+
+fn rename_refs_in_field(field: &mut FieldDescriptorProto, old: &str, new: &str) -> bool {
+    let mut changed = false;
+    for reference in [&mut field.type_name, &mut field.extendee]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(renamed) = rename_type_ref(reference, old, new) {
+            *reference = renamed;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn rename_enum_value_refs_in_message(
+    message: &mut DescriptorProto,
+    enum_name: &str,
+    old_value_name: &str,
+    new_value_name: &str,
+) -> bool {
+    let mut changed = false;
+    for field in message.field.iter_mut().chain(&mut message.extension) {
+        changed |= rename_enum_value_ref_in_field(field, enum_name, old_value_name, new_value_name);
+    }
+    for nested in &mut message.nested_type {
+        changed |=
+            rename_enum_value_refs_in_message(nested, enum_name, old_value_name, new_value_name);
+    }
+    changed
+}
+
+fn rename_enum_value_ref_in_field(
+    field: &mut FieldDescriptorProto,
+    enum_name: &str,
+    old_value_name: &str,
+    new_value_name: &str,
+) -> bool {
+    if field_references_enum_value(field, enum_name, old_value_name) {
+        field.default_value = Some(new_value_name.to_string());
+        true
+    } else {
+        false
+    }
 }
 
 /// Rewrite any rpc input/output type in `svc` that referenced `old` to `new`.

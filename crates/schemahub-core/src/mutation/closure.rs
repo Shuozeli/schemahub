@@ -1,73 +1,85 @@
-//! Transitive import-closure computation for codegen (design.md §10).
+//! Transitive import-closure computation for codegen and serving.
 //!
-//! BFS over the `imports` declared in each schema file's `__meta__`, resolving
-//! every import's pinned `resolved_commit` via `jj.load_schema(.. Commit ..)`,
-//! with cycle detection. Produces a [`SchemaClosure`] the compiler turns into
-//! descriptors / generated code.
-//!
-//! Imports carry a logical `project/repo/schema` path; we parse that back into a
-//! [`SchemaPath`] so cross-repo imports resolve against the right repo. An
-//! import with an empty `resolved_commit` is resolved against the same ref as
-//! the root (the common single-repo case where pins are not yet populated).
+//! Every queued schema is paired with an immutable, repository-owned commit.
+//! Same-repository live imports stay on their importing snapshot; live
+//! cross-repository imports resolve the target repository's configured default
+//! bookmark once; stored pins remain immutable. A single closure cannot contain
+//! two revisions of the same logical schema, so that condition fails closed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use schemahub_jj::{Jj, RefSpec};
-use schemahub_types::{Compiler, SchemaClosure, SchemaPath};
+use schemahub_jj::RefSpec;
+use schemahub_types::{SchemaClosure, SchemaPath};
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
+use crate::exploration::normalize_import_path;
+use crate::Core;
 
-/// Build the transitive closure rooted at `root` resolved at `root_ref`.
+/// Build the transitive closure rooted at one already-resolved commit.
 pub(crate) fn build(
-    jj: &Jj,
-    compiler: &dyn Compiler,
+    core: &Core,
     root: &SchemaPath,
-    root_ref: &RefSpec,
+    root_commit: &str,
+    token: Option<&str>,
 ) -> CoreResult<SchemaClosure> {
-    let mut closure = SchemaClosure::new();
-    let mut visited: HashSet<SchemaPath> = HashSet::new();
-    // Queue holds (schema, ref-to-resolve-it-at).
-    let mut queue: Vec<(SchemaPath, RefSpec)> = vec![(root.clone(), root_ref.clone())];
+    let root_format = core.compiler_for(&root.schema_name)?.format_id();
+    let mut closure = SchemaClosure::with_root(root.clone());
+    let mut revisions: HashMap<SchemaPath, String> = HashMap::new();
+    let mut live_snapshots = HashMap::new();
+    let mut queue = vec![(root.clone(), root_commit.to_string())];
 
-    while let Some((path, at)) = queue.pop() {
-        if !visited.insert(path.clone()) {
-            continue; // cycle / already resolved
-        }
-
-        let objs = jj.load_schema(&path.project, &path.repo, &path.schema_name, &at)?;
-        let imports = compiler.imports(&objs.meta)?;
-        closure.entries.insert(path.clone(), objs);
-
-        for import in imports {
-            let Some(dep_path) = parse_import_path(&import.path) else {
-                continue; // malformed/unresolvable logical path — skip, don't fail closure
-            };
-            if visited.contains(&dep_path) {
+    while let Some((path, requested_commit)) = queue.pop() {
+        if let Some(existing) = revisions.get(&path) {
+            if existing == &requested_commit {
                 continue;
             }
-            // Pinned commit if present, else the root's ref (same-repo default).
-            let dep_ref = if import.resolved_commit.is_empty() {
-                at.clone()
-            } else {
-                RefSpec::commit(import.resolved_commit.clone())
-            };
-            queue.push((dep_path, dep_ref));
+            return Err(CoreError::FailedPrecondition(format!(
+                "schema closure requires two revisions of {path}: {existing} and {requested_commit}"
+            )));
+        }
+
+        // Revalidate every immutable coordinate at the repository boundary.
+        // This also authorizes the target repository and rejects archived repos.
+        let commit = core.resolve_read_commit(
+            &path.project,
+            &path.repo,
+            &RefSpec::commit(requested_commit),
+            token,
+        )?;
+        revisions.insert(path.clone(), commit.clone());
+
+        let compiler = core.compiler_for(&path.schema_name)?;
+        if compiler.format_id() != root_format {
+            return Err(CoreError::FailedPrecondition(format!(
+                "schema closure rooted at {} cannot include different format {}",
+                root.schema_name, path.schema_name
+            )));
+        }
+        let at = RefSpec::commit(commit.clone());
+        let objects = core
+            .jj
+            .load_schema(&path.project, &path.repo, &path.schema_name, &at)?;
+        let imports = compiler.imports(&objects)?;
+        let same_repo_schemas: HashSet<String> = core
+            .jj
+            .list_schemas(&path.project, &path.repo, &at)?
+            .into_iter()
+            .collect();
+        closure.entries.insert(path.clone(), objects);
+
+        for import in imports {
+            let dependency = normalize_import_path(&path, &import.path, &same_repo_schemas)?;
+            let dependency_commit = core.resolve_import_commit(
+                &path,
+                &commit,
+                &dependency,
+                &import,
+                token,
+                &mut live_snapshots,
+            )?;
+            queue.push((dependency, dependency_commit));
         }
     }
 
     Ok(closure)
-}
-
-/// Parse a logical import path "project/repo/schema-file" into a [`SchemaPath`].
-/// The schema-file component may itself contain '/', so we split on the first
-/// two separators only.
-fn parse_import_path(path: &str) -> Option<SchemaPath> {
-    let mut parts = path.splitn(3, '/');
-    let project = parts.next()?;
-    let repo = parts.next()?;
-    let schema = parts.next()?;
-    if project.is_empty() || repo.is_empty() || schema.is_empty() {
-        return None;
-    }
-    Some(SchemaPath::new(project, repo, schema))
 }

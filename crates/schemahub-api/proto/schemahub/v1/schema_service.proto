@@ -12,14 +12,15 @@ service SchemaService {
   // Returns ALREADY_EXISTS if the schema name exists on the branch.
   rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
 
-  // Update an existing schema (whole-document push for all formats;
-  // also the only update path for OpenAPI in v1).
+  // Update an existing schema with a whole-document push. Granular mutation
+  // coverage is format-specific and advertised separately.
   // Returns NOT_FOUND if the schema does not exist.
   // Runs compatibility check if the branch is protected.
   rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
 
-  // Delete a schema from a branch. Rejected if other schemas on the same branch
-  // import it, unless --force is set.
+  // Delete a schema from a branch. Rejected while another schema on the same
+  // branch has a live unpinned import. Force bypasses compatibility policy, not
+  // reference integrity.
   rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
 
   // ── Mutations ───────────────────────────────────────────────────────────────
@@ -28,7 +29,9 @@ service SchemaService {
 
   // Apply a sequence of mutations across one or more schemas atomically.
   // All schemas in one transaction must use the same format.
-  // Limits: <= 500 operations, <= 20 schemas, 30-second server-side timeout.
+  // Limits: <= 100 operations and <= 20 schemas. The server enforces the
+  // 30-second execution deadline advertised by GetServerConfig; clients may
+  // still choose a shorter RPC deadline.
   rpc ApplyTransaction(ApplyTransactionRequest) returns (ApplyTransactionResponse);
 }
 
@@ -41,14 +44,16 @@ message CreateSchemaRequest {
   string       schema_name = 4;  // e.g. "user.proto"
   SchemaFormat format      = 5;  // required; server does not infer from content
   string       source      = 6;  // full source text
-  string       base_revision    = 7;  // current HEAD commit hash (OCC)
+  string       base_revision    = 7;  // retained causal commit; stale is allowed, foreign/unknown is rejected
   string       idempotency_key  = 8;
 }
 
 message CreateSchemaResponse {
   string new_commit = 1;  // hash of the commit created
   string change_id  = 2;  // stable jj change-id (durable identity, design.md §5.1)
-  repeated string conflicted_decls = 3;  // decls that landed conflicted (concurrency)
+  // Conflicts published on an unprotected bookmark. Successful protected
+  // writes are always clean because final-tree conflicts are rejected.
+  repeated string conflicted_decls = 3;
 }
 
 // ── UpdateSchema ──────────────────────────────────────────────────────────────
@@ -59,7 +64,7 @@ message UpdateSchemaRequest {
   string branch          = 3;
   string schema_name     = 4;
   string source          = 5;  // full source text of the new version
-  string base_revision   = 6;
+  string base_revision   = 6;  // advisory retained causal commit, not a branch-head CAS
   string idempotency_key = 7;
   bool   force           = 8;  // skip compatibility check; requires Maintainer role
 }
@@ -67,6 +72,7 @@ message UpdateSchemaRequest {
 message UpdateSchemaResponse {
   string new_commit = 1;
   string change_id  = 2;
+  // Conflicts published on an unprotected bookmark; protected writes reject.
   repeated string conflicted_decls = 3;
 }
 
@@ -77,14 +83,16 @@ message DeleteSchemaRequest {
   string repo            = 2;
   string branch          = 3;
   string schema_name     = 4;
-  string base_revision   = 5;
+  string base_revision   = 5;  // advisory retained causal commit, not a branch-head CAS
   string idempotency_key = 6;
-  bool   force           = 7;  // delete even if dependents exist
+  bool   force           = 7;  // skip protected-branch compatibility; requires Maintainer
 }
 
 message DeleteSchemaResponse {
   string new_commit = 1;
   string change_id  = 2;
+  // Conflicts published on an unprotected bookmark; protected writes reject.
+  repeated string conflicted_decls = 3;
 }
 
 // ── ApplyMutation ─────────────────────────────────────────────────────────────
@@ -93,7 +101,7 @@ message ApplyMutationRequest {
   string project         = 1;
   string repo            = 2;
   string branch          = 3;
-  string base_revision   = 4;
+  string base_revision   = 4;  // advisory retained causal commit, not a branch-head CAS
   string idempotency_key = 5;
   bool   force           = 6;
   oneof operation {
@@ -106,6 +114,7 @@ message ApplyMutationRequest {
 message ApplyMutationResponse {
   string new_commit = 1;
   string change_id  = 2;
+  // Conflicts published on an unprotected bookmark; protected writes reject.
   repeated string conflicted_decls = 3;
 }
 
@@ -115,7 +124,7 @@ message ApplyTransactionRequest {
   string project         = 1;
   string repo            = 2;
   string branch          = 3;
-  string base_revision   = 4;
+  string base_revision   = 4;  // advisory retained causal commit, not a branch-head CAS
   string idempotency_key = 5;
   bool   force           = 6;
   // All operations must target the same format.
@@ -129,12 +138,13 @@ message TransactionOp {
   oneof operation {
     ProtobufMutation    protobuf_op = 1;
     FlatBuffersMutation fbs_op      = 2;
-    // OpenApi granular ops are v2; use UpdateSchema for OpenAPI in v1.
+    OpenApiMutation     openapi_op  = 3;
   }
 }
 
 message ApplyTransactionResponse {
   string new_commit = 1;
   string change_id  = 2;
+  // Conflicts published on an unprotected bookmark; protected writes reject.
   repeated string conflicted_decls = 3;
 }

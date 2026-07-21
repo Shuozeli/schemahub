@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-07-21T23:31:27Z -->
 # schemahub — Crate Structure (v2)
 
 > The Rust workspace layout for the v2 architecture (`design.md`): a format-agnostic **JJ layer** (jj-lib over a database) and per-format **compilers** (wrapping `protobuf-rs` / `flatbuffers-rs`; OpenAPI in-tree). The crate graph enforces the two-layer boundary at the type-system level — the JJ layer cannot call into a compiler except through the `Compiler` trait.
@@ -11,12 +12,12 @@
 | Crate | Kind | Purpose |
 |-------|------|---------|
 | `schemahub-types` | lib | Shared types + the `Compiler` trait and auth traits; the boundary between JJ and compilers |
-| `schemahub-jj` | lib | jj-lib integration: `DbBackend` + `DbOpStore` over an `ObjectDb`; `redb`/`postgres` impls |
-| `schemahub-core` | lib | Orchestration: mutation/transaction flows, exploration, codegen closure, compatibility, conflict + GC over `schemahub-jj` and the compiler registry |
+| `schemahub-jj` | lib | jj-lib integration plus control-plane and immutable-artifact records over an `ObjectDb`; `redb`/`postgres` impls |
+| `schemahub-core` | lib | Orchestration: durable change records, mutation/transaction flows, first-materialized immutable serving, exploration, codegen closure, compatibility, conflict + GC |
 | `schemahub-api` | lib | Generated Rust types from the `.proto` files (tonic/prost output) |
 | `schemahub-compiler-protobuf` | lib | Protobuf compiler — wraps `protobuf-rs` (parser, schema, codegen); owns the `.proto` printer |
 | `schemahub-compiler-flatbuffers` | lib | FlatBuffers compiler — wraps `flatbuffers-rs` (parser, schema, codegen); owns the `.fbs` printer |
-| `schemahub-compiler-openapi` | lib | OpenAPI compiler — in-tree AST/parser/printer (no sibling compiler) |
+| `schemahub-compiler-openapi` | lib | OpenAPI compiler — fail-closed in-tree AST/parser/printer (no sibling compiler) |
 | `schemahub-server` | binary | gRPC server; the composition root that wires everything |
 | `schemahub-cli` | binary | CLI client; talks to the server over gRPC |
 
@@ -83,7 +84,7 @@ schemahub-types/src/
   conflict.rs      # ConflictSides, ConflictError
   auth.rs          # AuthnProvider, AuthzPolicy, Identity, Action; NoopAuthn/NoopAuthz
   compat.rs        # CompatibilityRules, CompatibilityDirection, CompatibilityViolation
-  decl.rs          # DeclSummary, DeclDetail, DeclKind, TypeRef
+  decl.rs          # DeclSummary, DeclDetail, DeclKind, TypeRef (+ optional import coordinate)
   import.rs        # Import { path, resolved_commit }
   language.rs      # Language enum
   errors.rs        # Parse/Print/Diff/Mutation/Read/Descriptor/Codegen/Conflict/Authn/Authz errors
@@ -97,22 +98,24 @@ The jj-lib integration and database persistence — this is where v1's `schemahu
 
 ```
 schemahub-jj/src/
-  lib.rs            # Jj handle: load_schema/commit_write_multi/merge/undo/gc; RefSpec; WriteResult
-  object_db.rs      # ObjectDb trait (content-addressed object store + op-log + refs tables)
+  lib.rs            # Jj handle plus narrow object_db() seam for durable non-JJ records
+  object_db.rs      # ObjectDb trait (objects/op-log/refs/records + repo inventory + GC fence)
   redb_db.rs        # RedbObjectDb: ObjectDb (embedded default; single-file MVCC store)
   memory_db.rs      # MemoryObjectDb: ObjectDb (in-memory, for tests)
-  pg_db.rs          # PgObjectDb: ObjectDb (server option; behind the `postgres` feature)
+  pg_db.rs          # PgObjectDb: migrations, fixed SQLx executor, advisory GC/publication fences
   jj_backend.rs     # DbBackend: jj_lib::backend::Backend over ObjectDb
   jj_op_store.rs    # DbOpStore: jj_lib::op_store::OpStore over ObjectDb
   jj_op_heads.rs    # DbOpHeadsStore: jj_lib::op_heads_store::OpHeadsStore (durable head pointer)
   repo.rs           # repo loader / Store (per-Jj dedicated tokio current-thread runtime)
   bookmark.rs       # protected-bookmark glob matching (`is_protected`)
   tests.rs          # in-repo unit tests against MemoryObjectDb/RedbObjectDb
+schemahub-jj/migrations/
+  202607210001_initial_schema.sql # adoption-safe PostgreSQL baseline
 ```
 
 Per-declaration storage lives in `lib.rs` directly: `decl_path` / `encode_decl_name` map a `(<schema>, <decl>)` pair to a single jj path component (percent-encoding `%` and `/`), and `__meta__` is the well-known entry name for the file `MetaBlob` within each schema subtree. No separate `tree.rs` / `conflict.rs` files: jj inlines conflicts as multi-side tree entries, and the `ConflictId` / `ObjectKind::Conflict` types in `object_db.rs` are retained as shims but unused (see `DECISIONS.md`).
 
-`schemahub-jj` exposes a schemahub-shaped API (load a repo, read a declaration at a ref, run a transaction that upserts/removes declarations and moves a bookmark, list operations, undo) and hides jj-lib behind it. **Dependencies:** `schemahub-types`, `jj-lib` (default features off — no git interop), `redb`, `sqlx` (optional, behind `postgres`), `bytes`, `pollster`, `async-trait`, `tokio`, `futures`, `tempfile`, `blake2`, `prost`, `serde`, `serde_json`, `uuid`, `sha2`, `hex`, `thiserror`. Features: `postgres` (compile `PgObjectDb`), `postgres-integration` (run real-Postgres tests, requires `SCHEMAHUB_TEST_POSTGRES_URL`).
+`schemahub-jj` exposes a schemahub-shaped API (load a repo, read a declaration at a ref, run a transaction that upserts/removes declarations and moves a bookmark, list commits/operations, filter schema-touch history, and undo) and hides jj-lib behind it. Every raw commit is proven reachable from the named repository's current or historical operation views before any globally deduplicated object is read or published. Stored JJ records validate required fields and exact ID lengths, and distinguish true absence from backend faults. Bounded operation-log reads walk only the requested suffix on linear histories and fall back to the full graph algorithm when a branch enters that suffix. `ObjectDb` also provides create/get/list/compare-and-swap for control-plane resources such as `ChangeRecord` and the immutable `schemahub.artifacts.v1` first-materialization collection; those records do not enter JJ's content-addressed namespace. `Jj::object_db()` exposes a cloned trait-object handle so Core shares the exact backing database without depending on a concrete backend. Repository inventory and shared/exclusive maintenance guards make global GC safe across deduplicated repositories and PostgreSQL server instances. A second exclusive repository publication guard spans op-head load, final-tree policy, and JJ commit; memory/redb use a mutex and PostgreSQL uses a repository-keyed advisory lock, preserving concurrency between different repositories. `PublicationSnapshot` exposes schema-shaped reads of the exact candidate tree to Core without leaking jj-lib types. **Dependencies:** `schemahub-types`, `jj-lib` (default features off — no git interop), `redb`, `sqlx` (optional, behind `postgres`), `bytes`, `pollster`, `async-trait`, `tokio`, `futures`, `tempfile`, `blake2`, `prost`, `serde`, `serde_json`, `uuid`, `sha2`, `hex`, `thiserror`. Features: `postgres` (compile `PgObjectDb`), `postgres-integration` (run real-Postgres tests, requires `SCHEMAHUB_TEST_POSTGRES_URL`).
 
 ### 3.3 `schemahub-core`
 
@@ -124,39 +127,59 @@ schemahub-core/src/
   config.rs          # RepoConfig (default_bookmark, direction, protected_bookmarks) + RepoConfigStore
   error.rs           # CoreError + CoreResult (wraps JJ / auth / compiler errors)
   registry.rs        # CompilerRegistry: HashMap<format_id, Arc<dyn Compiler>>
-  request.rs         # MutationRequest / TransactionRequest / TransactionLimits / LogEntry / SearchHit
+  request.rs         # Lifecycle/mutation/transaction requests, deadline token, limits, and read response shapes
+  lifecycle.rs       # whole-schema create/update/delete policy and source replacement
+  reference_integrity.rs # final-state live-unpinned import checks
+  change_record/     # ChangeRecord model, lifecycle ledger, clock/ID injection, store adapters/tests
+  changes.rs         # authorized Create/Get/List/Update/Abandon orchestration
   mutation/
     mod.rs
     single.rs        # single-mutation flow (design.md §5.1)
-    transaction.rs   # transaction flow (design.md §5.2; multi-file via commit_write_multi)
-    idempotency.rs   # RPC-edge idempotency dedupe
+    transaction.rs   # bounded/deadline-aware transaction flow (multi-file via one JJ commit)
+    idempotency.rs   # bounded ObjectDb receipts + JJ crash reconciliation
     compat.rs        # compatibility orchestration (protected-bookmark gating)
     closure.rs       # transitive import closure BFS (codegen)
   conflict.rs        # render/resolve conflicted declarations via the compiler
-  exploration.rs     # ListDeclarations, GetDeclaration, FollowType, ListDependencies, Search
+  exploration.rs     # immutable local reads, exact FollowType, forward closure, bounded ListDependents
   codegen.rs         # GetDescriptors, PreviewCodegen
-  history.rs         # log (commits/changes; honors RefSpec + limit), op log (limit), undo, diff
+  serving.rs         # immutable revisions + versioned first-materialization records/digests
+  history.rs         # immutable log/list ranges, schema-touch filtering, op log, undo, repository diff
   refs.rs            # bookmark + tag orchestration (create/delete/list, merge wrappers)
-  projects.rs        # CreateProject, GetProject, AddMember etc. — RBAC over ProjectStore + RoleStore
+  projects.rs        # project CRUD/update/pagination/archive + membership invariants and RBAC
+  repository.rs      # durable repository resources, CAS ETags, archive, runtime policy lookup
   gc.rs              # GC via jj-lib (op-log + reachable objects)
   auth.rs            # AuthnProvider + AuthzPolicy invocation in flows
-  auth_store.rs      # ProjectStore + RoleStore traits, ProjectMeta { name, visibility, creator }
-  auth_files.rs      # FileProjectStore + FileRoleStore — JSON persistence under [auth].data_dir
+  auth_store.rs      # ProjectStore + RoleStore traits, ETags/timestamps/archive metadata
+  auth_object_db.rs  # redb/PostgreSQL project + membership records and atomic owner creation
+  auth_files.rs      # legacy JSON migration readers and compatibility tests
   auth_impls.rs      # BearerTokenAuthn (token → Identity) + RoleBasedAuthz
   tests.rs           # in-repo unit tests using a mock Compiler + MemoryObjectDb
 ```
 
-**Dependencies:** `schemahub-types`, `schemahub-jj`, `serde` + `serde_json` (file-backed stores), `bytes` (Compiler-trait re-export), `thiserror`. Dev-deps: `schemahub-compiler-protobuf` (only for tests), `tempfile`.
+**Dependencies:** `schemahub-types`, `schemahub-jj`, `serde` + `serde_json`
+(control-plane resource encoding), `bytes` (Compiler-trait re-export), `sha2`,
+`hex`, `uuid`, `thiserror`. Dev-deps: `schemahub-compiler-protobuf` (only for
+tests), `tempfile`.
 
 ### 3.4 `schemahub-api`
 
-Generated gRPC types (unchanged from v1 in role). `build.rs` runs `tonic_build` over `proto/schemahub/v1/*.proto`; nothing checked in. New/changed protos vs v1: a conflict-resolution RPC and an operation-log / `undo` RPC (in a revised `admin_service.proto` / a new `history_service.proto`); responses carry `change_id` alongside `commit_id`.
+Generated gRPC types. `build.rs` runs `tonic_build` over
+`proto/schemahub/v1/*.proto`; nothing generated is checked in. The build script
+selects `protoc-bin-vendored` for the host platform so clean CI, container, and
+cross-platform release builds do not depend on a system `protoc` executable.
+`change_service.proto` owns the durable intent resource and lifecycle,
+`serving_service.proto` owns immutable revisions and artifacts, and
+`history_service.proto` owns the operation log, undo, and conflict resolution;
+schema writes carry `change_id` alongside `commit_id`.
 
-**Dependencies:** `tonic`, `prost`, `prost-types`. No schemahub crates.
+**Dependencies:** `tonic`, `prost`, `prost-types`; build dependencies are
+`tonic-build` and `protoc-bin-vendored`. No schemahub crates.
 
 ### 3.5 Compiler Crates
 
-Each wraps its sibling compiler and adds the schemahub-specific pieces (decl split, printer, mutation validation, compatibility, conflict rendering).
+Each wraps its sibling compiler and adds the schemahub-specific pieces (decl
+split, printer, exact field/property type lookup, mutation validation,
+compatibility, conflict rendering).
 
 ```
 schemahub-compiler-protobuf/src/
@@ -178,7 +201,11 @@ schemahub-compiler-protobuf/src/
 - flatbuffers: `schemahub-types`, `flatc-rs-parser`, `flatc-rs-schema`, `flatc-rs-codegen`.
 - openapi: `schemahub-types`, `serde`, `serde_yaml`/`serde_json`.
 
-The sibling compiler crates are referenced as **path dependencies** within the `~/projects/shuozeli/compilers/` tree (or git deps once published).
+Sibling compiler crates must resolve through canonical Git URLs at immutable
+commit revisions. Protobuf is pinned at
+`a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac`. FlatBuffers retains a temporary
+development path only until its pluggable-buffer work is published; the release
+workflow rejects that path state.
 
 ### 3.6 `schemahub-server`
 
@@ -186,26 +213,31 @@ The composition root.
 
 ```
 schemahub-server/src/
-  main.rs            # startup: parse args (--listen/--db/--db-url/--config),
+  main.rs            # startup/probe: args (--print-openapi/--check-ready/--listen/--http-listen/--db/--db-url/--config),
                      # open ObjectDb, build Core, start tonic; binds to
                      # TAILSCALE_IP:port when set, else 0.0.0.0:50051.
-  lib.rs             # composition root EXPOSED as a library: `build_core(db, config)`
-                     # + `build_router(core)`. Lets in-process integration tests
-                     # (`tests/e2e*.rs`) build the same stack without spawning a binary.
-  config.rs          # schemahub.toml: [storage], [listen], [repos.*], [auth] (tokens),
-                     # [projects.<name>] (visibility, owners, members). auth_enabled()
-                     # drives the choice between Noop and BearerToken + RBAC.
+  lib.rs             # composition root + release-tag BUILD_VERSION; exposes
+                     # build_core(), build_core_with_authn(), and build_router().
+  config.rs          # schemahub.toml: storage/listen, exact-origin HTTP policy,
+                     # repos/projects, and mutually exclusive static/JWT auth.
+  jwt_auth.rs        # strict JWT verifier, injected clock, bounded HTTPS/file
+                     # JWKS loader, atomic rotation, stale-key readiness task.
   wire.rs            # schemahub-api types ↔ schemahub-core types
   error.rs           # core errors → tonic::Status
+  http.rs            # bounded same-origin BFF, DTO schemas, annotated handlers, probes/metrics
+  http/openapi.rs    # shared runtime-route/OpenAPI assembly and bearer metadata
+  observability.rs   # shared HTTP/gRPC counters and latency histogram
   services/
     mod.rs           # token_from() helper (Authorization: Bearer <token>)
-    schema.rs        # SchemaService (create/update/delete + ApplyMutation/Transaction)
+    schema.rs        # SchemaService adapter; transaction blocking worker + hard server deadline
     bookmark.rs      # RefService — commits, diff, branches (== bookmarks), tags, merge
-    exploration.rs   # ExplorationService (read API; honors `at` ref)
+    exploration.rs   # ExplorationService; blocking reverse-dependency scan adapter
     codegen.rs       # CodegenService (GetDescriptors, PreviewCodegen)
-    project.rs       # ProjectService (real projects + RBAC; repo registry still echo)
+    serving.rs       # ServingService (resolve immutable revision + fetch artifacts)
+    change.rs        # ChangeService (durable edits, validation, review, Apply)
+    project.rs       # durable Project/Repo lifecycle, policy, pagination, archive, members
     history.rs       # HistoryService — Log, OpLog, Undo, Render/Resolve conflict
-    admin.rs         # AdminService — RunGC, RebuildIndex, GetServerConfig
+    admin.rs         # AdminService — GC/index/config/capabilities and public limits
 ```
 
 ```rust
@@ -216,27 +248,30 @@ async fn main() -> anyhow::Result<()> {
 
     let db: Arc<dyn ObjectDb> = match config.storage.backend {
         Backend::Redb => Arc::new(RedbObjectDb::open(&config.storage.path)?),
-        Backend::Postgres => Arc::new(PgObjectDb::connect(&config.storage.url).await?),
+        Backend::Postgres => Arc::new(PgObjectDb::connect(&config.storage.url)?),
     };
-    let jj = Arc::new(Jj::new(db));            // DbBackend + DbOpStore inside
-
-    let mut registry = CompilerRegistry::new();
-    registry.register(Arc::new(ProtobufCompiler::new()));
-    registry.register(Arc::new(FlatBuffersCompiler::new()));
-    registry.register(Arc::new(OpenApiCompiler::new()));
-
-    let core = Arc::new(Core::new(jj, registry, Arc::new(NoopAuthn), Arc::new(NoopAuthz)));
-
-    Server::builder()
-        .add_service(SchemaServiceServer::new(SchemaHandler::new(core.clone())))
-        // ... bookmark, exploration, codegen, project, history, admin
+    // JWT mode initializes its JWKS asynchronously and injects the provider;
+    // noop/static mode uses the synchronous build_core convenience path.
+    let jwt_runtime = match &config.auth.jwt {
+        Some(jwt) => Some(JwtAuthRuntime::initialize(jwt).await?),
+        None => None,
+    };
+    let core = match jwt_runtime.as_ref() {
+        Some(runtime) => build_core_with_authn(db, &config, runtime.provider()),
+        None => build_core(db, &config),
+    };
+    // The real composition root supervises jwt_runtime.run() beside both
+    // listeners and gives every task the same graceful-shutdown signal.
+    build_router(core, config.storage.backend.as_str())
         .serve(config.listen_addr)
         .await?;
     Ok(())
 }
 ```
 
-**Dependencies:** `schemahub-core`, `schemahub-jj`, `schemahub-api`, all three compiler crates, `tonic`, `tokio`, `serde`, `toml`, `anyhow`.
+**Dependencies:** `schemahub-core`, `schemahub-jj`, `schemahub-api`, all three
+compiler crates, `tonic`, `tokio`, `serde`, `toml`, `anyhow`, `jsonwebtoken`,
+`reqwest`, `axum`, `tower-http`, `utoipa`, and `utoipa-axum`.
 
 ### 3.7 `schemahub-cli`
 
@@ -244,14 +279,16 @@ Pure gRPC client.
 
 ```
 schemahub-cli/src/
-  main.rs            # clap entrypoint; subcommands: repo / project / schema / field /
-                     # branch / tag / log / op / undo / resolve / codegen / diff
+  main.rs            # clap entrypoint; subcommands: repo / project / change / artifact /
+                     # schema / field / branch / tag / log / op / undo / resolve / codegen / diff
   config.rs          # ~/.schemahub config; reads --server/--token or env vars
   client.rs          # tonic Channel + Authorization header attachment
   cmd/
     mod.rs           # parse_ref: "@hex"→Commit, "tag:N"→Tag, else Branch
     repo.rs          # `repo init` (project + repo creation)
     project.rs       # `project create` + `project member {add,remove,set-role}` (RBAC)
+    change.rs        # draft edits + validate/ready/review/apply/abandon; stable --json output
+    artifact.rs      # immutable `artifact resolve/fetch/verify`; stable metadata JSON
     schema.rs        # `schema create/update/pull/delete`
     field.rs         # Protobuf granular field ops: add/remove/rename
     branch.rs        # `branch create/delete/list/merge`
@@ -263,7 +300,9 @@ schemahub-cli/src/
 
 There is no `message` / `enum` / `service` CLI subcommand yet (those `ApplyMutation` ops exist on the wire only). No top-level `search`, `import`, or `op` subcommands beyond `op log`.
 
-**Dependencies:** `schemahub-api`, `clap` (with `derive` and `env` features), `tonic`, `tokio`, `prost`, `serde`, `toml`, `anyhow`, `bytes`, `uuid`.
+**Dependencies:** `schemahub-api`, `clap` (with `derive` and `env` features),
+`tonic`, `tokio`, `prost`, `prost-types`, `serde`, `serde_json`, `toml`,
+`anyhow`, `bytes`, `sha2`, `hex`, `uuid`.
 
 ---
 
@@ -315,18 +354,21 @@ uuid        = { version = "1", features = ["v4"] }
 sqlx        = { version = "0.9", default-features = false,
                 features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
 
-# sibling compilers (path deps within ~/projects/shuozeli/compilers/)
-protoc-rs-parser  = { path = "../../compilers/protobuf-rs/parser" }
-protoc-rs-schema  = { path = "../../compilers/protobuf-rs/schema" }
-protoc-rs-codegen = { path = "../../compilers/protobuf-rs/codegen" }
-flatc-rs-parser   = { path = "../../compilers/flatbuffers-rs/parser" }
-flatc-rs-schema   = { path = "../../compilers/flatbuffers-rs/schema" }
-flatc-rs-codegen  = { path = "../../compilers/flatbuffers-rs/codegen" }
+# sibling compilers (immutable Git revisions for independent checkouts)
+protoc-rs-parser  = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+protoc-rs-schema  = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+protoc-rs-codegen = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+
+flatc-rs-parser   = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }
+flatc-rs-schema   = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }
+flatc-rs-codegen  = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }
 ```
 
 `jj-lib` is pinned at `0.41` with `default-features = false` so the `git` interop feature is off (we bypass git — see `design.md` §4.6). `sqlx` is workspace-declared but only depended on through the optional `postgres` feature on `schemahub-jj` (and forwarded into `schemahub-server`).
 
-> Path deps assume the post-2026-05-13 layout: schemahub at `~/projects/shuozeli/codegen/schemahub`, compilers at `~/projects/shuozeli/compilers/`. Confirm the relative paths against the actual workspace root before building.
+> Both sibling compiler boundaries are immutable Git dependencies. Independent
+> SchemaHub checkouts do not require the local `~/projects/shuozeli/compilers/`
+> layout.
 
 ---
 
@@ -348,9 +390,19 @@ flatc-rs-codegen  = { path = "../../compilers/flatbuffers-rs/codegen" }
 
 - `schemahub-types`: trait object-safety of `dyn Compiler`.
 - `schemahub-jj`: object round-trip, transaction atomicity, op-log + undo, conflict construction at decl granularity, against both `redb` and (gated) `postgres`.
-- `schemahub-core`: mutation/transaction flows with a mock `Compiler` and an in-memory `ObjectDb`; concurrency producing first-class conflicts; protected-bookmark gating.
+- `schemahub-core`: mutation/transaction flows with a mock `Compiler` and an
+  in-memory `ObjectDb`; unprotected concurrency producing first-class conflicts;
+  atomic protected-conflict and delete/import race rejection, including
+  ChangeRecord lease cleanup; deadline cancellation before publication and
+  receipt cleanup while queued at the publication guard; direct reverse
+  discovery with immutable per-repository snapshots and auth filtering;
+  forward live/pinned closure resolution; exact cross-format field-type
+  traversal; immutable history/diff snapshots; and raw-commit ownership.
 - `schemahub-compiler-*`: **round-trip** (`parse → print → parse` yields an equivalent AST — the headline test the v1 AST could not pass), diff correctness, one compatibility test per rule-table row, decl-split/reassemble fidelity.
-- Integration (`schemahub-server/tests/`): in-process server over an ephemeral `redb`, driven via gRPC — end-to-end mutation, conflict-and-resolve, undo, codegen.
+- Integration (`schemahub-server/tests/`): in-process server over an ephemeral
+  `redb`, driven via gRPC — end-to-end mutation, conflict-and-resolve, undo,
+  codegen, serving, and live/pinned cross-repository dependency discovery
+  (`e2e_dependencies.rs`).
 
 ---
 

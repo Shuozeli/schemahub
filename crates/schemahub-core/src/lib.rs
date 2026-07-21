@@ -10,11 +10,11 @@
 //!
 //! ## Public surface (the server's contract)
 //! - Mutation: [`Core::apply_mutation`], [`Core::apply_mutations`],
-//!   [`Core::apply_mutations_with_limits`]
+//!   [`Core::apply_mutations_with_limits`], [`Core::apply_mutations_with_deadline`]
 //! - Exploration: [`Core::list_schemas`], [`Core::list_declarations`],
 //!   [`Core::get_declaration`], [`Core::follow_type`],
-//!   [`Core::list_dependencies`], [`Core::get_schema_source`], [`Core::search`],
-//!   [`Core::search_detailed`]
+//!   [`Core::list_dependencies`], [`Core::list_dependents`],
+//!   [`Core::get_schema_source`], [`Core::search`], [`Core::search_detailed`]
 //! - Codegen: [`Core::generate_descriptors`], [`Core::generate_code`],
 //!   [`Core::preview_codegen`]
 //! - Conflicts: [`Core::render_conflict`], [`Core::resolve_conflict`]
@@ -28,7 +28,10 @@
 pub mod auth;
 pub mod auth_files;
 pub mod auth_impls;
+pub mod auth_object_db;
 pub mod auth_store;
+pub mod change_record;
+pub mod changes;
 pub mod codegen;
 pub mod config;
 pub mod conflict;
@@ -36,29 +39,49 @@ pub mod error;
 pub mod exploration;
 pub mod gc;
 pub mod history;
+pub mod lifecycle;
 pub mod mutation;
 pub mod projects;
+mod reference_integrity;
 pub mod refs;
 pub mod registry;
+pub mod repository;
 pub mod request;
+pub mod serving;
 
 use std::sync::Arc;
 
 pub use auth_files::{FileProjectStore, FileRoleStore};
 pub use auth_impls::{BearerTokenAuthn, RoleBasedAuthz};
-pub use auth_store::{ProjectMeta, ProjectStore, RoleStore};
-pub use config::{RepoConfig, RepoConfigStore};
+pub use auth_object_db::{ObjectDbProjectStore, ObjectDbRoleStore};
+pub use auth_store::{AccessStoreError, AccessStoreResult, ProjectMeta, ProjectStore, RoleStore};
+pub use config::{RepoConfig, RepoConfigStore, ReviewPolicy, ServingPolicy};
 pub use error::{CoreError, CoreResult};
-pub use mutation::idempotency::IdempotencyStore;
-pub use mutation::load_base;
-pub use registry::CompilerRegistry;
-pub use request::{
-    CodegenRequest, DeclLocation, LogEntry, MutationRequest, MutationResponse, OperationRecord,
-    SearchHit, TransactionLimits, TransactionRequest,
+pub use exploration::{MAX_DEPENDENCY_SCAN_REPOSITORIES, MAX_DEPENDENCY_SCAN_SCHEMAS};
+pub use mutation::idempotency::{
+    FingerprintBuilder, IdempotencyError, IdempotencyStore, DEFAULT_TTL_HOURS,
 };
+pub use mutation::load_base;
+pub use projects::ProjectUpdate;
+pub use registry::CompilerRegistry;
+pub use repository::{
+    CreateRepository, MemoryRepositoryStore, ObjectDbRepositoryStore, Repository, RepositoryError,
+    RepositoryStore, RepositoryStoreError, RepositoryUpdate,
+};
+pub use request::{
+    CodegenRequest, CreateSchemaRequest, DeclLocation, DeleteSchemaRequest, DependencyScanSnapshot,
+    DependentsScan, FollowedType, LogEntry, MutationRequest, MutationResponse, OperationRecord,
+    RepositoryDiff, SchemaDependency, SchemaDependent, SearchHit, TransactionDeadline,
+    TransactionLimits, TransactionRequest, UpdateSchemaRequest,
+};
+pub use serving::{SchemaArtifact, SchemaArtifactKind, SchemaRevision};
 
 use schemahub_jj::Jj;
 use schemahub_types::{AuthnProvider, AuthzPolicy};
+
+use crate::change_record::{
+    ChangeLedger, MemoryChangeRecordStore, SystemChangeClock, UuidChangeIdGenerator,
+};
 
 /// The orchestration root. Holds the JJ handle, the compiler registry, the auth
 /// providers, the per-repo compatibility config, the project + role registries,
@@ -73,6 +96,9 @@ pub struct Core {
     pub(crate) idempotency: IdempotencyStore,
     pub(crate) role_store: Arc<dyn RoleStore>,
     pub(crate) project_store: Arc<dyn ProjectStore>,
+    pub(crate) change_ledger: ChangeLedger,
+    pub(crate) repository_store: Arc<dyn RepositoryStore>,
+    pub(crate) artifact_store: serving::ArtifactMaterializationStore,
 }
 
 impl Core {
@@ -105,7 +131,76 @@ impl Core {
         authz: Arc<dyn AuthzPolicy>,
         repo_configs: RepoConfigStore,
     ) -> Self {
-        Self::with_stores(
+        Self::with_config_and_change_ledger(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            default_change_ledger(),
+        )
+    }
+
+    /// Construct the core with an explicit change ledger while retaining the
+    /// empty role/project-store defaults. The server uses this in Noop-auth
+    /// deployments so change records still persist in the selected database.
+    pub fn with_config_and_change_ledger(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        change_ledger: ChangeLedger,
+    ) -> Self {
+        Self::with_config_and_resource_stores(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            change_ledger,
+            Arc::new(MemoryRepositoryStore::new()),
+        )
+    }
+
+    /// Construct the Noop-auth shape with explicit durable control-plane
+    /// stores. The server uses this so ChangeRecord and Repository resources
+    /// persist even when RBAC is disabled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_config_and_resource_stores(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        change_ledger: ChangeLedger,
+        repository_store: Arc<dyn RepositoryStore>,
+    ) -> Self {
+        Self::with_config_and_all_stores(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            change_ledger,
+            repository_store,
+            IdempotencyStore::new(),
+        )
+    }
+
+    /// Construct the Noop-auth shape with every durable control-plane store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_config_and_all_stores(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        change_ledger: ChangeLedger,
+        repository_store: Arc<dyn RepositoryStore>,
+        idempotency: IdempotencyStore,
+    ) -> Self {
+        Self::with_all_stores(
             jj,
             registry,
             authn,
@@ -113,6 +208,9 @@ impl Core {
             repo_configs,
             Arc::new(EmptyRoleStore),
             Arc::new(EmptyProjectStore),
+            change_ledger,
+            repository_store,
+            idempotency,
         )
     }
 
@@ -127,15 +225,98 @@ impl Core {
         role_store: Arc<dyn RoleStore>,
         project_store: Arc<dyn ProjectStore>,
     ) -> Self {
+        Self::with_stores_and_change_ledger(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            role_store,
+            project_store,
+            default_change_ledger(),
+        )
+    }
+
+    /// Full composition-root constructor with explicit durable stores.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_stores_and_change_ledger(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        role_store: Arc<dyn RoleStore>,
+        project_store: Arc<dyn ProjectStore>,
+        change_ledger: ChangeLedger,
+    ) -> Self {
+        Self::with_stores_and_resource_stores(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            role_store,
+            project_store,
+            change_ledger,
+            Arc::new(MemoryRepositoryStore::new()),
+        )
+    }
+
+    /// Full composition-root constructor with all mutable resource stores.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_stores_and_resource_stores(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        role_store: Arc<dyn RoleStore>,
+        project_store: Arc<dyn ProjectStore>,
+        change_ledger: ChangeLedger,
+        repository_store: Arc<dyn RepositoryStore>,
+    ) -> Self {
+        Self::with_all_stores(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            role_store,
+            project_store,
+            change_ledger,
+            repository_store,
+            IdempotencyStore::new(),
+        )
+    }
+
+    /// Full composition-root constructor with all mutable resource stores and
+    /// the durable idempotency receipt ledger.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_all_stores(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        role_store: Arc<dyn RoleStore>,
+        project_store: Arc<dyn ProjectStore>,
+        change_ledger: ChangeLedger,
+        repository_store: Arc<dyn RepositoryStore>,
+        idempotency: IdempotencyStore,
+    ) -> Self {
+        let artifact_store = serving::ArtifactMaterializationStore::new(jj.object_db());
         Self {
             jj,
             registry,
             authn,
             authz,
             repo_configs,
-            idempotency: IdempotencyStore::new(),
+            idempotency,
             role_store,
             project_store,
+            change_ledger,
+            repository_store,
+            artifact_store,
         }
     }
 
@@ -159,6 +340,14 @@ impl Core {
     ) {
         self.repo_configs.set(project, repo, config);
     }
+}
+
+fn default_change_ledger() -> ChangeLedger {
+    ChangeLedger::new(
+        Arc::new(MemoryChangeRecordStore::new()),
+        Arc::new(SystemChangeClock),
+        Arc::new(UuidChangeIdGenerator),
+    )
 }
 
 /// Detect a format id from a schema file name extension.
@@ -189,15 +378,12 @@ pub fn detect_format_from_name(schema_name: &str) -> Option<&'static str> {
 /// "succeeded". Per user rules: fail-fast over fail-safe.
 struct EmptyRoleStore;
 
-fn empty_store_err(op: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        format!(
-            "{op}: no role/project store is configured \
+fn empty_store_err(op: &str) -> AccessStoreError {
+    AccessStoreError::Backend(format!(
+        "{op}: no role/project store is configured \
              (this server was built with Noop auth — populate \
              `[auth]` in schemahub.toml to enable project/member management)"
-        ),
-    )
+    ))
 }
 
 impl RoleStore for EmptyRoleStore {
@@ -205,22 +391,25 @@ impl RoleStore for EmptyRoleStore {
         &self,
         _project: &str,
         _identity: &schemahub_types::Identity,
-    ) -> Option<schemahub_types::Role> {
-        None
+    ) -> AccessStoreResult<Option<schemahub_types::Role>> {
+        Ok(None)
     }
     fn set(
         &self,
         _project: &str,
         _identity_id: &str,
         _role: schemahub_types::Role,
-    ) -> std::io::Result<()> {
+    ) -> AccessStoreResult<()> {
         Err(empty_store_err("RoleStore::set"))
     }
-    fn remove(&self, _project: &str, _identity_id: &str) -> std::io::Result<()> {
+    fn remove(&self, _project: &str, _identity_id: &str) -> AccessStoreResult<()> {
         Err(empty_store_err("RoleStore::remove"))
     }
-    fn list_project(&self, _project: &str) -> Vec<(String, schemahub_types::Role)> {
-        Vec::new()
+    fn list_project(
+        &self,
+        _project: &str,
+    ) -> AccessStoreResult<Vec<(String, schemahub_types::Role)>> {
+        Ok(Vec::new())
     }
 }
 
@@ -229,14 +418,24 @@ impl RoleStore for EmptyRoleStore {
 struct EmptyProjectStore;
 
 impl ProjectStore for EmptyProjectStore {
-    fn get(&self, _project: &str) -> Option<ProjectMeta> {
-        None
+    fn get(&self, _project: &str) -> AccessStoreResult<Option<ProjectMeta>> {
+        Ok(None)
     }
-    fn set(&self, _meta: ProjectMeta) -> std::io::Result<()> {
+    fn create_with_owner(
+        &self,
+        _meta: ProjectMeta,
+        _owner_id: &str,
+    ) -> AccessStoreResult<ProjectMeta> {
+        Err(empty_store_err("ProjectStore::create_with_owner"))
+    }
+    fn set(&self, _meta: ProjectMeta) -> AccessStoreResult<()> {
         Err(empty_store_err("ProjectStore::set"))
     }
-    fn list(&self) -> Vec<ProjectMeta> {
-        Vec::new()
+    fn replace(&self, _expected_etag: &str, _meta: ProjectMeta) -> AccessStoreResult<ProjectMeta> {
+        Err(empty_store_err("ProjectStore::replace"))
+    }
+    fn list(&self) -> AccessStoreResult<Vec<ProjectMeta>> {
+        Ok(Vec::new())
     }
 }
 

@@ -32,6 +32,7 @@ use crate::object_db::{ObjectDb, ObjectId, ObjectKind};
 
 const OPERATION_ID_LENGTH: usize = 64;
 const VIEW_ID_LENGTH: usize = 64;
+const COMMIT_ID_LENGTH: usize = 64;
 
 fn to_read_err(
     object_type: &str,
@@ -45,15 +46,18 @@ fn to_read_err(
     }
 }
 
-fn not_found(
+fn read_error(
     object_type: &str,
     hash: String,
     err: crate::object_db::ObjectDbError,
 ) -> OpStoreError {
-    OpStoreError::ObjectNotFound {
-        object_type: object_type.to_string(),
-        hash,
-        source: Box::new(err),
+    match err {
+        crate::object_db::ObjectDbError::NotFound => OpStoreError::ObjectNotFound {
+            object_type: object_type.to_string(),
+            hash,
+            source: Box::new(crate::object_db::ObjectDbError::NotFound),
+        },
+        error @ crate::object_db::ObjectDbError::Backend(_) => OpStoreError::Other(Box::new(error)),
     }
 }
 
@@ -108,10 +112,10 @@ impl OpStore for DbOpStore {
         let bytes = self
             .db
             .get_object(ObjectKind::View, &ObjectId(id.to_bytes()))
-            .map_err(|e| not_found("view", id.hex(), e))?;
+            .map_err(|e| read_error("view", id.hex(), e))?;
         let stored: StoredView =
             serde_json::from_slice(&bytes).map_err(|e| to_read_err("view", id.hex(), e))?;
-        Ok(stored.into_view())
+        stored.try_into_view()
     }
 
     async fn write_view(&self, view: &View) -> OpStoreResult<ViewId> {
@@ -133,10 +137,10 @@ impl OpStore for DbOpStore {
         let bytes = self
             .db
             .get_op(&self.repo_key, &crate::object_db::OpId(id.to_bytes()))
-            .map_err(|e| not_found("operation", id.hex(), e))?;
+            .map_err(|e| read_error("operation", id.hex(), e))?;
         let stored: StoredOperation =
             serde_json::from_slice(&bytes).map_err(|e| to_read_err("operation", id.hex(), e))?;
-        Ok(stored.into_operation())
+        stored.try_into_operation()
     }
 
     async fn write_operation(&self, operation: &Operation) -> OpStoreResult<OperationId> {
@@ -207,16 +211,36 @@ fn ref_target_to_stored(target: &RefTarget) -> StoredRefTarget {
         .collect()
 }
 
-fn ref_target_from_stored(stored: StoredRefTarget) -> RefTarget {
+fn ref_target_from_stored(stored: StoredRefTarget) -> OpStoreResult<RefTarget> {
     let terms: Vec<Option<CommitId>> = stored
         .into_iter()
-        .map(|opt| opt.map(|hex| CommitId::new(hex_to_bytes(&hex))))
-        .collect();
-    RefTarget::from_merge(Merge::from_vec(terms))
+        .map(|term| {
+            term.map(|encoded| {
+                decode_hex_id("commit", &encoded, COMMIT_ID_LENGTH).map(CommitId::new)
+            })
+            .transpose()
+        })
+        .collect::<OpStoreResult<_>>()?;
+    Ok(RefTarget::from_merge(Merge::from_vec(terms)))
 }
 
-fn hex_to_bytes(hex: &str) -> Vec<u8> {
-    hex::decode(hex).unwrap_or_default()
+fn decode_hex_id(object_type: &str, encoded: &str, expected_len: usize) -> OpStoreResult<Vec<u8>> {
+    let bytes = hex::decode(encoded)
+        .map_err(|error| to_read_err(object_type, encoded.to_string(), error))?;
+    if bytes.len() != expected_len {
+        return Err(to_read_err(
+            object_type,
+            encoded.to_string(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid {object_type} id length: expected {expected_len} bytes, got {}",
+                    bytes.len()
+                ),
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -249,37 +273,43 @@ impl StoredView {
         }
     }
 
-    fn into_view(self) -> View {
-        View {
-            head_ids: self
-                .head_ids
-                .into_iter()
-                .map(|h| CommitId::new(hex_to_bytes(&h)))
-                .collect(),
-            local_bookmarks: self
-                .local_bookmarks
-                .into_iter()
-                .map(|(name, target)| (RefNameBuf::from(name), ref_target_from_stored(target)))
-                .collect(),
-            local_tags: self
-                .local_tags
-                .into_iter()
-                .map(|(name, target)| (RefNameBuf::from(name), ref_target_from_stored(target)))
-                .collect(),
+    fn try_into_view(self) -> OpStoreResult<View> {
+        let head_ids = self
+            .head_ids
+            .into_iter()
+            .map(|encoded| decode_hex_id("commit", &encoded, COMMIT_ID_LENGTH).map(CommitId::new))
+            .collect::<OpStoreResult<_>>()?;
+        let local_bookmarks = self
+            .local_bookmarks
+            .into_iter()
+            .map(|(name, target)| {
+                ref_target_from_stored(target).map(|target| (RefNameBuf::from(name), target))
+            })
+            .collect::<OpStoreResult<_>>()?;
+        let local_tags = self
+            .local_tags
+            .into_iter()
+            .map(|(name, target)| {
+                ref_target_from_stored(target).map(|target| (RefNameBuf::from(name), target))
+            })
+            .collect::<OpStoreResult<_>>()?;
+        let wc_commit_ids = self
+            .wc_commit_ids
+            .into_iter()
+            .map(|(name, encoded)| {
+                decode_hex_id("commit", &encoded, COMMIT_ID_LENGTH)
+                    .map(|bytes| (WorkspaceNameBuf::from(name), CommitId::new(bytes)))
+            })
+            .collect::<OpStoreResult<_>>()?;
+        Ok(View {
+            head_ids,
+            local_bookmarks,
+            local_tags,
             remote_views: BTreeMap::new(),
             git_refs: BTreeMap::new(),
             git_head: RefTarget::absent(),
-            wc_commit_ids: self
-                .wc_commit_ids
-                .into_iter()
-                .map(|(name, id)| {
-                    (
-                        WorkspaceNameBuf::from(name),
-                        CommitId::new(hex_to_bytes(&id)),
-                    )
-                })
-                .collect(),
-        }
+            wc_commit_ids,
+        })
     }
 }
 
@@ -326,7 +356,15 @@ impl StoredOperation {
         }
     }
 
-    fn into_operation(self) -> Operation {
+    fn try_into_operation(self) -> OpStoreResult<Operation> {
+        let view_id = ViewId::new(decode_hex_id("view", &self.view_id, VIEW_ID_LENGTH)?);
+        let parents = self
+            .parents
+            .iter()
+            .map(|encoded| {
+                decode_hex_id("operation", encoded, OPERATION_ID_LENGTH).map(OperationId::new)
+            })
+            .collect::<OpStoreResult<_>>()?;
         let metadata = OperationMetadata {
             time: TimestampRange {
                 start: Timestamp {
@@ -345,16 +383,71 @@ impl StoredOperation {
             workspace_name: self.workspace_name.map(WorkspaceNameBuf::from),
             attributes: self.attributes.into_iter().collect(),
         };
-        Operation {
-            view_id: ViewId::new(hex_to_bytes(&self.view_id)),
-            parents: self
-                .parents
-                .into_iter()
-                .map(|h| OperationId::new(hex_to_bytes(&h)))
-                .collect(),
+        Ok(Operation {
+            view_id,
+            parents,
             metadata,
             // schemahub doesn't track commit predecessors across operations.
             commit_predecessors: None,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_view_rejects_malformed_commit_ids() {
+        // Arrange
+        let stored = StoredView {
+            head_ids: vec!["not-hex".to_string()],
+            local_bookmarks: Vec::new(),
+            local_tags: Vec::new(),
+            wc_commit_ids: Vec::new(),
+        };
+
+        // Act
+        let result = stored.try_into_view();
+
+        // Assert
+        assert!(matches!(result, Err(OpStoreError::ReadObject { .. })));
+    }
+
+    #[test]
+    fn stored_operation_rejects_wrong_length_parent_ids() {
+        // Arrange
+        let stored = StoredOperation {
+            view_id: "00".repeat(VIEW_ID_LENGTH),
+            parents: vec!["00".repeat(OPERATION_ID_LENGTH - 1)],
+            start_millis: 0,
+            start_tz: 0,
+            end_millis: 0,
+            end_tz: 0,
+            description: String::new(),
+            hostname: String::new(),
+            username: String::new(),
+            is_snapshot: false,
+            workspace_name: None,
+            attributes: Vec::new(),
+        };
+
+        // Act
+        let result = stored.try_into_operation();
+
+        // Assert
+        assert!(matches!(result, Err(OpStoreError::ReadObject { .. })));
+    }
+
+    #[test]
+    fn database_faults_are_not_reported_as_missing_operations() {
+        // Arrange
+        let error = crate::object_db::ObjectDbError::Backend("storage unavailable".to_string());
+
+        // Act
+        let result = read_error("operation", "ab".repeat(OPERATION_ID_LENGTH), error);
+
+        // Assert
+        assert!(matches!(result, OpStoreError::Other(_)));
     }
 }

@@ -94,10 +94,18 @@ impl AuthzPolicy for RoleBasedAuthz {
         resource: &ResourcePath,
     ) -> Result<(), AuthzError> {
         // Rule 1: anonymous read on a public project is always allowed.
-        let visibility = self
+        let project = self
             .projects
             .get(&resource.project)
-            .map(|m| m.visibility)
+            .map_err(|error| AuthzError::Backend(error.to_string()))?;
+        if project.as_ref().is_some_and(|project| project.archived) {
+            return Err(AuthzError::PermissionDenied(format!(
+                "project '{}' is archived",
+                resource.project
+            )));
+        }
+        let visibility = project
+            .map(|project| project.visibility)
             .unwrap_or(Visibility::Private);
 
         if action == Action::Read && visibility == Visibility::Public {
@@ -114,7 +122,11 @@ impl AuthzPolicy for RoleBasedAuthz {
 
         // Rule 3: caller must have a role ≥ the minimum.
         let needed = Self::min_role(action);
-        match self.roles.get(&resource.project, caller) {
+        match self
+            .roles
+            .get(&resource.project, caller)
+            .map_err(|error| AuthzError::Backend(error.to_string()))?
+        {
             Some(role) if role >= needed => Ok(()),
             Some(role) => Err(AuthzError::PermissionDenied(format!(
                 "role {role:?} cannot {action:?} on project '{}' (need {needed:?}+)",
@@ -142,36 +154,56 @@ mod tests {
     }
 
     impl RoleStore for MemRoleStore {
-        fn get(&self, project: &str, identity: &Identity) -> Option<Role> {
-            let id = identity.id()?;
-            self.roles
+        fn get(
+            &self,
+            project: &str,
+            identity: &Identity,
+        ) -> crate::auth_store::AccessStoreResult<Option<Role>> {
+            let Some(id) = identity.id() else {
+                return Ok(None);
+            };
+            Ok(self
+                .roles
                 .lock()
                 .unwrap()
                 .get(&(project.to_string(), id.to_string()))
-                .copied()
+                .copied())
         }
-        fn set(&self, project: &str, identity_id: &str, role: Role) -> std::io::Result<()> {
+        fn set(
+            &self,
+            project: &str,
+            identity_id: &str,
+            role: Role,
+        ) -> crate::auth_store::AccessStoreResult<()> {
             self.roles
                 .lock()
                 .unwrap()
                 .insert((project.to_string(), identity_id.to_string()), role);
             Ok(())
         }
-        fn remove(&self, project: &str, identity_id: &str) -> std::io::Result<()> {
+        fn remove(
+            &self,
+            project: &str,
+            identity_id: &str,
+        ) -> crate::auth_store::AccessStoreResult<()> {
             self.roles
                 .lock()
                 .unwrap()
                 .remove(&(project.to_string(), identity_id.to_string()));
             Ok(())
         }
-        fn list_project(&self, project: &str) -> Vec<(String, Role)> {
-            self.roles
+        fn list_project(
+            &self,
+            project: &str,
+        ) -> crate::auth_store::AccessStoreResult<Vec<(String, Role)>> {
+            Ok(self
+                .roles
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|((p, _), _)| p == project)
                 .map(|((_, id), r)| (id.clone(), *r))
-                .collect()
+                .collect())
         }
     }
 
@@ -181,18 +213,55 @@ mod tests {
     }
 
     impl ProjectStore for MemProjectStore {
-        fn get(&self, project: &str) -> Option<ProjectMeta> {
-            self.projects.lock().unwrap().get(project).cloned()
+        fn get(&self, project: &str) -> crate::auth_store::AccessStoreResult<Option<ProjectMeta>> {
+            Ok(self.projects.lock().unwrap().get(project).cloned())
         }
-        fn set(&self, meta: ProjectMeta) -> std::io::Result<()> {
+        fn create_with_owner(
+            &self,
+            mut meta: ProjectMeta,
+            _owner_id: &str,
+        ) -> crate::auth_store::AccessStoreResult<ProjectMeta> {
+            meta.etag = "v1".to_string();
+            self.set(meta.clone())?;
+            Ok(meta)
+        }
+        fn set(&self, mut meta: ProjectMeta) -> crate::auth_store::AccessStoreResult<()> {
+            if meta.etag.is_empty() {
+                meta.etag = "v1".to_string();
+            }
             self.projects
                 .lock()
                 .unwrap()
                 .insert(meta.name.clone(), meta);
             Ok(())
         }
-        fn list(&self) -> Vec<ProjectMeta> {
-            self.projects.lock().unwrap().values().cloned().collect()
+        fn replace(
+            &self,
+            expected_etag: &str,
+            mut meta: ProjectMeta,
+        ) -> crate::auth_store::AccessStoreResult<ProjectMeta> {
+            let mut projects = self.projects.lock().unwrap();
+            let current = projects
+                .get(&meta.name)
+                .ok_or_else(|| crate::auth_store::AccessStoreError::NotFound(meta.name.clone()))?;
+            if current.etag != expected_etag {
+                return Err(crate::auth_store::AccessStoreError::EtagMismatch {
+                    name: meta.name,
+                    expected: expected_etag.to_string(),
+                    current: current.etag.clone(),
+                });
+            }
+            let version = current
+                .etag
+                .strip_prefix('v')
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("test project etag must be versioned");
+            meta.etag = format!("v{}", version + 1);
+            projects.insert(meta.name.clone(), meta.clone());
+            Ok(meta)
+        }
+        fn list(&self) -> crate::auth_store::AccessStoreResult<Vec<ProjectMeta>> {
+            Ok(self.projects.lock().unwrap().values().cloned().collect())
         }
     }
 
@@ -202,11 +271,7 @@ mod tests {
         let roles: Arc<MemRoleStore> = Arc::new(MemRoleStore::default());
         let projects: Arc<MemProjectStore> = Arc::new(MemProjectStore::default());
         projects
-            .set(ProjectMeta {
-                name: "acme".into(),
-                visibility,
-                creator: "alice".into(),
-            })
+            .set(ProjectMeta::new("acme", visibility, "alice", 1_000))
             .unwrap();
         let authz = RoleBasedAuthz::new(roles.clone(), projects.clone());
         (authz, roles, projects)

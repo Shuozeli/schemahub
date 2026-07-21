@@ -1,19 +1,15 @@
-FROM rust:1-bookworm
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends libprotobuf-dev protobuf-compiler \
-  && rm -rf /var/lib/apt/lists/*
+FROM rust:1.95.0-bookworm
 
 WORKDIR /workspace/shuozeli/codegen/schemahub
 
 # The build context is created by run_e2e.sh and contains:
 #   shuozeli/codegen/schemahub
-#   shuozeli/compilers/protobuf-rs
-#   shuozeli/compilers/flatbuffers-rs
-# This mirrors the local path dependencies in Cargo.toml.
-COPY shuozeli /workspace/shuozeli
+# Compiler crates resolve from immutable Git revisions in Cargo.lock, so no
+# sibling repository source is present in the context.
+COPY shuozeli/codegen/schemahub /workspace/shuozeli/codegen/schemahub
 
-RUN cargo build --locked -p schemahub-server -p schemahub-cli
+RUN CARGO_INCREMENTAL=0 cargo build --release --locked \
+  -p schemahub-server -p schemahub-cli
 
-ENV PATH="/workspace/shuozeli/codegen/schemahub/target/debug:${PATH}"
+ENV PATH="/workspace/shuozeli/codegen/schemahub/target/release:${PATH}"
 WORKDIR /work

@@ -4,8 +4,9 @@
 //! The op-heads store holds the current head(s) of the operation graph — the
 //! durable pointer that makes `undo`/`op restore` and reload-at-head work across
 //! `Jj` instances. We keep it in the per-repo ref table (`set_ref`/`get_ref`),
-//! newline-joined hex ids. The lock is a no-op (single-writer embedded use); the
-//! design (§4.4) follows jj's normal concurrency model.
+//! newline-joined hex ids. The jj callback lock is a no-op because
+//! [`Jj`](crate::Jj) holds the backend's repository publication guard across
+//! load, final-tree validation, and `Transaction::commit`.
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use jj_lib::op_store::OperationId;
 use crate::object_db::ObjectDb;
 
 /// Ref name under which the newline-joined op-head ids are stored.
-const OP_HEADS_REF: &str = "op_heads";
+pub(crate) const OP_HEADS_REF: &str = "op_heads";
 
 #[derive(Debug)]
 pub struct DbOpHeadsStore {

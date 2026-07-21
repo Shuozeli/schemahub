@@ -54,6 +54,13 @@ body {
   gap: 12px;
 }
 
+.conflictGrid {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) minmax(340px, 0.8fr);
+  gap: 12px;
+  align-items: start;
+}
+
 .drawerLikePanel {
   border: 1px solid #d9dee8;
   border-radius: 8px;
@@ -71,8 +78,8 @@ body {
 @media (max-width: 1100px) {
   .metricStrip,
   .splitGrid,
-  .compareGrid {
+  .compareGrid,
+  .conflictGrid {
     grid-template-columns: 1fr;
   }
 }
-

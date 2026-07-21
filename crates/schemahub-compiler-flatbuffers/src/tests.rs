@@ -2,14 +2,14 @@
 //! print→parse), diff, compatibility (one per rule row), mutations, conflicts,
 //! and codegen. Arrange-Act-Assert throughout.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemahub_types::{
     CompatibilityDirection, CompatibilityRules, Compiler, ConflictSides, DeclBlob, MetaBlob,
     Mutation, SchemaClosure, SchemaObjects, SchemaPath,
 };
 
-use crate::blob::{decode_decl, DeclPayload};
+use crate::blob::{decode_decl, decode_meta, DeclPayload};
 use crate::mutations::FbsOp;
 use crate::FlatBuffersCompiler;
 
@@ -269,7 +269,7 @@ fn imports_lists_includes() {
     let objects = parse_to_objects(SAMPLE);
 
     // Act
-    let imports = c.imports(&objects.meta).unwrap();
+    let imports = c.imports(&objects).unwrap();
 
     // Assert
     assert_eq!(imports.len(), 1);
@@ -288,6 +288,23 @@ fn type_refs_reports_user_types() {
 
     // Assert: Monster references Color (and not the scalar fields).
     assert!(names.contains(&"Color"), "expected Color in {names:?}");
+}
+
+#[test]
+fn field_type_ref_selects_the_requested_table_field() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects(SAMPLE);
+
+    // Act
+    let reference = c
+        .field_type_ref(objects.decls.get("Monster").unwrap(), "color")
+        .expect("read field type")
+        .expect("color has a named type");
+
+    // Assert
+    assert_eq!(reference.name, "Color");
+    assert!(reference.import.is_none());
 }
 
 #[test]
@@ -630,15 +647,49 @@ fn mutation_update_import_changes_meta() {
             &objects,
             &mutation(&FbsOp::UpdateImport {
                 import_path: "dep.fbs".to_string(),
+                resolved_commit: "abc123".to_string(),
                 remove: false,
             }),
         )
         .expect("update import");
 
     // Assert
-    let meta = effect.meta.expect("meta changed");
-    let imports = c.imports(&meta).unwrap();
-    assert!(imports.iter().any(|i| i.path == "dep.fbs"));
+    let mut updated = objects.clone();
+    updated.meta = effect.meta.expect("meta changed");
+    let imports = c.imports(&updated).unwrap();
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].path, "dep.fbs");
+    assert_eq!(imports[0].resolved_commit, "abc123");
+}
+
+#[test]
+fn mutation_import_add_then_remove_has_no_dependency() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects("table T { a: int; }");
+    let ops = [
+        mutation(&FbsOp::UpdateImport {
+            import_path: "dep.fbs".to_string(),
+            resolved_commit: "abc123".to_string(),
+            remove: false,
+        }),
+        mutation(&FbsOp::UpdateImport {
+            import_path: "dep.fbs".to_string(),
+            resolved_commit: String::new(),
+            remove: true,
+        }),
+    ];
+
+    // Act
+    let effect = c
+        .apply_mutations(&objects, &ops)
+        .expect("apply import transaction");
+
+    // Assert
+    let mut updated = objects.clone();
+    updated.meta = effect.meta.expect("updated meta");
+    let imports = c.imports(&updated).expect("read imports");
+    assert!(imports.is_empty());
 }
 
 #[test]
@@ -749,6 +800,42 @@ fn generate_code_rust_for_simple_table() {
         Ok(code) => assert!(!code.is_empty(), "generated rust is empty"),
         Err(e) => panic!("simple table codegen should succeed, got: {e}"),
     }
+}
+
+#[test]
+fn generate_code_uses_explicit_root_in_multi_file_closure() {
+    // Arrange: the dependency sorts after the requested root and both files
+    // define root_type, so lexical-order inference would select the wrong root.
+    let c = compiler();
+    let root_path = SchemaPath::new("p", "r", "a_root.fbs");
+    let mut closure = SchemaClosure::with_root(root_path.clone());
+    closure.entries.insert(
+        root_path,
+        parse_to_objects("table Envelope { id: string; } root_type Envelope;"),
+    );
+    closure.entries.insert(
+        SchemaPath::new("p", "r", "z_dependency.fbs"),
+        parse_to_objects("table Dependency { id: string; } root_type Dependency;"),
+    );
+
+    // Act.
+    let code = c
+        .generate_code(
+            &closure,
+            schemahub_types::Language::Rust,
+            &schemahub_types::CodegenOptions::default(),
+        )
+        .expect("multi-file codegen");
+
+    // Assert.
+    assert!(
+        code.contains("root_as_envelope"),
+        "requested root helper missing:\n{code}"
+    );
+    assert!(
+        !code.contains("root_as_dependency"),
+        "dependency root should not replace requested root:\n{code}"
+    );
 }
 
 #[test]
@@ -1254,103 +1341,267 @@ fn mutation_create_rename_delete_enum() {
 }
 
 #[test]
-fn mutation_create_rename_delete_union_with_members() {
-    // Arrange: unions are Enums with `is_union`; members are added via
-    // AddEnumValue (there is no dedicated AddUnionMember op).
+fn mutation_create_union_with_members_records_typed_discriminators() {
+    // Arrange
     let c = compiler();
-    let mut objects = SchemaObjects::new(MetaBlob::default());
+    let objects = parse_to_objects("table Weapon { damage: int; }");
+    let op = mutation(&FbsOp::CreateUnionWithMembers {
+        name: "Equipment".to_string(),
+        member_types: vec!["Weapon".to_string()],
+        doc_comment: None,
+    });
 
-    // Act: create union
-    let created = c
-        .apply_mutation(
-            &objects,
-            &mutation(&FbsOp::CreateUnion {
-                name: "U".to_string(),
-                doc_comment: None,
-            }),
-        )
-        .expect("create union");
-    objects
-        .decls
-        .insert("U".to_string(), created.upserts[0].1.clone());
-
-    // Assert: a fresh union carries the synthetic NONE sentinel and is_union.
-    let DeclPayload::Enum(u0) = decode_decl(&created.upserts[0].1).unwrap() else {
-        panic!("not enum")
-    };
-    assert!(u0.is_union, "created decl should be a union");
-    assert_eq!(u0.values.len(), 1, "union starts with NONE only");
-
-    // Act: add a member, then remove it.
-    let added = c
-        .apply_mutation(
-            &objects,
-            &mutation(&FbsOp::AddEnumValue {
-                enum_name: "U".to_string(),
-                value_name: "Weapon".to_string(),
-                value: 1,
-            }),
-        )
-        .expect("add union member");
-    objects
-        .decls
-        .insert("U".to_string(), added.upserts[0].1.clone());
-    let DeclPayload::Enum(u1) = decode_decl(&added.upserts[0].1).unwrap() else {
-        panic!("not enum")
-    };
-    assert!(u1
-        .values
-        .iter()
-        .any(|v| v.name.as_deref() == Some("Weapon")));
-
-    let removed = c
-        .apply_mutation(
-            &objects,
-            &mutation(&FbsOp::RemoveEnumValue {
-                enum_name: "U".to_string(),
-                value_name: "Weapon".to_string(),
-            }),
-        )
-        .expect("remove union member");
-    objects
-        .decls
-        .insert("U".to_string(), removed.upserts[0].1.clone());
-
-    // Act: rename then delete the union.
-    let renamed = c
-        .apply_mutation(
-            &objects,
-            &mutation(&FbsOp::RenameUnion {
-                old_name: "U".to_string(),
-                new_name: "V".to_string(),
-            }),
-        )
-        .expect("rename union");
-    objects.decls.remove("U");
-    objects
-        .decls
-        .insert("V".to_string(), renamed.upserts[0].1.clone());
-    let deleted = c
-        .apply_mutation(
-            &objects,
-            &mutation(&FbsOp::DeleteUnion {
-                name: "V".to_string(),
-            }),
-        )
-        .expect("delete union");
+    // Act
+    let effect = c.apply_mutation(&objects, &op).expect("create union");
 
     // Assert
-    let DeclPayload::Enum(u2) = decode_decl(&removed.upserts[0].1).unwrap() else {
-        panic!("not enum")
+    let (_, blob) = effect
+        .upserts
+        .iter()
+        .find(|(name, _)| name == "Equipment")
+        .expect("union upsert");
+    let DeclPayload::Enum(union) = decode_decl(blob).expect("decode union") else {
+        panic!("expected enum payload")
     };
-    assert!(
-        !u2.values
-            .iter()
-            .any(|v| v.name.as_deref() == Some("Weapon")),
-        "member should be removed"
+    assert!(union.is_union);
+    assert_eq!(union.values.len(), 2);
+    let member = &union.values[1];
+    assert_eq!(member.name.as_deref(), Some("Weapon"));
+    assert_eq!(member.value, Some(1));
+    assert_eq!(
+        member
+            .union_type
+            .as_ref()
+            .and_then(|member_type| member_type.unresolved_name.as_deref()),
+        Some("Weapon")
     );
-    assert!(renamed.removes.contains(&"U".to_string()));
-    assert!(deleted.removes.contains(&"V".to_string()));
+}
+
+#[test]
+fn mutation_add_union_member_uses_next_discriminator() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects("table A { id: int; }\ntable B { id: int; }\nunion U { A = 4 }");
+    let op = mutation(&FbsOp::AddUnionMember {
+        union_name: "U".to_string(),
+        member_type: "B".to_string(),
+    });
+
+    // Act
+    let effect = c.apply_mutation(&objects, &op).expect("add union member");
+
+    // Assert
+    let DeclPayload::Enum(union) = decode_decl(&effect.upserts[0].1).expect("decode union") else {
+        panic!("expected union")
+    };
+    let member = union
+        .values
+        .iter()
+        .find(|value| value.name.as_deref() == Some("B"))
+        .expect("B member");
+    assert_eq!(member.value, Some(5));
+    assert_eq!(
+        member
+            .union_type
+            .as_ref()
+            .and_then(|member_type| member_type.unresolved_name.as_deref()),
+        Some("B")
+    );
+}
+
+#[test]
+fn mutation_remove_union_member_preserves_other_discriminators() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects(
+        "table A { id: int; }\ntable B { id: int; }\ntable C { id: int; }\nunion U { A, B, C }",
+    );
+    let op = mutation(&FbsOp::RemoveUnionMember {
+        union_name: "U".to_string(),
+        member_type: "B".to_string(),
+    });
+
+    // Act
+    let effect = c
+        .apply_mutation(&objects, &op)
+        .expect("remove union member");
+
+    // Assert
+    let DeclPayload::Enum(union) = decode_decl(&effect.upserts[0].1).expect("decode union") else {
+        panic!("expected union")
+    };
+    assert!(!union
+        .values
+        .iter()
+        .any(|value| value.name.as_deref() == Some("B")));
+    assert_eq!(
+        union
+            .values
+            .iter()
+            .find(|value| value.name.as_deref() == Some("C"))
+            .and_then(|value| value.value),
+        Some(3)
+    );
+}
+
+#[test]
+fn mutation_rename_table_propagates_all_same_file_references() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects(
+        "table Item { id: int; }\ntable Box { item: Item; }\nunion Entity { Item }\nrpc_service Catalog { Get(Item): Item; }\nroot_type Item;",
+    );
+    let op = mutation(&FbsOp::RenameTable {
+        old_name: "Item".to_string(),
+        new_name: "Product".to_string(),
+    });
+
+    // Act
+    let effect = c.apply_mutation(&objects, &op).expect("rename table");
+
+    // Assert
+    let upserts: BTreeMap<_, _> = effect.upserts.iter().cloned().collect();
+    let DeclPayload::Object(container) =
+        decode_decl(upserts.get("Box").expect("Box upsert")).expect("decode Box")
+    else {
+        panic!("expected Box table")
+    };
+    assert_eq!(
+        container.fields[0]
+            .type_
+            .as_ref()
+            .and_then(|field_type| field_type.unresolved_name.as_deref()),
+        Some("Product")
+    );
+    let DeclPayload::Enum(union) =
+        decode_decl(upserts.get("Entity").expect("Entity upsert")).expect("decode Entity")
+    else {
+        panic!("expected Entity union")
+    };
+    assert!(union
+        .values
+        .iter()
+        .any(|value| value.name.as_deref() == Some("Product")));
+    let DeclPayload::Service(service) =
+        decode_decl(upserts.get("Catalog").expect("Catalog upsert")).expect("decode Catalog")
+    else {
+        panic!("expected Catalog service")
+    };
+    assert_eq!(
+        service.calls[0]
+            .request
+            .as_ref()
+            .and_then(|request| request.name.as_deref()),
+        Some("Product")
+    );
+    assert!(effect.removes.contains(&"Item".to_string()));
+    assert!(upserts.contains_key("Product"));
+    let meta = decode_meta(effect.meta.as_ref().expect("meta upsert")).expect("decode meta");
+    assert_eq!(meta.root_type.as_deref(), Some("Product"));
+    assert!(meta.decl_order.iter().any(|name| name == "Product"));
+    assert!(!meta.decl_order.iter().any(|name| name == "Item"));
+}
+
+#[test]
+fn mutation_delete_table_rejects_references() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects(
+        "table Item { id: int; }\ntable Box { item: Item; }\nunion Entity { Item }",
+    );
+    let op = mutation(&FbsOp::DeleteTable {
+        name: "Item".to_string(),
+    });
+
+    // Act
+    let result = c.apply_mutation(&objects, &op);
+
+    // Assert
+    let error = result.expect_err("referenced table deletion must fail");
+    assert!(
+        error.to_string().contains("referenced by Box, Entity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn mutation_batch_checks_table_references_on_final_state() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects("table Item { id: int; }\nunion Entity { Item }");
+    let ops = [
+        mutation(&FbsOp::DeleteTable {
+            name: "Item".to_string(),
+        }),
+        mutation(&FbsOp::DeleteUnion {
+            name: "Entity".to_string(),
+        }),
+    ];
+
+    // Act
+    let effect = c
+        .apply_mutations(&objects, &ops)
+        .expect("final state has no dangling reference");
+
+    // Assert
+    assert_eq!(
+        effect.removes.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from(["Entity".to_string(), "Item".to_string()])
+    );
+}
+
+#[test]
+fn mutation_batch_delete_then_recreate_keeps_the_final_declaration() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects("table Item { id: int; }");
+    let ops = [
+        mutation(&FbsOp::DeleteTable {
+            name: "Item".to_string(),
+        }),
+        mutation(&FbsOp::CreateTable {
+            name: "Item".to_string(),
+            doc_comment: Some("replacement".to_string()),
+        }),
+    ];
+
+    // Act
+    let effect = c
+        .apply_mutations(&objects, &ops)
+        .expect("the final declaration exists");
+
+    // Assert
+    assert!(effect.upserts.iter().any(|(name, _)| name == "Item"));
+    assert!(!effect.removes.iter().any(|name| name == "Item"));
+}
+
+#[test]
+fn mutation_batch_remove_then_readd_enum_value_satisfies_final_references() {
+    // Arrange
+    let c = compiler();
+    let objects = parse_to_objects(
+        "enum State : byte { Unknown = 0, Ready = 1 }\n\
+         table Item { state: State = Ready; }",
+    );
+    let ops = [
+        mutation(&FbsOp::RemoveEnumValue {
+            enum_name: "State".to_string(),
+            value_name: "Ready".to_string(),
+        }),
+        mutation(&FbsOp::AddEnumValue {
+            enum_name: "State".to_string(),
+            value_name: "Ready".to_string(),
+            value: 1,
+        }),
+    ];
+
+    // Act
+    let effect = c
+        .apply_mutations(&objects, &ops)
+        .expect("the final enum value satisfies the field default");
+
+    // Assert
+    assert!(effect.upserts.iter().any(|(name, _)| name == "State"));
 }
 
 #[test]

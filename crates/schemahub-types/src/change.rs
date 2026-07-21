@@ -6,7 +6,7 @@ use bytes::Bytes;
 ///
 /// The VCS layer uses declaration names for merge/conflict detection; the
 /// `detail` bytes are forwarded to clients opaquely for display.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeclChange {
     DeclarationAdded {
         name: String,

@@ -64,12 +64,21 @@ pub fn generate_code(
     let mut combined = Schema::default();
     let mut paths: Vec<_> = closure.entries.keys().cloned().collect();
     paths.sort();
+    let root_path = match closure.root.as_ref() {
+        Some(root) => root,
+        None if paths.len() == 1 => &paths[0],
+        None => {
+            return Err(CodegenError::Other(
+                "multi-file FlatBuffers codegen requires an explicit root schema".to_string(),
+            ))
+        }
+    };
     let mut root_type = None;
     for path in &paths {
         let schema = &closure.entries[path];
         let (objects, enums, services, meta) =
             reassemble(schema).map_err(|e| CodegenError::MalformedBlob(e.to_string()))?;
-        if meta.root_type.is_some() {
+        if path == root_path && meta.root_type.is_some() {
             root_type = meta
                 .root_type
                 .map(|name| (name, meta.file_ident, meta.file_ext));

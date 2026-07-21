@@ -1021,7 +1021,7 @@ async fn follow_type_resolves_imported_message() {
     // it from User.addr.
     let url = start_server().await;
     let mut c = clients(&url).await;
-    create_schema(
+    let base = create_schema(
         &mut c.schema,
         "acme",
         "core",
@@ -1032,7 +1032,7 @@ async fn follow_type_resolves_imported_message() {
         "create-base",
     )
     .await;
-    create_schema(
+    let user = create_schema(
         &mut c.schema,
         "acme",
         "core",
@@ -1059,15 +1059,24 @@ async fn follow_type_resolves_imported_message() {
         .expect("follow_type")
         .into_inner();
 
-    // Assert: it resolves to the imported base.proto (in the same project/repo).
-    // NOTE: the server's FollowType returns only the resolved location; summary /
-    // detail are intentionally empty in v2, so we assert on the resolved path.
+    // Assert: it resolves the requested field—not merely the first import—to
+    // the declaration at the exact source snapshot.
     assert_eq!(
         resp.resolved_schema_path, "base.proto",
         "should resolve to the import"
     );
     assert_eq!(resp.resolved_project, "acme");
     assert_eq!(resp.resolved_repo, "core");
+    assert_eq!(resp.source_commit, user.new_commit);
+    assert_eq!(resp.resolved_commit, resp.source_commit);
+    assert!(!resp.pinned);
+    assert_eq!(resp.import_path, "base.proto");
+    assert_eq!(
+        resp.summary.as_ref().map(|summary| summary.name.as_str()),
+        Some("Address")
+    );
+    assert!(!resp.detail.is_empty());
+    assert_ne!(resp.resolved_commit, base.new_commit);
 
     // And base.proto really does define Address (sanity check on the target).
     let base_decls = list_decl_names(
@@ -1145,7 +1154,7 @@ async fn protobuf_cloud_build_closure_and_tagged_descriptors_are_stable() {
     // Assert.
     assert_eq!(
         direct_paths,
-        vec!["acme/core/user/profile.proto".to_string()],
+        vec!["user/profile.proto".to_string()],
         "direct dependency set changed"
     );
 
@@ -1167,11 +1176,11 @@ async fn protobuf_cloud_build_closure_and_tagged_descriptors_are_stable() {
 
     // Assert.
     assert!(
-        transitive_paths.contains(&"acme/core/user/profile.proto".to_string()),
+        transitive_paths.contains(&"user/profile.proto".to_string()),
         "missing direct import in transitive set: {transitive_paths:?}"
     );
     assert!(
-        transitive_paths.contains(&"acme/core/common/types.proto".to_string()),
+        transitive_paths.contains(&"common/types.proto".to_string()),
         "missing nested import in transitive set: {transitive_paths:?}"
     );
 
@@ -1359,16 +1368,16 @@ async fn flatbuffers_cloud_build_include_closure_is_in_descriptor_bundle() {
     let direct_paths: Vec<String> = direct.into_iter().map(|d| d.imported_schema).collect();
     assert_eq!(
         direct_paths,
-        vec!["acme/core/supplier/supplier.fbs".to_string()],
+        vec!["supplier/supplier.fbs".to_string()],
         "direct fbs dependency set changed"
     );
     let transitive_paths: Vec<String> = transitive.into_iter().map(|d| d.imported_schema).collect();
     assert!(
-        transitive_paths.contains(&"acme/core/supplier/supplier.fbs".to_string()),
+        transitive_paths.contains(&"supplier/supplier.fbs".to_string()),
         "missing direct fbs import in transitive set: {transitive_paths:?}"
     );
     assert!(
-        transitive_paths.contains(&"acme/core/common/money.fbs".to_string()),
+        transitive_paths.contains(&"common/money.fbs".to_string()),
         "missing nested fbs import in transitive set: {transitive_paths:?}"
     );
 
@@ -1587,7 +1596,7 @@ root_type Item;
 }
 
 #[tokio::test]
-async fn flatbuffers_union_member_mutation_is_explicitly_unimplemented_at_server_boundary() {
+async fn flatbuffers_union_member_mutation_round_trips_through_server() {
     // Arrange.
     let url = start_server().await;
     let mut c = clients(&url).await;
@@ -1620,13 +1629,13 @@ root_type Item;
     .await;
 
     // Act.
-    let err = apply(
+    apply(
         &mut c.schema,
         "warehouse",
         "catalog",
         "main",
         "fbs-union-add-member",
-        false,
+        true,
         fbs_op(
             "entity.fbs",
             pb::flat_buffers_mutation::Operation::AddUnionMember(pb::FbsAddUnionMember {
@@ -1636,13 +1645,20 @@ root_type Item;
         ),
     )
     .await
-    .expect_err("union member mutation should be unimplemented");
+    .expect("union member mutation");
+    let pulled = pull_source(
+        &mut c.explore,
+        "warehouse",
+        "catalog",
+        "entity.fbs",
+        vref_branch("main"),
+    )
+    .await;
 
     // Assert.
-    assert_eq!(err.code(), tonic::Code::Unimplemented, "got {err:?}");
     assert!(
-        err.message().contains("union member add/remove"),
-        "unexpected unimplemented message: {err:?}"
+        pulled.contains("Bundle"),
+        "added union member missing:\n{pulled}"
     );
 }
 

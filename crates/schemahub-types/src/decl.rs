@@ -1,5 +1,7 @@
 use bytes::Bytes;
 
+use crate::Import;
+
 /// The kind of a top-level declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeclKind {
@@ -53,10 +55,23 @@ impl DeclDetail {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeRef {
     pub name: String,
+    /// Present when the compiler can identify an external schema import for
+    /// this reference directly (for example an OpenAPI external `$ref`).
+    pub import: Option<Import>,
 }
 
 impl TypeRef {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            import: None,
+        }
+    }
+
+    pub fn external(name: impl Into<String>, import: Import) -> Self {
+        Self {
+            name: name.into(),
+            import: Some(import),
+        }
     }
 }

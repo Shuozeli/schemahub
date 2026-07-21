@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use common::*;
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_server::config::{AuthConfig, Config, ProjectSection, TokenIdentity};
+use schemahub_types::IdentityKind;
 use tonic::metadata::MetadataValue;
 use tonic::Request;
 
@@ -37,6 +38,8 @@ fn config_with_auth() -> Config {
                     TokenIdentity {
                         id: "alice".to_string(),
                         display: Some("Alice".to_string()),
+                        kind: IdentityKind::Human,
+                        delegated_by: None,
                     },
                 ),
                 (
@@ -44,6 +47,8 @@ fn config_with_auth() -> Config {
                     TokenIdentity {
                         id: "maeve".to_string(),
                         display: None,
+                        kind: IdentityKind::Human,
+                        delegated_by: None,
                     },
                 ),
                 (
@@ -51,6 +56,8 @@ fn config_with_auth() -> Config {
                     TokenIdentity {
                         id: "wendy".to_string(),
                         display: None,
+                        kind: IdentityKind::Human,
+                        delegated_by: None,
                     },
                 ),
                 (
@@ -58,6 +65,8 @@ fn config_with_auth() -> Config {
                     TokenIdentity {
                         id: "ron".to_string(),
                         display: None,
+                        kind: IdentityKind::Human,
+                        delegated_by: None,
                     },
                 ),
                 (
@@ -65,9 +74,12 @@ fn config_with_auth() -> Config {
                     TokenIdentity {
                         id: "stranger".to_string(),
                         display: None,
+                        kind: IdentityKind::Human,
+                        delegated_by: None,
                     },
                 ),
             ]),
+            jwt: None,
         },
         ..Default::default()
     }
@@ -418,6 +430,65 @@ async fn case4_force_on_protected_branch_requires_maintainer() {
     );
 }
 
+#[tokio::test]
+async fn whole_source_force_requires_maintainer() {
+    // Arrange
+    let cfg = with_project(config_with_auth(), "acme", "private", "alice");
+    let url = start_server_with(cfg).await;
+    let mut clients = clients(&url).await;
+    clients
+        .project
+        .add_member(with_token(
+            Request::new(pb::AddMemberRequest {
+                project: "acme".into(),
+                identity: "wendy".into(),
+                role: pb::Role::Writer as i32,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("add writer");
+    clients
+        .schema
+        .create_schema(with_token(
+            Request::new(pb::CreateSchemaRequest {
+                project: "acme".into(),
+                repo: "core".into(),
+                branch: "main".into(),
+                schema_name: "ping.proto".into(),
+                format: pb::SchemaFormat::Protobuf as i32,
+                source: "syntax = \"proto3\"; message Ping { string value = 1; }".into(),
+                base_revision: String::new(),
+                idempotency_key: "lifecycle-seed".into(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("seed schema");
+
+    // Act
+    let error = clients
+        .schema
+        .update_schema(with_token(
+            Request::new(pb::UpdateSchemaRequest {
+                project: "acme".into(),
+                repo: "core".into(),
+                branch: "main".into(),
+                schema_name: "ping.proto".into(),
+                source: "syntax = \"proto3\"; message Ping {}".into(),
+                base_revision: String::new(),
+                idempotency_key: "writer-force-source".into(),
+                force: true,
+            }),
+            "writer-token",
+        ))
+        .await
+        .expect_err("Writer must not force a whole-source update");
+
+    // Assert
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
+}
+
 // ── Case 5: Owner-only member management; zero-Owner guard ───────────────────
 
 #[tokio::test]
@@ -580,6 +651,7 @@ async fn case7_list_projects_filters_by_visibility_and_membership() {
         .project
         .list_projects(pb::ListProjectsRequest {
             name_prefix: String::new(),
+            ..Default::default()
         })
         .await
         .expect("anonymous list")
@@ -595,6 +667,7 @@ async fn case7_list_projects_filters_by_visibility_and_membership() {
         .list_projects(with_token(
             Request::new(pb::ListProjectsRequest {
                 name_prefix: String::new(),
+                ..Default::default()
             }),
             "reader-token",
         ))
@@ -616,6 +689,7 @@ async fn case7_list_projects_filters_by_visibility_and_membership() {
         .list_projects(with_token(
             Request::new(pb::ListProjectsRequest {
                 name_prefix: String::new(),
+                ..Default::default()
             }),
             "owner-token",
         ))

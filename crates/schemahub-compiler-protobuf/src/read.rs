@@ -55,9 +55,10 @@ pub fn imports(meta: &MetaBlob) -> Result<Vec<Import>, ReadError> {
     let m = decode_meta(meta.as_bytes()).map_err(|e| ReadError::MalformedBlob(e.to_string()))?;
     Ok(m.dependency
         .iter()
-        .map(|path| Import {
+        .enumerate()
+        .map(|(index, path)| Import {
             path: path.clone(),
-            resolved_commit: String::new(),
+            resolved_commit: m.dependency_commit.get(index).cloned().unwrap_or_default(),
             decl_name: String::new(),
         })
         .collect())
@@ -84,6 +85,47 @@ pub fn type_refs(blob: &DeclBlob) -> Result<Vec<TypeRef>, ReadError> {
     refs.sort();
     refs.dedup();
     Ok(refs.into_iter().map(TypeRef::new).collect())
+}
+
+/// Resolve the named type used by one direct message field. Scalar fields
+/// return `None`; map fields follow the synthetic entry's value type rather
+/// than exposing the compiler-generated entry declaration.
+pub fn field_type_ref(blob: &DeclBlob, field_name: &str) -> Result<Option<TypeRef>, ReadError> {
+    let payload =
+        decode_decl(blob.as_bytes()).map_err(|e| ReadError::MalformedBlob(e.to_string()))?;
+    let DeclPayload::Message(message) = payload else {
+        return Err(ReadError::FieldNotFound(field_name.to_string()));
+    };
+    let field = message
+        .field
+        .iter()
+        .find(|field| field.name.as_deref() == Some(field_name))
+        .ok_or_else(|| ReadError::FieldNotFound(field_name.to_string()))?;
+
+    let Some(type_name) = field.type_name.as_deref().filter(|name| !name.is_empty()) else {
+        return Ok(None);
+    };
+    let short_name = short(type_name);
+    if let Some(map_entry) = message.nested_type.iter().find(|nested| {
+        nested.name.as_deref() == Some(short_name.as_str())
+            && nested
+                .options
+                .as_ref()
+                .and_then(|options| options.map_entry)
+                .unwrap_or(false)
+    }) {
+        let value = map_entry
+            .field
+            .iter()
+            .find(|field| field.name.as_deref() == Some("value"));
+        return Ok(value
+            .and_then(|field| field.type_name.as_deref())
+            .filter(|name| !name.is_empty())
+            .map(short)
+            .map(TypeRef::new));
+    }
+
+    Ok(Some(TypeRef::new(short_name)))
 }
 
 fn collect_message_refs(m: &DescriptorProto, out: &mut Vec<String>) {

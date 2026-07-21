@@ -3,8 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SHUOZELI_ROOT="$(cd "$REPO_ROOT/../.." && pwd)"
-COMPILERS_ROOT="$SHUOZELI_ROOT/compilers"
+FLATBUFFERS_RS_REPOSITORY="https://github.com/Shuozeli/flatbuffers-rs.git"
+FLATBUFFERS_RS_REVISION="$(
+  "$REPO_ROOT/scripts/validate-compiler-lock.sh" flatbuffers --development
+)"
+
+if [[ ! "$FLATBUFFERS_RS_REVISION" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+  echo "Docker e2e requires an immutable FlatBuffers compiler revision" >&2
+  exit 2
+fi
 
 IMAGE="${SCHEMAHUB_DOCKER_E2E_IMAGE:-schemahub-docker-e2e:local}"
 NETWORK="schemahub-e2e-$$"
@@ -34,29 +41,9 @@ copy_tree() {
     -C "$src" -cf - . | tar -C "$dst" -xf -
 }
 
-require_path() {
-  if [[ ! -e "$1" ]]; then
-    echo "missing required path: $1" >&2
-    exit 2
-  fi
-}
-
-require_path "$COMPILERS_ROOT/protobuf-rs/parser/Cargo.toml"
-require_path "$COMPILERS_ROOT/protobuf-rs/schema/Cargo.toml"
-require_path "$COMPILERS_ROOT/protobuf-rs/codegen/Cargo.toml"
-require_path "$COMPILERS_ROOT/flatbuffers-rs/parser/Cargo.toml"
-require_path "$COMPILERS_ROOT/flatbuffers-rs/schema/Cargo.toml"
-require_path "$COMPILERS_ROOT/flatbuffers-rs/codegen/Cargo.toml"
-require_path "$COMPILERS_ROOT/flatbuffers-rs/runtime/Cargo.toml"
-
-mkdir -p \
-  "$CONTEXT_DIR/shuozeli/codegen/schemahub" \
-  "$CONTEXT_DIR/shuozeli/compilers/protobuf-rs" \
-  "$CONTEXT_DIR/shuozeli/compilers/flatbuffers-rs"
+mkdir -p "$CONTEXT_DIR/shuozeli/codegen/schemahub"
 
 copy_tree "$REPO_ROOT" "$CONTEXT_DIR/shuozeli/codegen/schemahub"
-copy_tree "$COMPILERS_ROOT/protobuf-rs" "$CONTEXT_DIR/shuozeli/compilers/protobuf-rs"
-copy_tree "$COMPILERS_ROOT/flatbuffers-rs" "$CONTEXT_DIR/shuozeli/compilers/flatbuffers-rs"
 
 docker build \
   -f "$REPO_ROOT/tests/docker/Dockerfile.e2e" \
@@ -213,7 +200,7 @@ cli codegen preview acme/commerce/build_record.fbs \
 assert_contains "$(cat "$WORK_DIR/generated_fbs.rs")" "__flatc_rs_runtime" "FlatBuffers pluggable-buffer runtime"
 assert_contains "$(cat "$WORK_DIR/generated_fbs.rs")" "root_as_build_record_in" "FlatBuffers pluggable-buffer root helper"
 
-cat >"$WORK_DIR/Cargo.toml" <<'EOF'
+cat >"$WORK_DIR/Cargo.toml" <<EOF
 [package]
 name = "schemahub-docker-generated-flatbuffers-check"
 version = "0.0.0"
@@ -221,7 +208,7 @@ edition = "2021"
 
 [dependencies]
 flatbuffers = "25.12.19"
-flatc-rs-runtime = { path = "/workspace/shuozeli/compilers/flatbuffers-rs/runtime" }
+flatc-rs-runtime = { git = "$FLATBUFFERS_RS_REPOSITORY", rev = "$FLATBUFFERS_RS_REVISION" }
 EOF
 
 cat >"$WORK_DIR/src/lib.rs" <<'EOF'

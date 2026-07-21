@@ -92,6 +92,19 @@ pub enum ObjectDbError {
 
 pub type ObjectDbResult<T> = Result<T, ObjectDbError>;
 
+/// Lifetime token for a backend maintenance lock. Normal mutations hold a
+/// shared token; global GC holds an exclusive token across mark and sweep.
+pub trait ObjectDbLockGuard: std::fmt::Debug {}
+
+#[derive(Debug)]
+struct NoopObjectDbLockGuard;
+
+impl ObjectDbLockGuard for NoopObjectDbLockGuard {}
+
+impl ObjectDbLockGuard for std::sync::RwLockReadGuard<'_, ()> {}
+impl ObjectDbLockGuard for std::sync::RwLockWriteGuard<'_, ()> {}
+impl ObjectDbLockGuard for std::sync::MutexGuard<'_, ()> {}
+
 /// Content-addressed object store + op-log + ref persistence.
 ///
 /// Implementations: [`RedbObjectDb`](crate::redb_db::RedbObjectDb) (embedded
@@ -100,6 +113,30 @@ pub type ObjectDbResult<T> = Result<T, ObjectDbError>;
 /// partitioned per `(project, repo)` (passed as a single `repo` key, e.g.
 /// `"project/repo"`).
 pub trait ObjectDb: std::fmt::Debug + Send + Sync + 'static {
+    /// Acquire the shared side of the global mutation/GC fence. Backends that
+    /// can be opened by multiple processes should override this with a
+    /// distributed lock.
+    fn acquire_mutation_guard(&self) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>> {
+        Ok(Box::new(NoopObjectDbLockGuard))
+    }
+
+    /// Acquire an exclusive publication lock for one repository.
+    ///
+    /// The caller holds this from loading the current JJ operation head through
+    /// final-tree validation and operation-head publication. Durable backends
+    /// must coordinate every process that shares the same database; otherwise
+    /// a read/validate/write sequence can lose an operation head or publish a
+    /// state invalidated by a concurrent writer.
+    fn acquire_publication_guard(
+        &self,
+        repo: &str,
+    ) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>>;
+
+    /// Acquire the exclusive side of the global mutation/GC fence.
+    fn acquire_gc_guard(&self) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>> {
+        Ok(Box::new(NoopObjectDbLockGuard))
+    }
+
     // ── Content-addressed objects ────────────────────────────────────────────
     /// Store `bytes` under its content hash and return the id. Idempotent: a
     /// second put of identical bytes returns the same id and does not duplicate.
@@ -139,10 +176,62 @@ pub trait ObjectDb: std::fmt::Debug + Send + Sync + 'static {
     /// from the operations' parent links).
     fn list_ops(&self, repo: &str) -> ObjectDbResult<Vec<OpId>>;
 
+    /// Every repository key present in the op-log or ref tables. GC uses this
+    /// storage-level inventory because content-addressed objects are global:
+    /// sweeping from only one repository's roots could delete another
+    /// repository's live data.
+    fn list_repo_keys(&self) -> ObjectDbResult<Vec<String>>;
+
     // ── Refs (per repo) ───────────────────────────────────────────────────────
+    /// Create a named ref only when absent. Used to seed a repository's root
+    /// operation head without overwriting a concurrently published head.
+    fn create_ref(&self, repo: &str, name: &str, value: &[u8]) -> ObjectDbResult<bool>;
+
     /// Set a named ref for a repo (used for the operation-head pointer).
     fn set_ref(&self, repo: &str, name: &str, value: &[u8]) -> ObjectDbResult<()>;
 
     /// Get a named ref's value, or `None` if unset.
     fn get_ref(&self, repo: &str, name: &str) -> ObjectDbResult<Option<Vec<u8>>>;
+
+    // ── Mutable resource records ─────────────────────────────────────────────
+    //
+    // JJ objects remain immutable and content-addressed. Control-plane
+    // resources such as ChangeRecord are mutable and need stable keys plus
+    // optimistic compare-and-swap. These methods provide that small durable
+    // seam without teaching the JJ backend about any resource schema.
+
+    /// Insert one stable-keyed resource if absent. Returns `true` when inserted
+    /// and `false` when the `(collection, key)` already exists.
+    fn create_record(&self, collection: &str, key: &str, value: &[u8]) -> ObjectDbResult<bool>;
+
+    /// Atomically insert several stable-keyed resources when every key is
+    /// absent. Returns `false` and writes nothing if any key already exists.
+    /// This is the project + bootstrap-owner transaction seam.
+    fn create_records(&self, records: &[(&str, &str, &[u8])]) -> ObjectDbResult<bool>;
+
+    /// Read one stable-keyed resource inside a database transaction.
+    fn get_record(&self, collection: &str, key: &str) -> ObjectDbResult<Option<Vec<u8>>>;
+
+    /// List all `(key, value)` records in a collection. Ordering is unspecified.
+    fn list_records(&self, collection: &str) -> ObjectDbResult<Vec<(String, Vec<u8>)>>;
+
+    /// Atomically replace a resource only when its current bytes equal
+    /// `expected`. Returns `true` on replacement and `false` on mismatch or
+    /// absence.
+    fn compare_and_swap_record(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &[u8],
+        replacement: &[u8],
+    ) -> ObjectDbResult<bool>;
+
+    /// Atomically delete a resource only when its current bytes equal
+    /// `expected`.
+    fn compare_and_delete_record(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &[u8],
+    ) -> ObjectDbResult<bool>;
 }

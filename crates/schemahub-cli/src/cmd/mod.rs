@@ -1,4 +1,7 @@
+pub mod artifact;
 pub mod branch;
+pub mod capabilities;
+pub mod change;
 pub mod codegen;
 pub mod field;
 pub mod history;

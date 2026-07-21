@@ -129,6 +129,11 @@ pub struct MetaPayload {
     /// are not top-level message/enum/service declarations, so they live in the
     /// file meta rather than a `DeclBlob`.
     pub extension: Vec<FieldDescriptorProto>,
+    /// Immutable schemahub commit pins aligned by index with `dependency`.
+    /// Empty strings mean "follow the importing schema's ref". This field is
+    /// appended to the v1 codec, so older blobs decode with empty pins and
+    /// older readers safely ignore the trailing bytes.
+    pub dependency_commit: Vec<String>,
 }
 
 /// Serialize the file metadata to versioned bytes.
@@ -161,6 +166,7 @@ pub fn encode_meta(meta: &MetaPayload) -> Vec<u8> {
     write_str_vec(&mut w, &meta.enum_order);
     write_str_vec(&mut w, &meta.service_order);
     write_field_vec(&mut w, &meta.extension);
+    write_str_vec(&mut w, &meta.dependency_commit);
     w.into_bytes()
 }
 
@@ -202,6 +208,11 @@ pub fn decode_meta(bytes: &[u8]) -> Result<MetaPayload, BlobError> {
             enum_order: read_str_vec(&mut r)?,
             service_order: read_str_vec(&mut r)?,
             extension: read_field_vec(&mut r)?,
+            dependency_commit: if r.is_at_end() {
+                Vec::new()
+            } else {
+                read_str_vec(&mut r)?
+            },
         })
     })()
     .map_err(|e| BlobError::Malformed(e.to_string()))?;
@@ -302,6 +313,7 @@ mod tests {
             }),
             syntax: Some("proto3".into()),
             message_order: vec!["M".into()],
+            dependency_commit: vec!["abc123".into()],
             ..Default::default()
         };
 

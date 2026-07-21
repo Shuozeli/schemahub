@@ -2,11 +2,13 @@
 //! (crate-structure.md §6). Same content-addressing semantics as the redb impl.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use sha2::{Digest, Sha256};
 
-use crate::object_db::{ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKind, OpId};
+use crate::object_db::{
+    ObjectDb, ObjectDbError, ObjectDbLockGuard, ObjectDbResult, ObjectId, ObjectKind, OpId,
+};
 
 fn hash(kind: ObjectKind, bytes: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -23,12 +25,16 @@ struct Inner {
     ops: HashMap<String, HashMap<Vec<u8>, Vec<u8>>>,
     /// (repo, name) → ref bytes
     refs: HashMap<(String, String), Vec<u8>>,
+    /// (collection, stable resource key) → serialized resource bytes
+    records: HashMap<(String, String), Vec<u8>>,
 }
 
 /// A thread-safe in-memory object store.
 #[derive(Debug, Default)]
 pub struct MemoryObjectDb {
     inner: Mutex<Inner>,
+    maintenance: RwLock<()>,
+    publication: Mutex<()>,
 }
 
 impl MemoryObjectDb {
@@ -38,6 +44,30 @@ impl MemoryObjectDb {
 }
 
 impl ObjectDb for MemoryObjectDb {
+    fn acquire_mutation_guard(&self) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>> {
+        self.maintenance
+            .read()
+            .map(|guard| Box::new(guard) as Box<dyn ObjectDbLockGuard>)
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned maintenance lock: {error}")))
+    }
+
+    fn acquire_publication_guard(
+        &self,
+        _repo: &str,
+    ) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>> {
+        self.publication
+            .lock()
+            .map(|guard| Box::new(guard) as Box<dyn ObjectDbLockGuard>)
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned publication lock: {error}")))
+    }
+
+    fn acquire_gc_guard(&self) -> ObjectDbResult<Box<dyn ObjectDbLockGuard + '_>> {
+        self.maintenance
+            .write()
+            .map(|guard| Box::new(guard) as Box<dyn ObjectDbLockGuard>)
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned maintenance lock: {error}")))
+    }
+
     fn put_object(&self, kind: ObjectKind, bytes: &[u8]) -> ObjectDbResult<ObjectId> {
         let id = ObjectId(hash(kind, bytes));
         let mut inner = self.inner.lock().unwrap();
@@ -132,6 +162,13 @@ impl ObjectDb for MemoryObjectDb {
             .unwrap_or_default())
     }
 
+    fn list_repo_keys(&self) -> ObjectDbResult<Vec<String>> {
+        let inner = self.inner.lock().unwrap();
+        let mut repos: std::collections::BTreeSet<_> = inner.ops.keys().cloned().collect();
+        repos.extend(inner.refs.keys().map(|(repo, _)| repo.clone()));
+        Ok(repos.into_iter().collect())
+    }
+
     fn set_ref(&self, repo: &str, name: &str, value: &[u8]) -> ObjectDbResult<()> {
         let mut inner = self.inner.lock().unwrap();
         inner
@@ -140,11 +177,121 @@ impl ObjectDb for MemoryObjectDb {
         Ok(())
     }
 
+    fn create_ref(&self, repo: &str, name: &str, value: &[u8]) -> ObjectDbResult<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        let key = (repo.to_string(), name.to_string());
+        match inner.refs.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(value.to_vec());
+                Ok(true)
+            }
+            std::collections::hash_map::Entry::Occupied(_) => Ok(false),
+        }
+    }
+
     fn get_ref(&self, repo: &str, name: &str) -> ObjectDbResult<Option<Vec<u8>>> {
         let inner = self.inner.lock().unwrap();
         Ok(inner
             .refs
             .get(&(repo.to_string(), name.to_string()))
             .cloned())
+    }
+
+    fn create_record(&self, collection: &str, key: &str, value: &[u8]) -> ObjectDbResult<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let record_key = (collection.to_string(), key.to_string());
+        if inner.records.contains_key(&record_key) {
+            return Ok(false);
+        }
+        inner.records.insert(record_key, value.to_vec());
+        Ok(true)
+    }
+
+    fn create_records(&self, records: &[(&str, &str, &[u8])]) -> ObjectDbResult<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let mut keys = std::collections::HashSet::with_capacity(records.len());
+        for (collection, key, _) in records {
+            let record_key = ((*collection).to_string(), (*key).to_string());
+            if !keys.insert(record_key.clone()) || inner.records.contains_key(&record_key) {
+                return Ok(false);
+            }
+        }
+        for (collection, key, value) in records {
+            inner.records.insert(
+                ((*collection).to_string(), (*key).to_string()),
+                (*value).to_vec(),
+            );
+        }
+        Ok(true)
+    }
+
+    fn get_record(&self, collection: &str, key: &str) -> ObjectDbResult<Option<Vec<u8>>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        Ok(inner
+            .records
+            .get(&(collection.to_string(), key.to_string()))
+            .cloned())
+    }
+
+    fn list_records(&self, collection: &str) -> ObjectDbResult<Vec<(String, Vec<u8>)>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        Ok(inner
+            .records
+            .iter()
+            .filter(|((record_collection, _), _)| record_collection == collection)
+            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn compare_and_swap_record(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &[u8],
+        replacement: &[u8],
+    ) -> ObjectDbResult<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let record_key = (collection.to_string(), key.to_string());
+        let Some(current) = inner.records.get_mut(&record_key) else {
+            return Ok(false);
+        };
+        if current.as_slice() != expected {
+            return Ok(false);
+        }
+        *current = replacement.to_vec();
+        Ok(true)
+    }
+
+    fn compare_and_delete_record(
+        &self,
+        collection: &str,
+        key: &str,
+        expected: &[u8],
+    ) -> ObjectDbResult<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let record_key = (collection.to_string(), key.to_string());
+        if inner.records.get(&record_key).map(Vec::as_slice) != Some(expected) {
+            return Ok(false);
+        }
+        inner.records.remove(&record_key);
+        Ok(true)
     }
 }

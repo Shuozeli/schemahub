@@ -38,6 +38,7 @@ pub fn parse(source: &str) -> Result<ParsedSchema, ParseError> {
         .iter()
         .filter_map(|f| f.filename.clone())
         .collect();
+    let include_commits = vec![String::new(); includes.len()];
 
     // Record top-level declaration order across kinds, by source line. The
     // parser splits decls into separate `objects`/`enums`/`services` vectors,
@@ -78,6 +79,7 @@ pub fn parse(source: &str) -> Result<ParsedSchema, ParseError> {
         blob_version: crate::blob::BLOB_VERSION,
         namespace,
         includes,
+        include_commits,
         root_type: state.root_type_name.clone(),
         file_ident: schema.file_ident.clone(),
         file_ext: schema.file_ext.clone(),

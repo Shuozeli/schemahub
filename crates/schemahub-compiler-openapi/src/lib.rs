@@ -14,8 +14,8 @@
 //!
 //! ## Status
 //! - P0 AST + split + round-trip printer: done.
-//! - P1 read/explore + diff: done (`imports(meta)` returns empty — external
-//!   `$ref` imports are v2-modeled).
+//! - P1 read/explore + diff: done (supported external component `$ref` values
+//!   are live SchemaHub imports discovered from declaration blobs).
 //! - P2 compatibility: done (field-level rule table in `compat.rs`).
 //! - P3 mutations: whole-document `PushDocument` + the v1 granular ops
 //!   (AddPath/RemovePath/AddOperation/RemoveOperation/AddComponentSchema/
@@ -31,8 +31,9 @@ pub mod diff;
 pub mod operations;
 pub mod parser;
 pub mod printer;
+mod reference;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 
@@ -51,6 +52,9 @@ use crate::blob::{decode_decl, decode_meta, encode_decl};
 use crate::operations::OpenApiOp;
 use crate::parser::parse_openapi;
 use crate::printer::{print_decl_detail, print_schema_objects};
+use crate::reference::{
+    parse_stored_component_reference, parse_stored_schema_reference, ComponentReference,
+};
 
 /// The OpenAPI compiler front-end.
 #[derive(Debug, Default, Clone)]
@@ -91,7 +95,7 @@ impl Compiler for OpenApiCompiler {
         op: &Mutation,
     ) -> Result<MutationEffect, MutationError> {
         let decoded = OpenApiOp::decode(&op.operation)?;
-        apply_one(schema, &decoded)
+        apply_one(schema, &decoded, false)
     }
 
     fn apply_mutations(
@@ -108,7 +112,7 @@ impl Compiler for OpenApiCompiler {
 
         for op in ops {
             let decoded = OpenApiOp::decode(&op.operation)?;
-            let effect = apply_one(&working, &decoded)?;
+            let effect = apply_one(&working, &decoded, true)?;
 
             if let Some(meta) = effect.meta {
                 working.meta = meta.clone();
@@ -127,6 +131,8 @@ impl Compiler for OpenApiCompiler {
                 }
             }
         }
+
+        validate_schema_references(&working)?;
 
         Ok(MutationEffect {
             meta: net_meta,
@@ -228,24 +234,69 @@ impl Compiler for OpenApiCompiler {
         Ok(DeclDetail::new(text))
     }
 
-    fn imports(&self, meta: &MetaBlob) -> Result<Vec<Import>, ReadError> {
-        // External cross-file `$ref` imports are modeled in the AST
-        // (`SchemaRef.external_import`) but live inside decl blobs, not the meta
-        // blob. The trait scopes `imports` to the meta blob; for OpenAPI v1 there
-        // are no document-level imports, so this is empty. (BFS closure for
-        // `generate_descriptors` resolves local refs directly.)
-        let _ = decode_meta(meta).map_err(ReadError::from)?;
-        Ok(Vec::new())
+    fn imports(&self, schema: &SchemaObjects) -> Result<Vec<Import>, ReadError> {
+        // OpenAPI has no document-level import list. External dependencies are
+        // discovered from every supported `$ref` inside declaration blobs.
+        let _ = decode_meta(&schema.meta).map_err(ReadError::from)?;
+        let mut imports = BTreeMap::new();
+        for blob in schema.decls.values() {
+            let declaration = decode_decl(blob)?;
+            let mut references = Vec::new();
+            collect_type_refs(&declaration.kind, &mut references)
+                .map_err(ReadError::MalformedBlob)?;
+            for import in references
+                .into_iter()
+                .filter_map(|reference| reference.import)
+            {
+                let key = (
+                    import.path.clone(),
+                    import.resolved_commit.clone(),
+                    import.decl_name.clone(),
+                );
+                imports.entry(key).or_insert(import);
+            }
+        }
+        Ok(imports.into_values().collect())
     }
 
     fn type_refs(&self, blob: &DeclBlob) -> Result<Vec<TypeRef>, ReadError> {
         let decl = decode_decl(blob)?;
         let mut refs: Vec<TypeRef> = Vec::new();
-        collect_type_refs(&decl.kind, &mut refs);
-        // Deduplicate while preserving first-seen order.
-        let mut seen = std::collections::HashSet::new();
-        refs.retain(|r| seen.insert(r.name.clone()));
+        collect_type_refs(&decl.kind, &mut refs).map_err(ReadError::MalformedBlob)?;
+        dedupe_type_refs(&mut refs);
         Ok(refs)
+    }
+
+    fn field_type_ref(
+        &self,
+        blob: &DeclBlob,
+        field_name: &str,
+    ) -> Result<Option<TypeRef>, ReadError> {
+        let declaration = decode_decl(blob)?;
+        let DeclPayload::ComponentSchema(component) = declaration.kind else {
+            return Err(ReadError::FieldNotFound(field_name.to_string()));
+        };
+        let schema = component
+            .schema
+            .as_ref()
+            .ok_or_else(|| ReadError::FieldNotFound(field_name.to_string()))?;
+        let property = schema
+            .properties
+            .iter()
+            .find(|property| property.name == field_name)
+            .ok_or_else(|| ReadError::FieldNotFound(field_name.to_string()))?;
+        let Some(property_schema) = &property.schema else {
+            return Ok(None);
+        };
+        let mut refs = Vec::new();
+        collect_schema_refs(property_schema, &mut refs).map_err(ReadError::MalformedBlob)?;
+        dedupe_type_refs(&mut refs);
+        refs.sort_by_key(type_ref_identity);
+        match refs.len() {
+            0 => Ok(None),
+            1 => Ok(refs.pop()),
+            _ => Err(ReadError::AmbiguousTypeReference(field_name.to_string())),
+        }
     }
 
     // ── codegen ───────────────────────────────────────────────────────────────
@@ -285,7 +336,11 @@ impl Compiler for OpenApiCompiler {
 
 // ── Mutation application ──────────────────────────────────────────────────────
 
-fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, MutationError> {
+fn apply_one(
+    schema: &SchemaObjects,
+    op: &OpenApiOp,
+    defer_reference_integrity: bool,
+) -> Result<MutationEffect, MutationError> {
     match op {
         OpenApiOp::PushDocument { source } => {
             // Whole-document replace: re-parse and emit the full decl set as an
@@ -302,6 +357,14 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
                 .filter(|k| !new_keys.contains(k.as_str()))
                 .cloned()
                 .collect();
+
+            if !defer_reference_integrity {
+                let replacement = SchemaObjects {
+                    meta: parsed.meta.clone(),
+                    decls: parsed.decls.iter().cloned().collect(),
+                };
+                validate_schema_references(&replacement)?;
+            }
 
             Ok(MutationEffect {
                 meta: Some(parsed.meta),
@@ -425,12 +488,67 @@ fn apply_one(schema: &SchemaObjects, op: &OpenApiOp) -> Result<MutationEffect, M
             if !schema.decls.contains_key(&key) {
                 return Err(MutationError::DeclarationNotFound(key));
             }
+            let references = declarations_referencing(schema, &key)?;
+            if !defer_reference_integrity && !references.is_empty() {
+                return Err(MutationError::InvalidOperation(format!(
+                    "cannot remove component schema '{schema_name}': referenced by {}",
+                    references.join(", ")
+                )));
+            }
             Ok(MutationEffect {
                 removes: vec![key],
                 ..Default::default()
             })
         }
     }
+}
+
+fn declarations_referencing(
+    schema: &SchemaObjects,
+    target: &str,
+) -> Result<Vec<String>, MutationError> {
+    let mut references = Vec::new();
+    for (name, blob) in &schema.decls {
+        if name == target {
+            continue;
+        }
+        let declaration =
+            decode_decl(blob).map_err(|error| MutationError::MalformedBlob(error.0))?;
+        let mut type_refs = Vec::new();
+        collect_type_refs(&declaration.kind, &mut type_refs)
+            .map_err(MutationError::MalformedBlob)?;
+        if type_refs
+            .iter()
+            .any(|type_ref| type_ref.import.is_none() && type_ref.name == target)
+        {
+            references.push(name.clone());
+        }
+    }
+    Ok(references)
+}
+
+fn validate_schema_references(schema: &SchemaObjects) -> Result<(), MutationError> {
+    for (name, blob) in &schema.decls {
+        let declaration =
+            decode_decl(blob).map_err(|error| MutationError::MalformedBlob(error.0))?;
+        let mut references = Vec::new();
+        collect_type_refs(&declaration.kind, &mut references)
+            .map_err(MutationError::MalformedBlob)?;
+        let missing: Vec<_> = references
+            .into_iter()
+            .filter(|type_ref| {
+                type_ref.import.is_none() && !schema.decls.contains_key(&type_ref.name)
+            })
+            .map(|type_ref| type_ref.name)
+            .collect();
+        if !missing.is_empty() {
+            return Err(MutationError::InvalidOperation(format!(
+                "declaration '{name}' has missing local references: {}",
+                missing.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build a single-upsert effect from a decl payload.
@@ -475,118 +593,224 @@ fn render_side(blob: &DeclBlob) -> Result<String, ConflictError> {
     Ok(print_decl_detail(&decl.kind))
 }
 
-/// Collect the local component-schema names a declaration references.
-fn collect_type_refs(payload: &DeclPayload, refs: &mut Vec<TypeRef>) {
+/// Collect every supported local and external component reference in one
+/// declaration. External references carry their exact import coordinate.
+fn collect_type_refs(payload: &DeclPayload, refs: &mut Vec<TypeRef>) -> Result<(), String> {
     match payload {
-        DeclPayload::PathItem(b) => {
-            for op in &b.operations {
-                if let Some(rb) = &op.request_body {
-                    if let ast::RequestBodyOrRef::Inline(body) = rb {
-                        for entry in &body.content {
-                            if let Some(s) = &entry.schema {
-                                collect_schema_refs(s, refs);
-                            }
-                        }
-                    } else if let ast::RequestBodyOrRef::Ref(name) = rb {
-                        refs.push(TypeRef::new(format!("requestBody:{name}")));
-                    }
+        DeclPayload::PathItem(path) => {
+            for parameter in &path.parameters {
+                collect_parameter_refs(parameter, refs)?;
+            }
+            for operation in &path.operations {
+                for parameter in &operation.parameters {
+                    collect_parameter_refs(parameter, refs)?;
                 }
-                for resp in &op.responses {
-                    match &resp.response {
-                        Some(ast::ResponseOrRef::Inline(rd)) => {
-                            for entry in &rd.content {
-                                if let Some(s) = &entry.schema {
-                                    collect_schema_refs(s, refs);
-                                }
-                            }
-                        }
-                        Some(ast::ResponseOrRef::Ref(name)) => {
-                            refs.push(TypeRef::new(format!("response:{name}")));
-                        }
-                        None => {}
-                    }
+                if let Some(request_body) = &operation.request_body {
+                    collect_request_body_refs(request_body, refs)?;
                 }
-                for p in &op.parameters {
-                    match p {
-                        ast::ParameterOrRef::Inline(param) => {
-                            if let Some(s) = &param.schema {
-                                collect_schema_refs(s, refs);
-                            }
-                        }
-                        ast::ParameterOrRef::Ref(name) => {
-                            refs.push(TypeRef::new(format!("param:{name}")));
-                        }
+                for response in &operation.responses {
+                    if let Some(response) = &response.response {
+                        collect_response_refs(response, refs)?;
                     }
                 }
             }
         }
-        DeclPayload::ComponentSchema(b) => {
-            if let Some(s) = &b.schema {
-                collect_schema_def_refs(s, refs);
+        DeclPayload::ComponentSchema(component) => {
+            if let Some(schema) = &component.schema {
+                collect_schema_def_refs(schema, refs)?;
             }
         }
-        DeclPayload::ComponentParameter(b) => {
-            if let Some(p) = &b.parameter {
-                if let Some(s) = &p.schema {
-                    collect_schema_refs(s, refs);
-                }
+        DeclPayload::ComponentParameter(component) => {
+            if let Some(parameter) = &component.parameter {
+                collect_parameter_def_refs(parameter, refs)?;
             }
         }
-        DeclPayload::ComponentResponse(b) => {
-            if let Some(r) = &b.response {
-                for entry in &r.content {
-                    if let Some(s) = &entry.schema {
-                        collect_schema_refs(s, refs);
-                    }
-                }
+        DeclPayload::ComponentResponse(component) => {
+            if let Some(response) = &component.response {
+                collect_response_def_refs(response, refs)?;
             }
         }
-        DeclPayload::ComponentRequestBody(b) => {
-            if let Some(r) = &b.request_body {
-                for entry in &r.content {
-                    if let Some(s) = &entry.schema {
-                        collect_schema_refs(s, refs);
-                    }
-                }
+        DeclPayload::ComponentRequestBody(component) => {
+            if let Some(request_body) = &component.request_body {
+                collect_request_body_def_refs(request_body, refs)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn collect_parameter_refs(
+    parameter: &ast::ParameterOrRef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    match parameter {
+        ast::ParameterOrRef::Inline(parameter) => collect_parameter_def_refs(parameter, refs),
+        ast::ParameterOrRef::Ref(reference) => {
+            collect_named_component_ref(reference, "parameters", "param", refs)
         }
     }
 }
 
-fn collect_schema_refs(s: &SchemaOrRef, refs: &mut Vec<TypeRef>) {
-    match s {
-        SchemaOrRef::Ref(r) => {
-            if !r.local_name.is_empty() {
-                refs.push(TypeRef::new(format!("schema:{}", r.local_name)));
-            }
+fn collect_parameter_def_refs(
+    parameter: &ast::ParameterDef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    if let Some(schema) = &parameter.schema {
+        collect_schema_refs(schema, refs)?;
+    }
+    Ok(())
+}
+
+fn collect_request_body_refs(
+    request_body: &ast::RequestBodyOrRef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    match request_body {
+        ast::RequestBodyOrRef::Inline(request_body) => {
+            collect_request_body_def_refs(request_body, refs)
         }
-        SchemaOrRef::Inline(def) => collect_schema_def_refs(def, refs),
+        ast::RequestBodyOrRef::Ref(reference) => {
+            collect_named_component_ref(reference, "requestBodies", "requestBody", refs)
+        }
     }
 }
 
-fn collect_schema_def_refs(schema: &JsonSchemaDef, refs: &mut Vec<TypeRef>) {
+fn collect_request_body_def_refs(
+    request_body: &ast::RequestBodyDef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    for entry in &request_body.content {
+        collect_media_type_refs(entry, refs)?;
+    }
+    Ok(())
+}
+
+fn collect_response_refs(
+    response: &ast::ResponseOrRef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    match response {
+        ast::ResponseOrRef::Inline(response) => collect_response_def_refs(response, refs),
+        ast::ResponseOrRef::Ref(reference) => {
+            collect_named_component_ref(reference, "responses", "response", refs)
+        }
+    }
+}
+
+fn collect_response_def_refs(
+    response: &ast::ResponseDef,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    for entry in &response.content {
+        collect_media_type_refs(entry, refs)?;
+    }
+    for header in &response.headers {
+        if let Some(schema) = &header.schema {
+            collect_schema_refs(schema, refs)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_media_type_refs(
+    entry: &ast::MediaTypeEntry,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    if let Some(schema) = &entry.schema {
+        collect_schema_refs(schema, refs)?;
+    }
+    Ok(())
+}
+
+fn collect_named_component_ref(
+    stored: &str,
+    component: &str,
+    declaration_prefix: &str,
+    refs: &mut Vec<TypeRef>,
+) -> Result<(), String> {
+    let reference = parse_stored_component_reference(stored, component)?;
+    push_component_ref(reference, declaration_prefix, refs);
+    Ok(())
+}
+
+fn collect_schema_refs(schema: &SchemaOrRef, refs: &mut Vec<TypeRef>) -> Result<(), String> {
+    match schema {
+        SchemaOrRef::Ref(reference) => {
+            let reference = parse_stored_schema_reference(reference)?;
+            push_component_ref(reference, "schema", refs);
+        }
+        SchemaOrRef::Inline(schema) => collect_schema_def_refs(schema, refs)?,
+    }
+    Ok(())
+}
+
+fn push_component_ref(
+    reference: ComponentReference,
+    declaration_prefix: &str,
+    refs: &mut Vec<TypeRef>,
+) {
+    match reference {
+        ComponentReference::Local(decl_name) => {
+            refs.push(TypeRef::new(format!("{declaration_prefix}:{decl_name}")))
+        }
+        ComponentReference::External(external) => {
+            let decl_name = format!("{declaration_prefix}:{}", external.decl_name);
+            refs.push(TypeRef::external(
+                decl_name.clone(),
+                Import {
+                    path: external.path,
+                    resolved_commit: external.resolved_commit,
+                    decl_name,
+                },
+            ));
+        }
+    }
+}
+
+fn collect_schema_def_refs(schema: &JsonSchemaDef, refs: &mut Vec<TypeRef>) -> Result<(), String> {
     if let Some(items) = &schema.items {
-        collect_schema_refs(items, refs);
+        collect_schema_refs(items, refs)?;
     }
-    for prop in &schema.properties {
-        if let Some(s) = &prop.schema {
-            collect_schema_refs(s, refs);
+    for property in &schema.properties {
+        if let Some(schema) = &property.schema {
+            collect_schema_refs(schema, refs)?;
         }
     }
-    for s in schema
+    for schema in schema
         .all_of
         .iter()
         .chain(&schema.any_of)
         .chain(&schema.one_of)
     {
-        collect_schema_refs(s, refs);
+        collect_schema_refs(schema, refs)?;
     }
-    if let Some(not) = &schema.not {
-        collect_schema_refs(not, refs);
+    if let Some(schema) = &schema.not {
+        collect_schema_refs(schema, refs)?;
     }
-    if let Some(ap) = &schema.additional_properties_schema {
-        collect_schema_refs(ap, refs);
+    if let Some(schema) = &schema.additional_properties_schema {
+        collect_schema_refs(schema, refs)?;
     }
+    Ok(())
+}
+
+fn dedupe_type_refs(refs: &mut Vec<TypeRef>) {
+    let mut seen = BTreeSet::new();
+    refs.retain(|reference| seen.insert(type_ref_identity(reference)));
+}
+
+fn type_ref_identity(reference: &TypeRef) -> (String, String, String, String) {
+    let (path, commit, declaration) = reference
+        .import
+        .as_ref()
+        .map(|import| {
+            (
+                import.path.clone(),
+                import.resolved_commit.clone(),
+                import.decl_name.clone(),
+            )
+        })
+        .unwrap_or_default();
+    (reference.name.clone(), path, commit, declaration)
 }
 
 #[cfg(test)]

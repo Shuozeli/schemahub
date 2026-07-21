@@ -3,6 +3,8 @@ package schemahub.v1;
 
 option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
 
+import "schemahub/v1/enums.proto";
+
 service AdminService {
   // Run garbage collection. Removes unreachable objects older than the
   // configured age threshold. Non-blocking: returns immediately with stats.
@@ -15,6 +17,11 @@ service AdminService {
 
   // Returns the live server configuration (limits, thresholds, backend info).
   rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse);
+
+  // Returns the versioned, executable mutation support contract advertised by
+  // this server build. Clients should use this instead of inferring support
+  // from message presence alone.
+  rpc GetFormatCapabilities(GetFormatCapabilitiesRequest) returns (GetFormatCapabilitiesResponse);
 }
 
 message RunGCRequest {
@@ -56,4 +63,40 @@ message GetServerConfigResponse {
   uint32 gc_age_threshold_hours     = 6;
   string storage_backend            = 7;  // e.g. "redb"
   string server_version             = 8;
+  uint32 max_dependency_scan_repositories = 9;
+  uint32 max_dependency_scan_schemas       = 10;
+}
+
+message GetFormatCapabilitiesRequest {}
+
+enum CapabilityStatus {
+  CAPABILITY_STATUS_UNSPECIFIED = 0;
+  CAPABILITY_STATUS_SUPPORTED   = 1;
+  CAPABILITY_STATUS_REJECTED    = 2;
+}
+
+message FormatOperationCapability {
+  // Stable operation identifier matching the mutations.proto oneof field.
+  string           operation         = 1;
+  CapabilityStatus status            = 2;
+  bool             apply_mutation    = 3;
+  bool             apply_transaction = 4;
+  string           notes             = 5;
+}
+
+message FormatCapability {
+  string                             format_id  = 1;
+  repeated FormatOperationCapability operations = 2;
+  bool                               parse_and_print = 3;
+  bool                               compatibility = 4;
+  bool                               conflict_resolution = 5;
+  bool                               descriptor_artifact = 6;
+  repeated Language                  generated_code_languages = 7;
+}
+
+message GetFormatCapabilitiesResponse {
+  // Schema for this matrix. Increment only for a breaking interpretation
+  // change; adding operations does not require a version bump.
+  string                    matrix_version = 1;
+  repeated FormatCapability formats        = 2;
 }

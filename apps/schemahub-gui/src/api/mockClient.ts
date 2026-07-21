@@ -1,13 +1,26 @@
 import type {
+  ArtifactDownload,
+  ArtifactDownloadRequest,
+  ChangeAction,
+  ChangeActionRequest,
+  ChangeRecord,
+  ConflictDetail,
+  ConflictList,
   CodegenPreview,
   CodegenPreviewRequest,
   CommitEntry,
+  CreateChangeRequest,
   DiffResult,
   OperationEntry,
   ProjectSummary,
   RepoDashboard,
+  RepoSummary,
+  ResolveConflictRequest,
+  ResolveConflictResult,
   SchemaDetail,
+  SearchResponse,
   ServerConfig,
+  SessionInfo,
 } from './types';
 import type { SchemaHubClient } from './client';
 
@@ -156,6 +169,38 @@ const schemaDetails: Record<string, SchemaDetail> = {
 };
 
 export class MockSchemaHubClient implements SchemaHubClient {
+  private readonly changes: ChangeRecord[] = [
+    {
+      name: 'projects/acme/repos/commerce/changes/shipping-note',
+      project: 'acme',
+      repo: 'commerce',
+      targetBookmark: 'main',
+      title: 'Add shipping note to stored orders',
+      description: 'Agent-observed producer field ready for human review.',
+      externalReferences: ['INC-2048', 'https://tracker.example.test/issues/2048'],
+      edits: [{ kind: 'mutation', schemaPath: 'order.proto', formatId: 'protobuf' }],
+      createdBy: {
+        identity: 'demo-agent',
+        displayName: 'Demo Schema Agent',
+        kind: 'agent',
+        delegatedBy: 'demo-owner',
+      },
+      status: 'ready',
+      validation: {
+        valid: true,
+        resolvedBaseCommit: '4398b6668712',
+        editDigest: 'sha256:demo-shipping-note',
+        issues: [],
+        validatedAtUnixMs: Date.parse('2026-06-24T04:12:00Z'),
+        validatorVersion: 'schemahub-validator-v1',
+      },
+      reviews: [],
+      etag: 'v2',
+      createTimeUnixMs: Date.parse('2026-06-24T04:11:00Z'),
+      updateTimeUnixMs: Date.parse('2026-06-24T04:12:00Z'),
+    },
+  ];
+
   async listProjects(): Promise<ProjectSummary[]> {
     await wait();
     return [
@@ -176,6 +221,260 @@ export class MockSchemaHubClient implements SchemaHubClient {
         lastActivity: '2026-06-23T18:41:00Z',
       },
     ];
+  }
+
+  async getSession(): Promise<SessionInfo> {
+    await wait();
+    return {
+      authenticated: true,
+      id: 'demo-agent',
+      display: 'Demo Schema Agent',
+      kind: 'agent',
+      delegatedBy: 'demo-owner',
+    };
+  }
+
+  async listChanges(project: string, repo: string): Promise<ChangeRecord[]> {
+    await wait();
+    return this.changes.filter((change) => change.project === project && change.repo === repo);
+  }
+
+  async getChange(project: string, repo: string, changeId: string): Promise<ChangeRecord> {
+    await wait();
+    const name = `projects/${project}/repos/${repo}/changes/${changeId}`;
+    const change = this.changes.find((candidate) => candidate.name === name);
+    if (!change) throw new Error(`change record not found: ${name}`);
+    return change;
+  }
+
+  async createChange(
+    project: string,
+    repo: string,
+    request: CreateChangeRequest,
+  ): Promise<ChangeRecord> {
+    await wait();
+    const id = request.changeId || `note-${Date.now()}`;
+    const now = Date.now();
+    const change: ChangeRecord = {
+      name: `projects/${project}/repos/${repo}/changes/${id}`,
+      project,
+      repo,
+      targetBookmark: request.targetBookmark,
+      baseRevision: request.baseRevision,
+      title: request.title,
+      description: request.description,
+      externalReferences: request.externalReferences,
+      edits: [],
+      createdBy: {
+        identity: 'demo-agent',
+        displayName: 'Demo Schema Agent',
+        kind: 'agent',
+        delegatedBy: 'demo-owner',
+      },
+      status: 'draft',
+      reviews: [],
+      etag: 'v1',
+      createTimeUnixMs: now,
+      updateTimeUnixMs: now,
+    };
+    this.changes.push(change);
+    return change;
+  }
+
+  async changeAction(
+    project: string,
+    repo: string,
+    changeId: string,
+    action: ChangeAction,
+    request: ChangeActionRequest,
+  ): Promise<ChangeRecord> {
+    await wait();
+    const current = await this.getChange(project, repo, changeId);
+    if (current.etag !== request.etag) throw new Error('change record etag mismatch');
+    const next: ChangeRecord = {
+      ...current,
+      etag: `v${Number(current.etag.slice(1)) + 1}`,
+      updateTimeUnixMs: Date.now(),
+    };
+    if (action === 'validate') {
+      next.validation = {
+        valid: current.edits.length > 0,
+        resolvedBaseCommit: '4398b6668712',
+        editDigest: 'sha256:demo',
+        issues:
+          current.edits.length > 0
+            ? []
+            : [{ code: 'empty_change', message: 'A note-only draft has no executable edits.' }],
+        validatedAtUnixMs: Date.now(),
+        validatorVersion: 'schemahub-validator-v1',
+      };
+    } else if (action === 'ready') {
+      if (!current.validation?.valid) throw new Error('change requires passing validation');
+      next.status = 'ready';
+    } else if (action === 'approve' || action === 'reject') {
+      next.reviews = [
+        ...current.reviews,
+        {
+          reviewer: { identity: 'demo-owner', displayName: 'Demo Owner', kind: 'human' },
+          decision: action === 'approve' ? 'approved' : 'rejected',
+          reason: request.reason || '',
+          createTimeUnixMs: Date.now(),
+        },
+      ];
+      if (action === 'reject') next.status = 'rejected';
+    } else if (action === 'apply') {
+      next.status = 'applied';
+      next.applyResult = {
+        commitId: 'demo-applied-commit',
+        changeId: 'demo-jj-change',
+        operationId: 'demo-operation',
+        conflictedDeclarations: [],
+      };
+    } else if (action === 'abandon') {
+      next.status = 'abandoned';
+    }
+    const index = this.changes.indexOf(current);
+    this.changes[index] = next;
+    return next;
+  }
+
+  async search(
+    project: string,
+    repo: string,
+    query: string,
+    ref: string,
+    limit = 50,
+  ): Promise<SearchResponse> {
+    await wait();
+    const needle = query.toLowerCase();
+    const results: SearchResponse['results'] = [];
+    for (const [schemaPath, schema] of Object.entries(schemaDetails)) {
+      if (schemaPath.toLowerCase().includes(needle)) {
+        results.push({
+          kind: 'schema',
+          title: schemaPath,
+          description: `${schema.format} schema`,
+          schemaPath,
+        });
+      }
+      for (const declaration of schema.declarations) {
+        if (declaration.name.toLowerCase().includes(needle)) {
+          results.push({
+            kind: 'declaration',
+            title: declaration.name,
+            description: declaration.detail || declaration.kind,
+            schemaPath,
+            declarationName: declaration.name,
+          });
+        }
+      }
+    }
+    for (const commit of commits) {
+      if (`${commit.commit} ${commit.changeId} ${commit.message}`.toLowerCase().includes(needle)) {
+        results.push({
+          kind: 'revision',
+          title: commit.message,
+          description: `${commit.author} · ${commit.timestamp}`,
+          revision: commit.commit,
+        });
+      }
+    }
+    for (const change of this.changes.filter(
+      (candidate) => candidate.project === project && candidate.repo === repo,
+    )) {
+      if (
+        `${change.name} ${change.title} ${change.description} ${change.externalReferences.join(' ')}`
+          .toLowerCase()
+          .includes(needle)
+      ) {
+        const parts = change.name.split('/');
+        results.push({
+          kind: 'change',
+          title: change.title,
+          description: change.description,
+          changeId: parts[parts.length - 1],
+          status: change.status,
+        });
+      }
+    }
+    return { query, ref, results: results.slice(0, limit) };
+  }
+
+  async downloadArtifact(request: ArtifactDownloadRequest): Promise<ArtifactDownload> {
+    await wait();
+    const source = schemaDetails[request.schemaPath]?.source || '';
+    const text =
+      request.kind === 'source'
+        ? source
+        : request.kind === 'descriptors'
+          ? `demo descriptor bundle for ${request.schemaPath}`
+          : `// demo generated ${request.language || 'rust'} artifact\n${source}`;
+    return {
+      revision: {
+        name: `projects/${request.project}/repos/${request.repo}/revisions/6ddcd8c5b0dd`,
+        project: request.project,
+        repo: request.repo,
+        commitId: '6ddcd8c5b0dd',
+        resolvedFrom: request.ref,
+      },
+      content: new Blob([text], { type: 'text/plain' }),
+      mediaType: 'text/plain',
+      artifactDigest: 'sha256:demo-artifact',
+      closureDigest: 'sha256:demo-closure',
+    };
+  }
+
+  async listConflicts(
+    _project: string,
+    _repo: string,
+    bookmark: string,
+  ): Promise<ConflictList> {
+    await wait();
+    return {
+      bookmark,
+      conflicts: [{ schemaPath: 'order.proto', declarationName: 'Order' }],
+    };
+  }
+
+  async renderConflict(
+    _project: string,
+    _repo: string,
+    bookmark: string,
+    schemaPath: string,
+    declarationName: string,
+  ): Promise<ConflictDetail> {
+    await wait();
+    return {
+      bookmark,
+      schemaPath,
+      declarationName,
+      rendered: '<<<<<<< left\nmessage Order { string id = 1; }\n=======\nmessage Order { bytes id = 1; }\n>>>>>>> right',
+    };
+  }
+
+  async resolveConflict(
+    _project: string,
+    _repo: string,
+    _request: ResolveConflictRequest,
+  ): Promise<ResolveConflictResult> {
+    await wait();
+    return {
+      commitId: 'demo-resolution-commit',
+      changeId: 'demo-resolution-change',
+      remainingConflicts: [],
+    };
+  }
+
+  async listRepos(project: string): Promise<RepoSummary[]> {
+    await wait();
+    const repos = project === 'acme' ? ['commerce', 'billing'] : ['schemas', 'events'];
+    return repos.map((repo) => ({
+      project,
+      repo,
+      defaultBranch: 'main',
+      protectedBranches: ['main', 'release/*'],
+      compatibility: 'full',
+    }));
   }
 
   async getRepoDashboard(project: string, repo: string, _ref: string): Promise<RepoDashboard> {
@@ -325,7 +624,12 @@ pub struct Order {
     return commits.slice(0, limit);
   }
 
-  async listOperations(_project: string, _repo: string, limit: number): Promise<OperationEntry[]> {
+  async listOperations(
+    _project: string,
+    _repo: string,
+    _ref: string,
+    limit: number,
+  ): Promise<OperationEntry[]> {
     await wait();
     return operations.slice(0, limit);
   }

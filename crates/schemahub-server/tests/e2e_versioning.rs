@@ -827,7 +827,7 @@ async fn search_honors_at_ref() {
             branch: "main".into(),
             base_revision: String::new(),
             idempotency_key: "k-rename".into(),
-            force: false,
+            force: true,
             operation: Some(pb::apply_mutation_request::Operation::ProtobufOp(
                 pb::ProtobufMutation {
                     schema_path: "u.proto".into(),
@@ -896,7 +896,7 @@ async fn search_honors_at_ref() {
 // ── 10. Current OCC / tag-name semantics ─────────────────────────────────────
 
 #[tokio::test]
-async fn stale_base_revision_on_apply_mutation_is_currently_accepted() {
+async fn stale_base_revision_is_accepted_as_an_advisory_causal_commit() {
     // Arrange: create a schema on main and remember that initial commit as a
     // stale client base, then advance main once.
     let url = start_server().await;
@@ -941,10 +941,10 @@ async fn stale_base_revision_on_apply_mutation_is_currently_accepted() {
     stale_request.base_revision = initial;
     let stale_write = c.schema.apply_mutation(stale_request).await;
 
-    // Assert: current behavior accepts the stale write and applies it on top of
-    // the branch's latest HEAD instead of returning ABORTED/FAILED_PRECONDITION.
+    // Assert: the documented JJ contract accepts a retained stale base and
+    // merges the write onto the branch's latest HEAD rather than CAS-rejecting.
     let stale_write = stale_write
-        .expect("stale base_revision is currently not enforced")
+        .expect("retained stale base_revision is advisory")
         .into_inner();
     assert!(
         !stale_write.new_commit.is_empty(),
@@ -965,7 +965,57 @@ async fn stale_base_revision_on_apply_mutation_is_currently_accepted() {
 }
 
 #[tokio::test]
-async fn duplicate_tag_creation_currently_retargets_existing_tag() {
+async fn foreign_base_revision_is_rejected_before_mutation() {
+    // Arrange
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        pb::SchemaFormat::Protobuf,
+        USER_PROTO,
+        "base-owned",
+    )
+    .await;
+    let foreign = create_schema(
+        &mut c.schema,
+        "acme",
+        "other",
+        "main",
+        "foreign.proto",
+        pb::SchemaFormat::Protobuf,
+        "syntax = \"proto3\"; message Foreign { string id = 1; }",
+        "base-foreign",
+    )
+    .await
+    .new_commit;
+    let mut request = add_field_request(
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        "User",
+        "phone",
+        4,
+        "foreign-base-write",
+    );
+    request.base_revision = foreign;
+
+    // Act
+    let result = c.schema.apply_mutation(request).await;
+
+    // Assert
+    assert_eq!(
+        result.expect_err("foreign base must fail").code(),
+        tonic::Code::FailedPrecondition
+    );
+}
+
+#[tokio::test]
+async fn duplicate_tag_creation_is_rejected_without_retargeting() {
     // Arrange: create a schema, tag the initial commit, then advance main.
     let url = start_server().await;
     let mut c = clients(&url).await;
@@ -1023,17 +1073,12 @@ async fn duplicate_tag_creation_currently_retargets_existing_tag() {
         })
         .await;
 
-    // Assert: current behavior succeeds and retargets the existing tag name.
-    let second_tag = second_tag
-        .expect("duplicate tag names are currently mutable")
-        .into_inner()
-        .tag
-        .expect("duplicate tag info");
-    assert_eq!(first_tag.commit_hash, initial, "initial tag target changed");
+    // Assert: tag names are immutable and the first target remains pinned.
     assert_eq!(
-        second_tag.commit_hash, advanced.new_commit,
-        "duplicate create should report the newer target"
+        second_tag.expect_err("duplicate tag name must fail").code(),
+        tonic::Code::AlreadyExists
     );
+    assert_eq!(first_tag.commit_hash, initial, "initial tag target changed");
     let tags = c
         .refs
         .list_tags(pb::ListTagsRequest {
@@ -1051,8 +1096,8 @@ async fn duplicate_tag_creation_currently_retargets_existing_tag() {
         "tag namespace should contain one release tag"
     );
     assert_eq!(
-        tags[0].commit_hash, advanced.new_commit,
-        "release tag should now point at the second target"
+        tags[0].commit_hash, initial,
+        "release tag must remain pinned to the first target"
     );
     let source_at_tag = pull_source(
         &mut c.explore,
@@ -1063,7 +1108,7 @@ async fn duplicate_tag_creation_currently_retargets_existing_tag() {
     )
     .await;
     assert!(
-        source_at_tag.contains("email"),
-        "retargeted tag should resolve to the newer schema; got:\n{source_at_tag}"
+        !source_at_tag.contains("email"),
+        "immutable tag should resolve to the original schema; got:\n{source_at_tag}"
     );
 }

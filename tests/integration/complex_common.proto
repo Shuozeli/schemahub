@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package commerce.platform.v1;
+
+message Money {
+  string currency_code = 1;
+  sint64 units = 2;
+  sfixed32 nanos = 3;
+}
+
+enum Region {
+  REGION_UNSPECIFIED = 0;
+  REGION_AMERICAS = 1;
+  REGION_EMEA = 2;
+  REGION_APAC = 3;
+}

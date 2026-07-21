@@ -164,6 +164,10 @@ pub struct FbsMeta {
     pub namespace: Option<String>,
     /// `include "..."` filenames, in source order.
     pub includes: Vec<String>,
+    /// Immutable schemahub commit pins aligned by index with `includes`.
+    /// Empty strings mean "follow the importing schema's ref".
+    #[serde(default)]
+    pub include_commits: Vec<String>,
     /// The `root_type` designation, if present.
     pub root_type: Option<String>,
     /// `file_identifier "ABCD"`, if present.
@@ -295,6 +299,7 @@ mod tests {
             blob_version: BLOB_VERSION,
             namespace: Some("MyGame.Sample".to_string()),
             includes: vec!["other.fbs".to_string()],
+            include_commits: vec!["abc123".to_string()],
             root_type: Some("Monster".to_string()),
             file_ident: Some("MONS".to_string()),
             file_ext: Some("mon".to_string()),

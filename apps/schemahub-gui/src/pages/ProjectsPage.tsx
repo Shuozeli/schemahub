@@ -5,7 +5,7 @@ import { useProjects } from '../api/queries';
 
 export function ProjectsPage() {
   const navigate = useNavigate();
-  const { data = [], isLoading } = useProjects();
+  const { data = [], error, isLoading } = useProjects();
 
   return (
     <Stack>
@@ -34,12 +34,22 @@ export function ProjectsPage() {
               <Table.Tr>
                 <Table.Td colSpan={6}>Loading projects...</Table.Td>
               </Table.Tr>
+            ) : error ? (
+              <Table.Tr>
+                <Table.Td colSpan={6} c="red">
+                  {error.message}
+                </Table.Td>
+              </Table.Tr>
+            ) : data.length === 0 ? (
+              <Table.Tr>
+                <Table.Td colSpan={6}>No projects are visible to this identity.</Table.Td>
+              </Table.Tr>
             ) : (
               data.map((project) => (
                 <Table.Tr
                   key={project.name}
                   className="tableRowLink"
-                  onClick={() => navigate(`/projects/${project.name}/repos/commerce`)}
+                  onClick={() => navigate(`/projects/${project.name}`)}
                 >
                   <Table.Td fw={600}>{project.name}</Table.Td>
                   <Table.Td>
@@ -60,4 +70,3 @@ export function ProjectsPage() {
     </Stack>
   );
 }
-

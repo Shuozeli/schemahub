@@ -2,7 +2,8 @@
 //!
 //! The core holds an `Arc<dyn AuthnProvider>` + `Arc<dyn AuthzPolicy>`; the
 //! default Noop implementations (from `schemahub-types`) allow everything. Auth
-//! runs after the idempotency check, before the transaction (steps 2–3).
+//! runs before receipt observation so an idempotency replay cannot disclose a
+//! prior result to an unauthorized caller.
 
 use schemahub_types::{Action, AuthnProvider, AuthzPolicy, Identity, ResourcePath};
 

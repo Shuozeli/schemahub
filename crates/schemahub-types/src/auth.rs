@@ -1,5 +1,18 @@
 use crate::errors::{AuthnError, AuthzError};
 
+/// The kind of principal represented by an authenticated identity.
+///
+/// Humans, agents, and services share the same authorization model; this value
+/// exists for audit and workflow policy, not as a privilege level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityKind {
+    Anonymous,
+    Human,
+    Agent,
+    Service,
+}
+
 /// An authenticated (or anonymous) caller identity.
 ///
 /// `User` carries an opaque `id` (used as the role-store key and commit-author
@@ -8,7 +21,19 @@ use crate::errors::{AuthnError, AuthzError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Identity {
     Anonymous,
-    User { id: String, display: Option<String> },
+    User {
+        id: String,
+        display: Option<String>,
+    },
+    Agent {
+        id: String,
+        display: Option<String>,
+        delegated_by: Option<String>,
+    },
+    Service {
+        id: String,
+        display: Option<String>,
+    },
 }
 
 impl Identity {
@@ -28,11 +53,63 @@ impl Identity {
         }
     }
 
+    /// Construct an agent identity. `delegated_by` identifies the human or
+    /// service that authorized the agent run when that information is known.
+    pub fn agent(
+        id: impl Into<String>,
+        display: Option<String>,
+        delegated_by: Option<String>,
+    ) -> Self {
+        Identity::Agent {
+            id: id.into(),
+            display,
+            delegated_by,
+        }
+    }
+
+    /// Construct a non-human service identity.
+    pub fn service(id: impl Into<String>, display: Option<String>) -> Self {
+        Identity::Service {
+            id: id.into(),
+            display,
+        }
+    }
+
     /// Return the opaque identity id when authenticated, else `None`.
     pub fn id(&self) -> Option<&str> {
         match self {
             Identity::Anonymous => None,
-            Identity::User { id, .. } => Some(id.as_str()),
+            Identity::User { id, .. }
+            | Identity::Agent { id, .. }
+            | Identity::Service { id, .. } => Some(id.as_str()),
+        }
+    }
+
+    /// Return the display name supplied by the authentication provider.
+    pub fn display(&self) -> Option<&str> {
+        match self {
+            Identity::Anonymous => None,
+            Identity::User { display, .. }
+            | Identity::Agent { display, .. }
+            | Identity::Service { display, .. } => display.as_deref(),
+        }
+    }
+
+    /// Return the principal kind used in change-record audit metadata.
+    pub fn kind(&self) -> IdentityKind {
+        match self {
+            Identity::Anonymous => IdentityKind::Anonymous,
+            Identity::User { .. } => IdentityKind::Human,
+            Identity::Agent { .. } => IdentityKind::Agent,
+            Identity::Service { .. } => IdentityKind::Service,
+        }
+    }
+
+    /// Return the delegating identity for an agent, if one was authenticated.
+    pub fn delegated_by(&self) -> Option<&str> {
+        match self {
+            Identity::Agent { delegated_by, .. } => delegated_by.as_deref(),
+            Identity::Anonymous | Identity::User { .. } | Identity::Service { .. } => None,
         }
     }
 

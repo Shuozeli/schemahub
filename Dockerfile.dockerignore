@@ -1,0 +1,13 @@
+**
+
+!shuozeli/
+!shuozeli/codegen/
+!shuozeli/codegen/schemahub/
+!shuozeli/codegen/schemahub/**
+
+**/.git
+**/target
+**/node_modules
+**/dist
+**/*.redb
+**/schemahub.db

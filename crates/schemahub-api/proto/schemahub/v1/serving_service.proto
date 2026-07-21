@@ -1,0 +1,66 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "schemahub/v1/enums.proto";
+import "schemahub/v1/refs.proto";
+
+// Immutable serving plane for build-time and runtime schema consumers.
+service ServingService {
+  // Resolve a bookmark, tag, or commit once to an immutable revision resource.
+  rpc ResolveRevision(ResolveRevisionRequest) returns (SchemaRevision);
+  // Return the first persisted canonical source, native descriptors, or
+  // generated code for an immutable revision and request identity.
+  rpc GetSchemaArtifact(GetSchemaArtifactRequest) returns (SchemaArtifact);
+}
+
+enum SchemaArtifactKind {
+  SCHEMA_ARTIFACT_KIND_UNSPECIFIED    = 0;
+  SCHEMA_ARTIFACT_KIND_SOURCE         = 1;
+  SCHEMA_ARTIFACT_KIND_DESCRIPTORS    = 2;
+  SCHEMA_ARTIFACT_KIND_GENERATED_CODE = 3;
+}
+
+message SchemaRevision {
+  // projects/{project}/repos/{repo}/revisions/{commit}
+  string name          = 1;
+  string project       = 2;
+  string repo          = 3;
+  string commit_id     = 4;
+  string resolved_from = 5;
+}
+
+message ResolveRevisionRequest {
+  // projects/{project}/repos/{repo}
+  string     parent = 1;
+  VersionRef at     = 2;
+}
+
+message GetSchemaArtifactRequest {
+  // Full immutable SchemaRevision resource name.
+  string             revision               = 1;
+  string             schema_path            = 2;
+  SchemaArtifactKind kind                   = 3;
+  // Required only for GENERATED_CODE.
+  Language           language               = 4;
+  bool               rust_pluggable_buffer  = 5;
+  // When this equals the computed artifact digest, the server returns metadata
+  // with empty content and not_modified=true.
+  string             if_none_match          = 6;
+}
+
+message SchemaArtifact {
+  string             name               = 1;
+  string             revision           = 2;
+  string             schema_path        = 3;
+  SchemaArtifactKind kind               = 4;
+  SchemaFormat       format             = 5;
+  string             media_type         = 6;
+  bytes              content            = 7;
+  string             artifact_digest    = 8;
+  string             closure_digest     = 9;
+  repeated string    dependency_schemas = 10;
+  bool               is_archive         = 11;
+  bool               not_modified       = 12;
+}

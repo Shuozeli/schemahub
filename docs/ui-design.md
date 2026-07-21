@@ -1,12 +1,21 @@
-<!-- agent-updated: 2026-06-24T04:39:10Z -->
+<!-- agent-updated: 2026-07-21T16:49:05Z -->
 
 # SchemaHub UI Design
 
-SchemaHub v1 is CLI + gRPC only. This document defines the first web console we should build on top of the existing gRPC API. The UI should feel like an operational registry console, not a landing page: dense, searchable, auditable, and optimized for repeated schema review.
+SchemaHub includes a CLI, gRPC API, and HTTP-backed web console. This document
+defines the console as an operational registry surface: dense, searchable,
+auditable, and optimized for repeated schema review.
 
-The first implementation target is a React + Vite application under the SchemaHub repo. It should start as a read-mostly auditor/operator console with mock data and a typed API boundary, then swap the mock client for a BFF or gRPC-web adapter once the HTTP boundary is chosen.
+The implementation is a React + Vite application with a typed browser boundary.
+The live Rust BFF is the default data path; an explicit mock client remains for
+isolated demos.
 
-Implementation status: the first mock console now lives in `apps/schemahub-gui`. See `docs/gui.md` for the implemented architecture, route map, run commands, Tailscale preview setup, and troubleshooting notes. This document remains the product/design source for the UI roadmap.
+Implementation status (2026-07-21): D5 is implemented in
+`apps/schemahub-gui`. Real resource navigation, server-derived human/agent
+identity, ChangeRecord lifecycle actions, repository search, immutable artifact
+download, and conflict resolution all use Core-authorized BFF paths. See
+`docs/gui.md` for the concrete route and deployment contract. This document
+remains the product/design source for later UI expansion.
 
 ## Product Positioning
 
@@ -120,10 +129,13 @@ Top-level routes:
 | `/projects` | Project list, visibility, role summary, last activity |
 | `/projects/:project` | Project overview, repos, members, permissions |
 | `/projects/:project/repos/:repo` | Repo dashboard: branches, tags, recent commits, schemas |
+| `/projects/:project/repos/:repo/changes` | Human/agent intent and executable change proposals |
+| `/projects/:project/repos/:repo/changes/:changeId` | Validation, review, Apply, and immutable receipt |
 | `/projects/:project/repos/:repo/schemas/:schema` | Schema source, declarations, dependencies, codegen |
 | `/projects/:project/repos/:repo/compare` | Diff and compatibility review between refs |
 | `/projects/:project/repos/:repo/history` | Commit log and operation log |
 | `/projects/:project/repos/:repo/conflicts` | Conflict list and resolution workflow |
+| `/projects/:project/repos/:repo/search` | Repository schemas, declarations, revisions, and changes |
 | `/admin` | Server config, storage backend, limits, auth mode |
 
 Route conventions:
@@ -483,12 +495,17 @@ This page should be read-only for the first release unless admin write RPCs are 
 
 ## API Mapping
 
-The first UI can use the same gRPC surface as the CLI. For browser delivery, add one of these adapters:
+The CLI and browser use the same Core policy paths through different transport
+adapters. Browser delivery uses the HTTP/JSON BFF in `schemahub-server`.
 
-- gRPC-web proxy in front of `schemahub-server`.
-- Thin BFF service that exposes HTTP/JSON and calls the existing gRPC API.
-
-Recommended first implementation: BFF service. It keeps auth, streaming limitations, browser CORS, and protobuf `Any` error unpacking out of the frontend.
+The BFF owns bearer forwarding, CORS, browser DTOs, and gRPC-equivalent error
+semantics. It calls Core directly, so it does not introduce a second policy or
+lifecycle implementation. Its OpenAPI 3.1 document is generated from the same
+annotated handlers used for runtime routing and is available at
+`/api/openapi.json`; `http-api.md` defines the drift and release contract. Per
+ADR 0002, these unversioned routes are a same-release GUI-only BFF outside the
+public API compatibility promise. Responses and generated path metadata expose
+that classification; reusable integrations target `schemahub.v1` instead.
 
 Initial UI API needs:
 
@@ -500,22 +517,24 @@ Initial UI API needs:
 | Branches, tags, merge, diff, commits | `RefService` |
 | Operation log, undo, conflict resolve | `HistoryService` |
 | Descriptors and codegen preview | `CodegenService` |
+| Durable intent, validation, review, Apply | `ChangeService` |
+| Immutable source/descriptors/generated code | `ServingService` |
 | Server limits/config | `AdminService` |
 
-Gaps likely requiring API work:
+Remaining API/UI expansion:
 
-- Persisted repo registry is still partial; the UI needs reliable repo listing.
 - Merge response should expose conflicted declarations directly.
 - Commit timestamps are currently incomplete in some derived history paths.
-- Codegen artifact metadata should include filename and content type.
-- Search should support cross-repo or project-wide mode later.
+- Artifact responses expose content type and digests; a future manifest can add
+  server-selected filenames.
+- Search should add project-wide/cross-project indexes and pagination later.
 
 Frontend API boundary:
 
 Define a typed `SchemaHubClient` interface in the GUI and implement two clients:
 
-- `MockSchemaHubClient` for Phase 1 development.
-- `HttpSchemaHubClient` for the future BFF.
+- `HttpSchemaHubClient` for the default live BFF.
+- `MockSchemaHubClient` for explicit demo mode.
 
 The React app must not import generated Rust/protobuf server internals directly. The browser-facing DTOs should be stable UI models:
 
@@ -727,7 +746,7 @@ Build a read-mostly console before mutation-heavy workflows:
 4. Compare page.
 5. History page.
 
-Implementation sequence:
+Delivered implementation sequence:
 
 1. Scaffold `apps/schemahub-gui` with Vite React TypeScript.
 2. Install Mantine, lucide-react, TanStack Query, router, Monaco.
@@ -736,15 +755,17 @@ Implementation sequence:
 5. Implement repo dashboard and schema detail from mock data.
 6. Implement codegen preview panel with FlatBuffers `rustPluggableBuffer` switch.
 7. Implement compare/history read views.
-8. Add smoke tests for routing and codegen option state.
+8. Replace pinned workspace data with persisted project/repository navigation.
+9. Add authenticated ChangeRecord, search, conflict, and immutable artifact workflows.
+10. Verify the BFF lifecycle and conflict paths with release-mode integration tests.
 
-After that, add:
+Later UI expansion can add:
 
 1. Create schema/update schema.
 2. Branch/tag creation.
 3. Merge workflow.
-4. Conflict resolution.
-5. RBAC member management.
+4. RBAC member management.
+5. Project-wide search and richer artifact manifests.
 
 ## Success Criteria
 
@@ -758,10 +779,9 @@ The UI is successful when an auditor can answer these questions without using th
 - Which commit and operation recorded it?
 - Can generated code be produced for this schema at this ref?
 
-## Open Decisions
+## Remaining Decisions
 
-- Router: React Router is simpler; TanStack Router gives better typed params. Choose before scaffold.
-- BFF location: same Rust server, separate Rust crate, or Node/TypeScript service.
 - Monaco diff strategy: use Monaco's diff editor or precomputed server diff text plus source viewer.
-- Repo listing: current server repo registry is partial; Phase 1 mock can model repos, but real UI needs a reliable repo listing endpoint.
-- Auth: first UI can use a token input/profile selector; full login flow is out of scope until auth provider is chosen.
+- Repo list pagination: decide how the UI retains server cursors across filters.
+- Auth: replace the development token input with the selected production login provider.
+- Testing: add component-level accessibility and browser workflow coverage.

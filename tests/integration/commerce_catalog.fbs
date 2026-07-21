@@ -2,6 +2,8 @@ include "common/money.fbs";
 
 namespace commerce.catalog;
 
+attribute "priority";
+
 enum Availability : byte {
   Unknown = 0,
   InStock = 1,
@@ -14,6 +16,10 @@ struct GeoPoint {
   lng: double;
 }
 
+struct Transform (force_align: 16) {
+  values: [float:16];
+}
+
 table Supplier {
   id: string (key, id: 0);
   name: string (required, id: 1);
@@ -23,12 +29,13 @@ table Supplier {
 table Product {
   id: string (key, id: 0);
   sku: string (required, id: 1);
-  title: string (id: 2);
+  title: string (priority: 5, id: 2);
   availability: Availability = InStock (id: 3);
   supplier: Supplier (id: 4);
   tags: [string] (id: 5);
   related: [Product] (id: 6);
   old_rank: int (deprecated, id: 7);
+  transform: Transform (id: 8);
 }
 
 table Category {

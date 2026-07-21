@@ -16,6 +16,9 @@ use crate::ast::{
     SchemaOrRef,
 };
 use crate::blob::{decode_decl, decode_meta};
+use crate::reference::{
+    render_component_reference, render_stored_component_reference, ComponentReference,
+};
 
 fn sp(n: usize) -> String {
     " ".repeat(n)
@@ -214,7 +217,8 @@ fn print_param_or_ref_item(p_or_r: &ParameterOrRef, list_base: usize) -> String 
     let cont = sp(list_base + 4);
     match p_or_r {
         ParameterOrRef::Ref(r) => {
-            format!("{}- $ref: '#/components/parameters/{}'\n", item, r)
+            let reference = render_stored_component_reference(r, "parameters");
+            format!("{}- $ref: {}\n", item, quote_reference(&reference))
         }
         ParameterOrRef::Inline(param) => {
             let mut s = format!("{}- name: {}\n", item, ys(&param.name));
@@ -252,7 +256,8 @@ fn print_param_def_cont(param: &ParameterDef, ip: &str, indent: usize) -> String
 fn print_request_body_or_ref(rb: &RequestBodyOrRef, indent: usize) -> String {
     match rb {
         RequestBodyOrRef::Ref(r) => {
-            format!("{}$ref: '#/components/requestBodies/{}'\n", sp(indent), r)
+            let reference = render_stored_component_reference(r, "requestBodies");
+            format!("{}$ref: {}\n", sp(indent), quote_reference(&reference))
         }
         RequestBodyOrRef::Inline(b) => print_request_body_def(b, indent),
     }
@@ -277,7 +282,8 @@ fn print_request_body_def(rb: &RequestBodyDef, indent: usize) -> String {
 fn print_response_or_ref(r: &ResponseOrRef, indent: usize) -> String {
     match r {
         ResponseOrRef::Ref(r) => {
-            format!("{}$ref: '#/components/responses/{}'\n", sp(indent), r)
+            let reference = render_stored_component_reference(r, "responses");
+            format!("{}$ref: {}\n", sp(indent), quote_reference(&reference))
         }
         ResponseOrRef::Inline(resp) => print_response_def(resp, indent),
     }
@@ -321,14 +327,21 @@ fn print_media_type_entry(entry: &MediaTypeEntry, indent: usize) -> String {
 fn print_schema_or_ref(s: &SchemaOrRef, indent: usize) -> String {
     match s {
         SchemaOrRef::Ref(r) => {
-            format!(
-                "{}$ref: '#/components/schemas/{}'\n",
-                sp(indent),
-                r.local_name
-            )
+            let reference = match &r.external_import {
+                Some(import) => render_component_reference(
+                    &ComponentReference::External(import.clone()),
+                    "schemas",
+                ),
+                None => render_stored_component_reference(&r.local_name, "schemas"),
+            };
+            format!("{}$ref: {}\n", sp(indent), quote_reference(&reference))
         }
         SchemaOrRef::Inline(def) => print_schema_def(def, indent),
     }
+}
+
+fn quote_reference(reference: &str) -> String {
+    format!("'{}'", reference.replace('\'', "''"))
 }
 
 fn print_schema_def(schema: &JsonSchemaDef, indent: usize) -> String {

@@ -38,12 +38,15 @@ use jj_lib::repo_path::{RepoPath, RepoPathBuf, RepoPathComponentBuf};
 use prost::Message as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
-use crate::object_db::{ObjectDb, ObjectId, ObjectKind};
+use crate::object_db::{ObjectDb, ObjectDbError, ObjectId, ObjectKind};
 
 /// Commit-id length in bytes (blake2b-512). Matches jj's `SimpleBackend`.
 const COMMIT_ID_LENGTH: usize = 64;
 /// Change-id length in bytes. Matches jj's `SimpleBackend`.
 const CHANGE_ID_LENGTH: usize = 16;
+const TREE_ID_LENGTH: usize = 64;
+const FILE_ID_LENGTH: usize = 64;
+const SYMLINK_ID_LENGTH: usize = 64;
 
 /// The blake2b hash of the empty `Tree` (same value jj's `SimpleBackend` pins).
 const EMPTY_TREE_ID_HEX: &str = "482ae5a29fbe856c7272f2071b8b0f0359ee2d89ff392b8a900643fbd0836eccd067b8bf41909e206c90d45d6e7d8b6686b93ecaee5fe1a9060d87b672101310";
@@ -52,15 +55,18 @@ fn to_other_err(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Bac
     BackendError::Other(err.into())
 }
 
-fn not_found(
+fn read_error(
     object_type: &str,
     hash: String,
     err: crate::object_db::ObjectDbError,
 ) -> BackendError {
-    BackendError::ObjectNotFound {
-        object_type: object_type.to_string(),
-        hash,
-        source: Box::new(err),
+    match err {
+        ObjectDbError::NotFound => BackendError::ObjectNotFound {
+            object_type: object_type.to_string(),
+            hash,
+            source: Box::new(ObjectDbError::NotFound),
+        },
+        error @ ObjectDbError::Backend(_) => BackendError::Other(Box::new(error)),
     }
 }
 
@@ -81,7 +87,7 @@ impl DbBackend {
 
     /// Build a backend over `db`. The empty tree is materialized eagerly so the
     /// root view's empty root tree resolves.
-    pub fn new(db: Arc<dyn ObjectDb>) -> Self {
+    pub fn new(db: Arc<dyn ObjectDb>) -> Result<Self, ObjectDbError> {
         let backend = Self {
             db,
             root_commit_id: CommitId::from_bytes(&[0; COMMIT_ID_LENGTH]),
@@ -89,13 +95,13 @@ impl DbBackend {
             empty_tree_id: TreeId::from_hex(EMPTY_TREE_ID_HEX),
         };
         // Persist the empty tree so reads of the root tree succeed.
-        let proto = tree_to_proto(&Tree::default());
-        let _ = backend.db.put_object_at(
+        let proto = protos::Tree::default();
+        backend.db.put_object_at(
             ObjectKind::Tree,
             &ObjectId(backend.empty_tree_id.to_bytes()),
             &proto.encode_to_vec(),
-        );
-        backend
+        )?;
+        Ok(backend)
     }
 }
 
@@ -137,7 +143,7 @@ impl Backend for DbBackend {
         let bytes = self
             .db
             .get_object(ObjectKind::File, &ObjectId(id.to_bytes()))
-            .map_err(|e| not_found("file", id.hex(), e))?;
+            .map_err(|e| read_error("file", id.hex(), e))?;
         Ok(Box::pin(Cursor::new(bytes)))
     }
 
@@ -159,7 +165,7 @@ impl Backend for DbBackend {
         let bytes = self
             .db
             .get_object(ObjectKind::Symlink, &ObjectId(id.to_bytes()))
-            .map_err(|e| not_found("symlink", id.hex(), e))?;
+            .map_err(|e| read_error("symlink", id.hex(), e))?;
         String::from_utf8(bytes).map_err(to_other_err)
     }
 
@@ -200,13 +206,13 @@ impl Backend for DbBackend {
         let bytes = self
             .db
             .get_object(ObjectKind::Tree, &ObjectId(id.to_bytes()))
-            .map_err(|e| not_found("tree", id.hex(), e))?;
+            .map_err(|e| read_error("tree", id.hex(), e))?;
         let proto = protos::Tree::decode(&*bytes).map_err(to_other_err)?;
         tree_from_proto(proto)
     }
 
     async fn write_tree(&self, _path: &RepoPath, tree: &Tree) -> BackendResult<TreeId> {
-        let proto = tree_to_proto(tree);
+        let proto = tree_to_proto(tree)?;
         let id = TreeId::new(blake2b_hash(tree).to_vec());
         self.db
             .put_object_at(
@@ -228,9 +234,9 @@ impl Backend for DbBackend {
         let bytes = self
             .db
             .get_object(ObjectKind::Commit, &ObjectId(id.to_bytes()))
-            .map_err(|e| not_found("commit", id.hex(), e))?;
+            .map_err(|e| read_error("commit", id.hex(), e))?;
         let proto = protos::Commit::decode(&*bytes).map_err(to_other_err)?;
-        Ok(commit_from_proto(proto))
+        commit_from_proto(proto)
     }
 
     async fn write_commit(
@@ -280,15 +286,15 @@ impl Backend for DbBackend {
 
 // ── proto conversions (faithful to jj-lib's SimpleBackend) ────────────────────
 
-fn tree_to_proto(tree: &Tree) -> protos::Tree {
+fn tree_to_proto(tree: &Tree) -> BackendResult<protos::Tree> {
     let mut proto = protos::Tree::default();
     for entry in tree.entries() {
         proto.entries.push(protos::tree::Entry {
             name: entry.name().as_internal_str().to_owned(),
-            value: Some(tree_value_to_proto(entry.value())),
+            value: Some(tree_value_to_proto(entry.value())?),
         });
     }
-    proto
+    Ok(proto)
 }
 
 fn tree_from_proto(proto: protos::Tree) -> BackendResult<Tree> {
@@ -316,7 +322,7 @@ fn tree_from_proto(proto: protos::Tree) -> BackendResult<Tree> {
     Ok(Tree::from_sorted_entries(entries))
 }
 
-fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
+fn tree_value_to_proto(value: &TreeValue) -> BackendResult<protos::TreeValue> {
     let mut proto = protos::TreeValue::default();
     match value {
         TreeValue::File {
@@ -334,13 +340,15 @@ fn tree_value_to_proto(value: &TreeValue) -> protos::TreeValue {
             proto.value = Some(protos::tree_value::Value::SymlinkId(id.to_bytes()));
         }
         TreeValue::GitSubmodule(_id) => {
-            panic!("cannot store git submodules in the schemahub backend");
+            return Err(BackendError::Unsupported(
+                "schemahub backend does not support git submodules".to_string(),
+            ));
         }
         TreeValue::Tree(id) => {
             proto.value = Some(protos::tree_value::Value::TreeId(id.to_bytes()));
         }
     }
-    proto
+    Ok(proto)
 }
 
 fn tree_value_from_proto(proto: protos::TreeValue) -> BackendResult<TreeValue> {
@@ -348,17 +356,26 @@ fn tree_value_from_proto(proto: protos::TreeValue) -> BackendResult<TreeValue> {
         .value
         .ok_or_else(|| to_other_err("malformed tree value: missing oneof".to_string()))?;
     Ok(match value {
-        protos::tree_value::Value::TreeId(id) => TreeValue::Tree(TreeId::new(id)),
+        protos::tree_value::Value::TreeId(id) => {
+            validate_id_length("tree", &id, TREE_ID_LENGTH)?;
+            TreeValue::Tree(TreeId::new(id))
+        }
         protos::tree_value::Value::File(protos::tree_value::File {
             id,
             executable,
             copy_id,
-        }) => TreeValue::File {
-            id: FileId::new(id),
-            executable,
-            copy_id: CopyId::new(copy_id),
-        },
-        protos::tree_value::Value::SymlinkId(id) => TreeValue::Symlink(SymlinkId::new(id)),
+        }) => {
+            validate_id_length("file", &id, FILE_ID_LENGTH)?;
+            TreeValue::File {
+                id: FileId::new(id),
+                executable,
+                copy_id: CopyId::new(copy_id),
+            }
+        }
+        protos::tree_value::Value::SymlinkId(id) => {
+            validate_id_length("symlink", &id, SYMLINK_ID_LENGTH)?;
+            TreeValue::Symlink(SymlinkId::new(id))
+        }
     })
 }
 
@@ -381,28 +398,67 @@ fn commit_to_proto(commit: &Commit) -> protos::Commit {
     proto
 }
 
-fn commit_from_proto(mut proto: protos::Commit) -> Commit {
+fn commit_from_proto(mut proto: protos::Commit) -> BackendResult<Commit> {
     let secure_sig = proto.secure_sig.take().map(|sig| SecureSig {
         data: proto.encode_to_vec(),
         sig,
     });
-    let parents = proto.parents.into_iter().map(CommitId::new).collect();
-    let predecessors = proto.predecessors.into_iter().map(CommitId::new).collect();
-    let merge_builder: MergeBuilder<_> = proto.root_tree.into_iter().map(TreeId::new).collect();
+    if proto.parents.is_empty() {
+        return Err(to_other_err(
+            "malformed commit: missing parent ids".to_string(),
+        ));
+    }
+    if proto.root_tree.is_empty() {
+        return Err(to_other_err(
+            "malformed commit: missing root tree ids".to_string(),
+        ));
+    }
+    let parents = proto
+        .parents
+        .into_iter()
+        .map(|bytes| {
+            validate_id_length("commit parent", &bytes, COMMIT_ID_LENGTH)?;
+            Ok(CommitId::new(bytes))
+        })
+        .collect::<BackendResult<_>>()?;
+    let predecessors = proto
+        .predecessors
+        .into_iter()
+        .map(|bytes| {
+            validate_id_length("commit predecessor", &bytes, COMMIT_ID_LENGTH)?;
+            Ok(CommitId::new(bytes))
+        })
+        .collect::<BackendResult<_>>()?;
+    let root_tree_ids = proto
+        .root_tree
+        .into_iter()
+        .map(|bytes| {
+            validate_id_length("root tree", &bytes, TREE_ID_LENGTH)?;
+            Ok(TreeId::new(bytes))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    let merge_builder: MergeBuilder<_> = root_tree_ids.into_iter().collect();
     let root_tree = merge_builder.build();
     let conflict_labels = ConflictLabels::from_vec(proto.conflict_labels);
+    validate_id_length("change", &proto.change_id, CHANGE_ID_LENGTH)?;
     let change_id = ChangeId::new(proto.change_id);
-    Commit {
+    let author = proto
+        .author
+        .ok_or_else(|| to_other_err("malformed commit: missing author".to_string()))?;
+    let committer = proto
+        .committer
+        .ok_or_else(|| to_other_err("malformed commit: missing committer".to_string()))?;
+    Ok(Commit {
         parents,
         predecessors,
         root_tree,
         conflict_labels: conflict_labels.into_merge(),
         change_id,
         description: proto.description,
-        author: signature_from_proto(proto.author.unwrap_or_default()),
-        committer: signature_from_proto(proto.committer.unwrap_or_default()),
+        author: signature_from_proto(author)?,
+        committer: signature_from_proto(committer)?,
         secure_sig,
-    }
+    })
 }
 
 fn signature_to_proto(signature: &Signature) -> protos::commit::Signature {
@@ -416,14 +472,121 @@ fn signature_to_proto(signature: &Signature) -> protos::commit::Signature {
     }
 }
 
-fn signature_from_proto(proto: protos::commit::Signature) -> Signature {
-    let timestamp = proto.timestamp.unwrap_or_default();
-    Signature {
+fn signature_from_proto(proto: protos::commit::Signature) -> BackendResult<Signature> {
+    let timestamp = proto
+        .timestamp
+        .ok_or_else(|| to_other_err("malformed commit signature: missing timestamp".to_string()))?;
+    Ok(Signature {
         name: proto.name,
         email: proto.email,
         timestamp: Timestamp {
             timestamp: MillisSinceEpoch(timestamp.millis_since_epoch),
             tz_offset: timestamp.tz_offset,
         },
+    })
+}
+
+fn validate_id_length(object_type: &str, bytes: &[u8], expected: usize) -> BackendResult<()> {
+    if bytes.len() != expected {
+        return Err(to_other_err(format!(
+            "malformed {object_type} id: expected {expected} bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_signature() -> protos::commit::Signature {
+        protos::commit::Signature {
+            name: "alice".to_string(),
+            email: "alice@schemahub.invalid".to_string(),
+            timestamp: Some(protos::commit::Timestamp {
+                millis_since_epoch: 1,
+                tz_offset: 0,
+            }),
+        }
+    }
+
+    fn valid_commit_proto() -> protos::Commit {
+        protos::Commit {
+            parents: vec![vec![1; COMMIT_ID_LENGTH]],
+            root_tree: vec![vec![2; TREE_ID_LENGTH]],
+            change_id: vec![3; CHANGE_ID_LENGTH],
+            author: Some(valid_signature()),
+            committer: Some(valid_signature()),
+            ..protos::Commit::default()
+        }
+    }
+
+    #[test]
+    fn git_submodule_tree_values_return_an_unsupported_error() {
+        // Arrange
+        let value = TreeValue::GitSubmodule(CommitId::from_bytes(&[1; COMMIT_ID_LENGTH]));
+
+        // Act
+        let result = tree_value_to_proto(&value);
+
+        // Assert
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn stored_commit_rejects_a_missing_author() {
+        // Arrange
+        let mut proto = valid_commit_proto();
+        proto.author = None;
+
+        // Act
+        let result = commit_from_proto(proto);
+
+        // Assert
+        assert!(matches!(result, Err(BackendError::Other(_))));
+    }
+
+    #[test]
+    fn stored_commit_rejects_a_wrong_length_change_id() {
+        // Arrange
+        let mut proto = valid_commit_proto();
+        proto.change_id.pop();
+
+        // Act
+        let result = commit_from_proto(proto);
+
+        // Assert
+        assert!(matches!(result, Err(BackendError::Other(_))));
+    }
+
+    #[test]
+    fn stored_tree_value_rejects_a_wrong_length_file_id() {
+        // Arrange
+        let proto = protos::TreeValue {
+            value: Some(protos::tree_value::Value::File(protos::tree_value::File {
+                id: vec![1; FILE_ID_LENGTH - 1],
+                executable: false,
+                copy_id: Vec::new(),
+            })),
+        };
+
+        // Act
+        let result = tree_value_from_proto(proto);
+
+        // Assert
+        assert!(matches!(result, Err(BackendError::Other(_))));
+    }
+
+    #[test]
+    fn database_faults_are_not_reported_as_missing_objects() {
+        // Arrange
+        let error = ObjectDbError::Backend("storage unavailable".to_string());
+
+        // Act
+        let result = read_error("commit", "ab".repeat(COMMIT_ID_LENGTH), error);
+
+        // Assert
+        assert!(matches!(result, BackendError::Other(_)));
     }
 }

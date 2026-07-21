@@ -18,7 +18,7 @@ pub struct ParsedSchema {
 /// A schema loaded from storage for mutation/printing: meta + named decls.
 ///
 /// `decls` is a `BTreeMap` so iteration is deterministic for canonical printing.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SchemaObjects {
     pub meta: MetaBlob,
     pub decls: BTreeMap<String, DeclBlob>,
@@ -38,12 +38,24 @@ impl SchemaObjects {
 /// Each entry is one schema file's reassembled objects, keyed by its full path.
 #[derive(Clone, Debug, Default)]
 pub struct SchemaClosure {
+    /// The schema explicitly requested by the caller. Import closures can contain
+    /// several files with root-level metadata, so codegen must not infer the root
+    /// from map iteration or lexical path order.
+    pub root: Option<SchemaPath>,
     pub entries: HashMap<SchemaPath, SchemaObjects>,
 }
 
 impl SchemaClosure {
     pub fn new() -> Self {
         Self {
+            root: None,
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn with_root(root: SchemaPath) -> Self {
+        Self {
+            root: Some(root),
             entries: HashMap::new(),
         }
     }

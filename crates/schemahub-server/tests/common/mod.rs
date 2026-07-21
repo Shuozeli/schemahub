@@ -6,12 +6,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use pb::change_service_client::ChangeServiceClient;
 use pb::codegen_service_client::CodegenServiceClient;
 use pb::exploration_service_client::ExplorationServiceClient;
 use pb::history_service_client::HistoryServiceClient;
 use pb::project_service_client::ProjectServiceClient;
 use pb::ref_service_client::RefServiceClient;
 use pb::schema_service_client::SchemaServiceClient;
+use pb::serving_service_client::ServingServiceClient;
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_jj::{MemoryObjectDb, ObjectDb};
 use schemahub_server::{build_core, build_router, config::Config};
@@ -60,6 +62,8 @@ pub struct Clients {
     pub history: HistoryServiceClient<Channel>,
     pub refs: RefServiceClient<Channel>,
     pub codegen: CodegenServiceClient<Channel>,
+    pub change: ChangeServiceClient<Channel>,
+    pub serving: ServingServiceClient<Channel>,
     pub project: ProjectServiceClient<Channel>,
 }
 
@@ -72,6 +76,8 @@ pub async fn clients(url: &str) -> Clients {
         history: HistoryServiceClient::new(ch.clone()),
         refs: RefServiceClient::new(ch.clone()),
         codegen: CodegenServiceClient::new(ch.clone()),
+        change: ChangeServiceClient::new(ch.clone()),
+        serving: ServingServiceClient::new(ch.clone()),
         project: ProjectServiceClient::new(ch),
     }
 }

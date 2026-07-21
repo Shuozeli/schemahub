@@ -15,7 +15,10 @@ members = [
 [workspace.dependencies]
 tokio       = { version = "1", features = ["full"] }
 tonic       = "0.12"
+tonic-health = "0.12"
 tonic-build = "0.12"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prost       = "0.13"
 prost-types = "0.13"
 # jj-lib is the real Jujutsu library; schemahub-jj implements its
@@ -37,15 +40,20 @@ thiserror   = "1"
 sha2        = "0.10"
 hex         = "0.4"
 uuid        = { version = "1", features = ["v4"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
+reqwest     = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+utoipa      = { version = "5.5.0", features = ["axum_extras"] }
+utoipa-axum = "0.1.3"
 # Postgres backend for schemahub-jj (optional, behind the `postgres` feature).
 # `runtime-tokio` + `tls-rustls` is the modern equivalent of the old
 # `runtime-tokio-rustls` combo feature.
-sqlx        = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros"] }
+sqlx        = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate"] }
 
-# sibling compilers (path deps within ~/projects/shuozeli/compilers/)
-protoc-rs-parser  = { path = "../../compilers/protobuf-rs/parser" }
-protoc-rs-schema  = { path = "../../compilers/protobuf-rs/schema" }
-protoc-rs-codegen = { path = "../../compilers/protobuf-rs/codegen" }
-flatc-rs-parser   = { path = "../../compilers/flatbuffers-rs/parser" }
-flatc-rs-schema   = { path = "../../compilers/flatbuffers-rs/schema" }
-flatc-rs-codegen  = { path = "../../compilers/flatbuffers-rs/codegen" }
+# Compiler dependencies use immutable Git revisions so an independent checkout
+# resolves the same format boundary as CI and release builds.
+protoc-rs-parser  = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+protoc-rs-schema  = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+protoc-rs-codegen = { git = "https://github.com/Shuozeli/protobuf-rs.git", rev = "a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac" }
+flatc-rs-parser   = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }
+flatc-rs-schema   = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }
+flatc-rs-codegen  = { git = "https://github.com/Shuozeli/flatbuffers-rs.git", rev = "7dc2c76c08f452b9a208230057c0cb6327e65f24" }

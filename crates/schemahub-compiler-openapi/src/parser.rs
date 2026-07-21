@@ -21,6 +21,7 @@ use crate::ast::{
     ResponseDef, ResponseEntry, ResponseOrRef, SchemaOrRef, SchemaRef, ServerObject, BLOB_VERSION,
 };
 use crate::blob::{encode_decl, encode_meta};
+use crate::reference::{parse_source_component_reference, ComponentReference};
 
 /// Parse an OpenAPI 3.1 document (YAML or JSON — JSON is a subset of YAML).
 pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
@@ -44,37 +45,22 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
 
     // ── Metadata (→ MetaBlob) ──────────────────────────────────────────────────
     let info_obj = parse_info_object(root_map.get("info"))?;
-    let servers = root_map
-        .get("servers")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|s| {
-                    let url = s.get("url")?.as_str()?.to_owned();
-                    let description = s
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .map(str::to_owned);
-                    Some(ServerObject { url, description })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let servers = parse_servers(root_map.get("servers"))?;
 
     let metadata = DocumentMetadataBlob {
         blob_version: BLOB_VERSION,
         openapi_version: openapi_version.to_owned(),
         info: Some(info_obj),
         servers,
-        extensions: extract_extensions(root_map),
+        extensions: extract_extensions(root_map, "OpenAPI document")?,
     };
 
     let mut decls: Vec<(String, schemahub_types::blob::DeclBlob)> = Vec::new();
 
     // ── Paths ──────────────────────────────────────────────────────────────────
-    if let Some(paths) = root_map.get("paths").and_then(|v| v.as_mapping()) {
+    if let Some(paths) = optional_mapping(root_map, "paths", "OpenAPI document")? {
         for (path_key, path_val) in paths.iter() {
-            let path_str = path_key.as_str().unwrap_or_default().to_owned();
+            let path_str = string_key(path_key, "paths")?.to_owned();
             let blob = parse_path_item(&path_str, path_val)?;
             decls.push((
                 format!("path:{path_str}"),
@@ -84,13 +70,13 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
     }
 
     // ── Components ──────────────────────────────────────────────────────────────
-    if let Some(components) = root_map.get("components").and_then(|v| v.as_mapping()) {
-        if let Some(schemas) = components.get("schemas").and_then(|v| v.as_mapping()) {
+    if let Some(components) = optional_mapping(root_map, "components", "OpenAPI document")? {
+        if let Some(schemas) = optional_mapping(components, "schemas", "components")? {
             for (name_key, schema_val) in schemas.iter() {
-                let name = name_key.as_str().unwrap_or_default().to_owned();
+                let name = string_key(name_key, "components.schemas")?.to_owned();
                 let blob = ComponentSchemaBlob {
                     name: name.clone(),
-                    schema: Some(parse_schema_def(schema_val)),
+                    schema: Some(parse_schema_def(schema_val)?),
                     extensions: None,
                 };
                 decls.push((
@@ -101,12 +87,12 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
                 ));
             }
         }
-        if let Some(params) = components.get("parameters").and_then(|v| v.as_mapping()) {
+        if let Some(params) = optional_mapping(components, "parameters", "components")? {
             for (name_key, param_val) in params.iter() {
-                let name = name_key.as_str().unwrap_or_default().to_owned();
+                let name = string_key(name_key, "components.parameters")?.to_owned();
                 let blob = ComponentParameterBlob {
                     name: name.clone(),
-                    parameter: Some(parse_parameter_def(param_val)),
+                    parameter: Some(parse_parameter_def(param_val)?),
                 };
                 decls.push((
                     format!("param:{name}"),
@@ -114,12 +100,12 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
                 ));
             }
         }
-        if let Some(responses) = components.get("responses").and_then(|v| v.as_mapping()) {
+        if let Some(responses) = optional_mapping(components, "responses", "components")? {
             for (name_key, resp_val) in responses.iter() {
-                let name = name_key.as_str().unwrap_or_default().to_owned();
+                let name = string_key(name_key, "components.responses")?.to_owned();
                 let blob = ComponentResponseBlob {
                     name: name.clone(),
-                    response: Some(parse_response_def(resp_val)),
+                    response: Some(parse_response_def(resp_val)?),
                 };
                 decls.push((
                     format!("response:{name}"),
@@ -127,12 +113,12 @@ pub fn parse_openapi(source: &str) -> Result<ParsedSchema, ParseError> {
                 ));
             }
         }
-        if let Some(bodies) = components.get("requestBodies").and_then(|v| v.as_mapping()) {
+        if let Some(bodies) = optional_mapping(components, "requestBodies", "components")? {
             for (name_key, body_val) in bodies.iter() {
-                let name = name_key.as_str().unwrap_or_default().to_owned();
+                let name = string_key(name_key, "components.requestBodies")?.to_owned();
                 let blob = ComponentRequestBodyBlob {
                     name: name.clone(),
-                    request_body: Some(parse_request_body_def(body_val)),
+                    request_body: Some(parse_request_body_def(body_val)?),
                 };
                 decls.push((
                     format!("requestBody:{name}"),
@@ -183,16 +169,32 @@ fn parse_info_object(info: Option<&Value>) -> Result<InfoObject, ParseError> {
     })
 }
 
-fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => {
-            return Ok(PathItemBlob {
-                path_pattern: path.to_owned(),
-                ..Default::default()
-            });
-        }
+fn parse_servers(servers: Option<&Value>) -> Result<Vec<ServerObject>, ParseError> {
+    let Some(value) = servers else {
+        return Ok(Vec::new());
     };
+    let sequence = value
+        .as_sequence()
+        .ok_or_else(|| ParseError::Other("'servers' must be an array".into()))?;
+
+    sequence
+        .iter()
+        .enumerate()
+        .map(|(index, server)| {
+            let context = format!("servers[{index}]");
+            let map = mapping(server, &context)?;
+            Ok(ServerObject {
+                url: required_string(map, "url", &context)?.to_owned(),
+                description: optional_string(map, "description", &context)?,
+            })
+        })
+        .collect()
+}
+
+fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> {
+    let context = format!("path {path:?}");
+    reject_standalone_reference(val, &context)?;
+    let map = mapping(val, &context)?;
 
     let summary = map
         .get("summary")
@@ -203,13 +205,12 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
-    let parameters = map
-        .get("parameters")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(parse_parameter_or_ref).collect())
-        .unwrap_or_default();
+    let parameters = parse_optional_array(map.get("parameters"), &format!("{context}.parameters"))?
+        .iter()
+        .map(parse_parameter_or_ref)
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let extensions = extract_extensions(map);
+    let extensions = extract_extensions(map, &context)?;
 
     let mut operations: Vec<OperationDef> = Vec::new();
     let http_methods = [
@@ -222,7 +223,7 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
             // clarity in case the literal list ever drifts.
             let method = HttpMethod::from_str(method_str)
                 .expect("http_methods literal must be a valid HttpMethod");
-            operations.push(parse_operation_def(method, op_val));
+            operations.push(parse_operation_def(method, op_val)?);
         }
     }
 
@@ -236,11 +237,9 @@ fn parse_path_item(path: &str, val: &Value) -> Result<PathItemBlob, ParseError> 
     })
 }
 
-fn parse_operation_def(method: HttpMethod, val: &Value) -> OperationDef {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return OperationDef::empty(method),
-    };
+fn parse_operation_def(method: HttpMethod, val: &Value) -> Result<OperationDef, ParseError> {
+    let context = format!("{} operation", method.to_str());
+    let map = mapping(val, &context)?;
 
     let operation_id = map
         .get("operationId")
@@ -256,38 +255,42 @@ fn parse_operation_def(method: HttpMethod, val: &Value) -> OperationDef {
         .map(str::to_owned);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
 
-    let tags = map
-        .get("tags")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|t| t.as_str().map(str::to_owned))
-                .collect()
+    let tags = parse_optional_array(map.get("tags"), &format!("{context}.tags"))?
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            tag.as_str().map(str::to_owned).ok_or_else(|| {
+                ParseError::Other(format!("{context}.tags[{index}] must be a string"))
+            })
         })
-        .unwrap_or_default();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let parameters = map
-        .get("parameters")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(parse_parameter_or_ref).collect())
-        .unwrap_or_default();
+    let parameters = parse_optional_array(map.get("parameters"), &format!("{context}.parameters"))?
+        .iter()
+        .map(parse_parameter_or_ref)
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let request_body = map.get("requestBody").map(parse_request_body_or_ref);
+    let request_body = map
+        .get("requestBody")
+        .map(parse_request_body_or_ref)
+        .transpose()?;
 
-    let responses = map
-        .get("responses")
-        .and_then(|v| v.as_mapping())
-        .map(|rm| {
-            rm.iter()
-                .map(|(k, v)| ResponseEntry {
-                    status_code: value_to_string(k),
-                    response: Some(parse_response_or_ref(v)),
+    let responses = optional_mapping(map, "responses", &context)?
+        .map(|response_map| {
+            response_map
+                .iter()
+                .map(|(key, value)| {
+                    Ok(ResponseEntry {
+                        status_code: response_key_to_string(key)?,
+                        response: Some(parse_response_or_ref(value)?),
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, ParseError>>()
         })
+        .transpose()?
         .unwrap_or_default();
 
-    OperationDef {
+    Ok(OperationDef {
         method,
         operation_id,
         summary,
@@ -297,205 +300,199 @@ fn parse_operation_def(method: HttpMethod, val: &Value) -> OperationDef {
         request_body,
         responses,
         deprecated,
-        extensions: extract_extensions(map),
-    }
+        extensions: extract_extensions(map, &context)?,
+    })
 }
 
-fn parse_parameter_or_ref(val: &Value) -> ParameterOrRef {
-    if let Some(ref_str) = get_ref(val) {
-        let name = ref_str
-            .strip_prefix("#/components/parameters/")
-            .unwrap_or(&ref_str)
-            .to_owned();
-        ParameterOrRef::Ref(name)
+fn parse_parameter_or_ref(val: &Value) -> Result<ParameterOrRef, ParseError> {
+    if let Some(ref_str) = get_ref(val)? {
+        let reference =
+            parse_source_component_reference(&ref_str, "parameters").map_err(ParseError::Other)?;
+        Ok(ParameterOrRef::Ref(match reference {
+            ComponentReference::Local(name) => name,
+            ComponentReference::External(_) => ref_str,
+        }))
     } else {
-        ParameterOrRef::Inline(Box::new(parse_parameter_def(val)))
+        Ok(ParameterOrRef::Inline(Box::new(parse_parameter_def(val)?)))
     }
 }
 
-fn parse_parameter_def(val: &Value) -> ParameterDef {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return ParameterDef::default(),
-    };
+fn parse_parameter_def(val: &Value) -> Result<ParameterDef, ParseError> {
+    reject_standalone_reference(val, "parameter")?;
+    let map = mapping(val, "parameter")?;
 
-    let name = map
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let location_str = map.get("in").and_then(|v| v.as_str()).unwrap_or("query");
-    let location = ParameterLocation::from_str(location_str).unwrap_or(ParameterLocation::Query);
-    // NOTE: an unknown `in` value falls back to Query for v1 leniency; a
-    // stricter pass would surface ParseError. Tracked in
-    // docs/code-quality-findings.md §8.
-    let description = map
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    let name = required_string(map, "name", "parameter")?.to_owned();
+    let location_str = required_string(map, "in", "parameter")?;
+    let location = ParameterLocation::from_str(location_str)
+        .map_err(|error| ParseError::Other(error.to_string()))?;
+    let description = optional_string(map, "description", "parameter")?;
     let required = map
         .get("required")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let deprecated = map.get("deprecated").and_then(|v| v.as_bool());
-    let schema = map.get("schema").map(parse_schema_or_ref);
+    let schema = map.get("schema").map(parse_schema_or_ref).transpose()?;
 
-    ParameterDef {
+    Ok(ParameterDef {
         name,
         location,
         description,
         required,
         deprecated,
         schema,
-        extensions: extract_extensions(map),
-    }
+        extensions: extract_extensions(map, "parameter")?,
+    })
 }
 
-fn parse_request_body_or_ref(val: &Value) -> RequestBodyOrRef {
-    if let Some(ref_str) = get_ref(val) {
-        let name = ref_str
-            .strip_prefix("#/components/requestBodies/")
-            .unwrap_or(&ref_str)
-            .to_owned();
-        RequestBodyOrRef::Ref(name)
+fn parse_request_body_or_ref(val: &Value) -> Result<RequestBodyOrRef, ParseError> {
+    if let Some(ref_str) = get_ref(val)? {
+        let reference = parse_source_component_reference(&ref_str, "requestBodies")
+            .map_err(ParseError::Other)?;
+        Ok(RequestBodyOrRef::Ref(match reference {
+            ComponentReference::Local(name) => name,
+            ComponentReference::External(_) => ref_str,
+        }))
     } else {
-        RequestBodyOrRef::Inline(parse_request_body_def(val))
+        Ok(RequestBodyOrRef::Inline(parse_request_body_def(val)?))
     }
 }
 
-fn parse_request_body_def(val: &Value) -> RequestBodyDef {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return RequestBodyDef::default(),
-    };
+fn parse_request_body_def(val: &Value) -> Result<RequestBodyDef, ParseError> {
+    reject_standalone_reference(val, "request body")?;
+    let map = mapping(val, "request body")?;
 
-    RequestBodyDef {
-        description: map
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+    Ok(RequestBodyDef {
+        description: optional_string(map, "description", "request body")?,
         required: map
             .get("required")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        content: parse_content(map.get("content")),
-        extensions: extract_extensions(map),
-    }
+        content: parse_content(map.get("content"))?,
+        extensions: extract_extensions(map, "request body")?,
+    })
 }
 
-fn parse_response_or_ref(val: &Value) -> ResponseOrRef {
-    if let Some(ref_str) = get_ref(val) {
-        let name = ref_str
-            .strip_prefix("#/components/responses/")
-            .unwrap_or(&ref_str)
-            .to_owned();
-        ResponseOrRef::Ref(name)
+fn parse_response_or_ref(val: &Value) -> Result<ResponseOrRef, ParseError> {
+    if let Some(ref_str) = get_ref(val)? {
+        let reference =
+            parse_source_component_reference(&ref_str, "responses").map_err(ParseError::Other)?;
+        Ok(ResponseOrRef::Ref(match reference {
+            ComponentReference::Local(name) => name,
+            ComponentReference::External(_) => ref_str,
+        }))
     } else {
-        ResponseOrRef::Inline(parse_response_def(val))
+        Ok(ResponseOrRef::Inline(parse_response_def(val)?))
     }
 }
 
-fn parse_response_def(val: &Value) -> ResponseDef {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return ResponseDef::default(),
-    };
+fn parse_response_def(val: &Value) -> Result<ResponseDef, ParseError> {
+    reject_standalone_reference(val, "response")?;
+    let map = mapping(val, "response")?;
 
-    let description = map
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let content = parse_content(map.get("content"));
+    let description = required_string(map, "description", "response")?.to_owned();
+    let content = parse_content(map.get("content"))?;
 
-    let headers = map
-        .get("headers")
-        .and_then(|v| v.as_mapping())
+    let headers = optional_mapping(map, "headers", "response")?
         .map(|hm| {
             hm.iter()
                 .map(|(k, v)| {
-                    let name = k.as_str().unwrap_or("").to_owned();
-                    let hmap = v.as_mapping();
-                    let description = hmap
-                        .and_then(|m| m.get("description"))
-                        .and_then(|d| d.as_str())
-                        .map(str::to_owned);
-                    let required = hmap
-                        .and_then(|m| m.get("required"))
-                        .and_then(|r| r.as_bool());
-                    let schema = hmap.and_then(|m| m.get("schema")).map(parse_schema_or_ref);
-                    HeaderDef {
+                    let name = string_key(k, "response.headers")?.to_owned();
+                    if get_ref(v)?.is_some() {
+                        return Err(ParseError::Other(format!(
+                            "response header {name:?} uses an unsupported reference"
+                        )));
+                    }
+                    let hmap = mapping(v, &format!("response header {name:?}"))?;
+                    let description =
+                        optional_string(hmap, "description", &format!("response header {name:?}"))?;
+                    let required = hmap.get("required").and_then(|r| r.as_bool());
+                    let schema = hmap.get("schema").map(parse_schema_or_ref).transpose()?;
+                    Ok(HeaderDef {
                         name,
                         description,
                         required,
                         schema,
-                    }
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, ParseError>>()
         })
+        .transpose()?
         .unwrap_or_default();
 
-    ResponseDef {
+    Ok(ResponseDef {
         description,
         content,
         headers,
-        extensions: extract_extensions(map),
-    }
+        extensions: extract_extensions(map, "response")?,
+    })
 }
 
-fn parse_content(val: Option<&Value>) -> Vec<MediaTypeEntry> {
-    val.and_then(|v| v.as_mapping())
-        .map(|cm| {
-            cm.iter()
-                .map(|(k, v)| {
-                    let media_type = k.as_str().unwrap_or("").to_owned();
-                    let cmap = v.as_mapping();
-                    let schema = cmap.and_then(|m| m.get("schema")).map(parse_schema_or_ref);
-                    let extensions = cmap.and_then(extract_extensions);
-                    MediaTypeEntry {
-                        media_type,
-                        schema,
-                        extensions,
-                    }
-                })
-                .collect()
+fn parse_content(val: Option<&Value>) -> Result<Vec<MediaTypeEntry>, ParseError> {
+    let Some(value) = val else {
+        return Ok(Vec::new());
+    };
+    let content = mapping(value, "content")?;
+    content
+        .iter()
+        .map(|(key, value)| {
+            let media_type = string_key(key, "content")?.to_owned();
+            let context = format!("media type {media_type:?}");
+            let media_map = mapping(value, &context)?;
+            Ok(MediaTypeEntry {
+                media_type,
+                schema: media_map
+                    .get("schema")
+                    .map(parse_schema_or_ref)
+                    .transpose()?,
+                extensions: extract_extensions(media_map, &context)?,
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
-fn parse_schema_or_ref(val: &Value) -> SchemaOrRef {
-    if let Some(ref_str) = get_ref(val) {
-        let local_name = ref_str
-            .strip_prefix("#/components/schemas/")
-            .map(str::to_owned)
-            .unwrap_or_else(|| ref_str.clone());
-        SchemaOrRef::Ref(SchemaRef {
-            local_name,
-            external_import: None,
-        })
+fn parse_schema_or_ref(val: &Value) -> Result<SchemaOrRef, ParseError> {
+    if let Some(ref_str) = get_ref(val)? {
+        let reference =
+            parse_source_component_reference(&ref_str, "schemas").map_err(ParseError::Other)?;
+        Ok(SchemaOrRef::Ref(match reference {
+            ComponentReference::Local(local_name) => SchemaRef {
+                local_name,
+                external_import: None,
+            },
+            ComponentReference::External(external_import) => SchemaRef {
+                local_name: String::new(),
+                external_import: Some(external_import),
+            },
+        }))
     } else {
-        SchemaOrRef::Inline(Box::new(parse_schema_def(val)))
+        Ok(SchemaOrRef::Inline(Box::new(parse_schema_def(val)?)))
     }
 }
 
 /// Parse a JSON Schema definition. `pub` so mutations can reuse it.
-pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return JsonSchemaDef::default(),
-    };
+pub fn parse_schema_def(val: &Value) -> Result<JsonSchemaDef, ParseError> {
+    reject_standalone_reference(val, "component schema definition")?;
+    let map = mapping(val, "JSON Schema")?;
 
     let types: Vec<JsonSchemaType> = if let Some(type_val) = map.get("type") {
         if let Some(s) = type_val.as_str() {
-            JsonSchemaType::from_str(s)
-                .map(|t| vec![t])
-                .unwrap_or_default()
+            vec![JsonSchemaType::from_str(s)
+                .map_err(|error| ParseError::Other(error.to_string()))?]
         } else if let Some(seq) = type_val.as_sequence() {
             seq.iter()
-                .filter_map(|t| t.as_str().and_then(|s| JsonSchemaType::from_str(s).ok()))
-                .collect()
+                .enumerate()
+                .map(|(index, value)| {
+                    let schema_type = value.as_str().ok_or_else(|| {
+                        ParseError::Other(format!("JSON Schema type[{index}] must be a string"))
+                    })?;
+                    JsonSchemaType::from_str(schema_type)
+                        .map_err(|error| ParseError::Other(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
         } else {
-            vec![]
+            return Err(ParseError::Other(
+                "JSON Schema 'type' must be a string or array of strings".into(),
+            ));
         }
     } else {
         vec![]
@@ -531,30 +528,35 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
     let max_items = map.get("maxItems").and_then(|v| v.as_u64());
     let unique_items = map.get("uniqueItems").and_then(|v| v.as_bool());
 
-    let items = map.get("items").map(|v| Box::new(parse_schema_or_ref(v)));
+    let items = map
+        .get("items")
+        .map(parse_schema_or_ref)
+        .transpose()?
+        .map(Box::new);
 
-    let properties: Vec<PropertyDef> = map
-        .get("properties")
-        .and_then(|v| v.as_mapping())
+    let properties: Vec<PropertyDef> = optional_mapping(map, "properties", "JSON Schema")?
         .map(|pm| {
             pm.iter()
-                .map(|(k, v)| PropertyDef {
-                    name: k.as_str().unwrap_or("").to_owned(),
-                    schema: Some(parse_schema_or_ref(v)),
+                .map(|(key, value)| {
+                    Ok(PropertyDef {
+                        name: string_key(key, "JSON Schema properties")?.to_owned(),
+                        schema: Some(parse_schema_or_ref(value)?),
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, ParseError>>()
         })
+        .transpose()?
         .unwrap_or_default();
 
-    let required: Vec<String> = map
-        .get("required")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
+    let required: Vec<String> = parse_optional_array(map.get("required"), "JSON Schema required")?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ParseError::Other(format!("JSON Schema required[{index}] must be a string"))
+            })
         })
-        .unwrap_or_default();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let min_properties = map.get("minProperties").and_then(|v| v.as_u64());
     let max_properties = map.get("maxProperties").and_then(|v| v.as_u64());
@@ -565,50 +567,37 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
                 if let Some(b) = ap.as_bool() {
                     (Some(b), None)
                 } else {
-                    (None, Some(Box::new(parse_schema_or_ref(ap))))
+                    (None, Some(Box::new(parse_schema_or_ref(ap)?)))
                 }
             }
             None => (None, None),
         };
 
-    let all_of = map
-        .get("allOf")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(parse_schema_or_ref).collect())
-        .unwrap_or_default();
+    let all_of = parse_schema_array(map.get("allOf"), "JSON Schema allOf")?;
+    let any_of = parse_schema_array(map.get("anyOf"), "JSON Schema anyOf")?;
+    let one_of = parse_schema_array(map.get("oneOf"), "JSON Schema oneOf")?;
 
-    let any_of = map
-        .get("anyOf")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(parse_schema_or_ref).collect())
-        .unwrap_or_default();
+    let not = map
+        .get("not")
+        .map(parse_schema_or_ref)
+        .transpose()?
+        .map(Box::new);
 
-    let one_of = map
-        .get("oneOf")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().map(parse_schema_or_ref).collect())
-        .unwrap_or_default();
-
-    let not = map.get("not").map(|v| Box::new(parse_schema_or_ref(v)));
-
-    let enum_values: Vec<String> = map
-        .get("enum")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .collect()
-        })
-        .unwrap_or_default();
+    let enum_values: Vec<String> = parse_optional_array(map.get("enum"), "JSON Schema enum")?
+        .iter()
+        .map(|value| json_value_to_string(value, "JSON Schema enum value"))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let const_value = map
         .get("const")
-        .map(|v| serde_json::to_string(v).unwrap_or_default());
+        .map(|value| json_value_to_string(value, "JSON Schema const"))
+        .transpose()?;
     let default = map
         .get("default")
-        .map(|v| serde_json::to_string(v).unwrap_or_default());
+        .map(|value| json_value_to_string(value, "JSON Schema default"))
+        .transpose()?;
 
-    JsonSchemaDef {
+    Ok(JsonSchemaDef {
         types,
         format,
         min_length,
@@ -641,20 +630,119 @@ pub fn parse_schema_def(val: &Value) -> JsonSchemaDef {
         deprecated,
         read_only,
         write_only,
-        extensions: extract_extensions(map),
-    }
+        extensions: extract_extensions(map, "JSON Schema")?,
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn get_ref(val: &Value) -> Option<String> {
-    val.as_mapping()
-        .and_then(|m| m.get("$ref"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+fn mapping<'a>(value: &'a Value, context: &str) -> Result<&'a serde_yaml::Mapping, ParseError> {
+    value
+        .as_mapping()
+        .ok_or_else(|| ParseError::Other(format!("{context} must be an object")))
 }
 
-fn extract_extensions(map: &serde_yaml::Mapping) -> Option<Extensions> {
+fn optional_mapping<'a>(
+    map: &'a serde_yaml::Mapping,
+    field: &str,
+    context: &str,
+) -> Result<Option<&'a serde_yaml::Mapping>, ParseError> {
+    map.get(field)
+        .map(|value| mapping(value, &format!("{context}.{field}")))
+        .transpose()
+}
+
+fn parse_optional_array<'a>(
+    value: Option<&'a Value>,
+    context: &str,
+) -> Result<&'a [Value], ParseError> {
+    match value {
+        Some(value) => value
+            .as_sequence()
+            .map(Vec::as_slice)
+            .ok_or_else(|| ParseError::Other(format!("{context} must be an array"))),
+        None => Ok(&[]),
+    }
+}
+
+fn required_string<'a>(
+    map: &'a serde_yaml::Mapping,
+    field: &str,
+    context: &str,
+) -> Result<&'a str, ParseError> {
+    map.get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ParseError::Other(format!("{context}.{field} must be a string")))
+}
+
+fn optional_string(
+    map: &serde_yaml::Mapping,
+    field: &str,
+    context: &str,
+) -> Result<Option<String>, ParseError> {
+    match map.get(field) {
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_owned()))
+            .ok_or_else(|| ParseError::Other(format!("{context}.{field} must be a string"))),
+        None => Ok(None),
+    }
+}
+
+fn string_key<'a>(key: &'a Value, context: &str) -> Result<&'a str, ParseError> {
+    key.as_str()
+        .ok_or_else(|| ParseError::Other(format!("{context} key must be a string")))
+}
+
+fn get_ref(val: &Value) -> Result<Option<String>, ParseError> {
+    let Some(map) = val.as_mapping() else {
+        return Ok(None);
+    };
+    let Some(reference) = map.get("$ref") else {
+        return Ok(None);
+    };
+    if map.len() != 1 {
+        return Err(ParseError::Other(
+            "'$ref' objects with sibling fields are outside the selected OpenAPI AST surface"
+                .into(),
+        ));
+    }
+    let reference = reference
+        .as_str()
+        .filter(|reference| !reference.is_empty())
+        .ok_or_else(|| ParseError::Other("'$ref' must be a non-empty string".into()))?;
+    Ok(Some(reference.to_owned()))
+}
+
+fn reject_standalone_reference(val: &Value, context: &str) -> Result<(), ParseError> {
+    if let Some(reference) = get_ref(val)? {
+        return Err(ParseError::Other(format!(
+            "{context} uses standalone $ref {reference:?}, which is outside the selected \
+             OpenAPI AST surface"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_schema_array(
+    value: Option<&Value>,
+    context: &str,
+) -> Result<Vec<SchemaOrRef>, ParseError> {
+    parse_optional_array(value, context)?
+        .iter()
+        .map(parse_schema_or_ref)
+        .collect()
+}
+
+fn json_value_to_string(value: &Value, context: &str) -> Result<String, ParseError> {
+    serde_json::to_string(value)
+        .map_err(|error| ParseError::Other(format!("{context} is not valid JSON: {error}")))
+}
+
+fn extract_extensions(
+    map: &serde_yaml::Mapping,
+    context: &str,
+) -> Result<Option<Extensions>, ParseError> {
     let ext_map: serde_yaml::Mapping = map
         .iter()
         .filter(|(k, _)| k.as_str().map(|s| s.starts_with("x-")).unwrap_or(false))
@@ -662,19 +750,22 @@ fn extract_extensions(map: &serde_yaml::Mapping) -> Option<Extensions> {
         .collect();
 
     if ext_map.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(Extensions {
-            json_bytes: serde_json::to_vec(&ext_map).unwrap_or_default(),
-        })
+        let json_bytes = serde_json::to_vec(&ext_map).map_err(|error| {
+            ParseError::Other(format!("{context} extensions are not valid JSON: {error}"))
+        })?;
+        Ok(Some(Extensions { json_bytes }))
     }
 }
 
-fn value_to_string(val: &Value) -> String {
+fn response_key_to_string(val: &Value) -> Result<String, ParseError> {
     match val {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        _ => String::new(),
+        Value::String(s) => Ok(s.clone()),
+        // YAML commonly decodes an unquoted `200` response key as a number.
+        Value::Number(n) => Ok(n.to_string()),
+        _ => Err(ParseError::Other(
+            "response status key must be a string or number".into(),
+        )),
     }
 }

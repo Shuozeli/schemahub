@@ -28,6 +28,7 @@ use jj_lib::backend::Backend as _;
 use jj_lib::config::StackedConfig;
 use jj_lib::default_index::DefaultIndexStore;
 use jj_lib::default_submodule_store::DefaultSubmoduleStore;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RootOperationData;
 use jj_lib::repo::{ReadonlyRepo, RepoLoader};
 use jj_lib::settings::UserSettings;
@@ -36,7 +37,7 @@ use jj_lib::store::Store as JjStore;
 use jj_lib::tree_merge::MergeOptions;
 
 use crate::jj_backend::DbBackend;
-use crate::jj_op_heads::DbOpHeadsStore;
+use crate::jj_op_heads::{DbOpHeadsStore, OP_HEADS_REF};
 use crate::jj_op_store::DbOpStore;
 use crate::object_db::{ObjectDb, ObjectDbError};
 use crate::{JjError, JjResult};
@@ -77,7 +78,7 @@ impl Store {
     /// stores. The index/submodule caches live under a per-repo subdir of the
     /// `Jj`'s scratch dir.
     pub(crate) fn loader(&self, repo_key: &str) -> JjResult<RepoLoader> {
-        let backend = DbBackend::new(self.db.clone());
+        let backend = DbBackend::new(self.db.clone()).map_err(JjError::ObjectDb)?;
         let root_commit_id = backend.root_commit_id().clone();
         let merge_options = MergeOptions::from_settings(&self.settings)
             .map_err(|e| JjError::Other(e.to_string()))?;
@@ -124,12 +125,9 @@ impl Store {
             .block_on(loader.op_heads_store().get_op_heads())
             .map_err(|e| JjError::Other(e.to_string()))?;
         if heads.is_empty() {
-            self.block_on(
-                loader
-                    .op_heads_store()
-                    .update_op_heads(&[], loader.op_store().root_operation_id()),
-            )
-            .map_err(|e| JjError::Other(e.to_string()))?;
+            let root = loader.op_store().root_operation_id().hex();
+            self.db
+                .create_ref(repo_key, OP_HEADS_REF, root.as_bytes())?;
         }
         self.block_on(loader.load_at_head())
             .map_err(|e| JjError::Other(e.to_string()))

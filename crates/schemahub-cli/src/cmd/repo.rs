@@ -63,8 +63,9 @@ pub async fn run(args: RepoArgs, channel: Channel, token: &str) -> anyhow::Resul
                 Err(e) => return Err(e).context("CreateProject RPC"),
             }
 
-            // Create the repo.
-            client
+            // Create the repo — like the project step, an existing resource
+            // makes `repo init` a safe retry.
+            let repo_result = client
                 .create_repo(bearer(
                     CreateRepoRequest {
                         project: project.clone(),
@@ -72,13 +73,20 @@ pub async fn run(args: RepoArgs, channel: Channel, token: &str) -> anyhow::Resul
                         default_branch,
                         compatibility_direction: 0,
                         protected_branches: vec![],
+                        review_policy: None,
+                        serving_policy: None,
                     },
                     token,
                 )?)
-                .await
-                .context("CreateRepo RPC")?;
+                .await;
 
-            println!("Created repo '{project}/{repo_name}'.");
+            match repo_result {
+                Ok(_) => println!("Created repo '{project}/{repo_name}'."),
+                Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                    println!("Repo '{project}/{repo_name}' already exists, skipping.");
+                }
+                Err(error) => return Err(error).context("CreateRepo RPC"),
+            }
             println!("Ready. Use `schemahub schema create --project {project} --repo {repo_name} <file>` to add schemas.");
         }
     }

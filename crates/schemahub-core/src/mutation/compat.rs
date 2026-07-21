@@ -3,9 +3,9 @@
 //! On a *protected* bookmark and without `--force`, every changed declaration is
 //! checked old-vs-new against the repo's [`CompatibilityRules`]. The old blob is
 //! the one currently loaded for the schema; the new blob comes from the
-//! mutation effect's upserts. Removals are checked old-vs-absent only when the
-//! compiler models that as a violation (it receives the old blob and decides);
-//! here we surface every violation the compiler reports.
+//! mutation effect's upserts. Removing a top-level declaration has no `new`
+//! blob to pass through the compiler trait, so the core records that transition
+//! as a declaration-level incompatibility itself.
 
 use schemahub_types::{
     CompatibilityRules, CompatibilityViolation, Compiler, MutationEffect, SchemaObjects,
@@ -40,6 +40,17 @@ pub(crate) fn gate(
         if let Err(mut vs) = compiler.check_compatibility(old_blob, new_blob, rules) {
             violations.append(&mut vs);
         }
+    }
+
+    // A top-level declaration disappearing is an API break in every enforced
+    // direction. Field/value/RPC removals inside a surviving declaration are
+    // represented by an upsert and remain format-compiler decisions above.
+    for name in &effect.removes {
+        violations.push(CompatibilityViolation {
+            declaration_name: name.clone(),
+            field_name: None,
+            message: "top-level declaration removed".to_string(),
+        });
     }
 
     if violations.is_empty() {
