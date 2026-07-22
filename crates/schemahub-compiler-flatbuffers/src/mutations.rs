@@ -14,9 +14,9 @@
 use serde::{Deserialize, Serialize};
 
 use flatc_rs_schema::{Attributes, BaseType, Enum, EnumVal, Field, KeyValue, Object, Type};
-use schemahub_types::{MetaBlob, Mutation, MutationEffect, MutationError, SchemaObjects};
+use schemahub_types::{Mutation, MutationEffect, MutationError, SchemaObjects};
 
-use crate::blob::{decode_decl, decode_meta, encode_decl, encode_meta, DeclPayload};
+use crate::blob::{decode_decl, decode_meta, encode_decl, encode_meta, DeclPayload, FbsMeta};
 
 /// A typed FlatBuffers mutation operation.
 ///
@@ -92,13 +92,33 @@ pub enum FbsOp {
         name: String,
         doc_comment: Option<String>,
     },
+    /// Create a union and populate its initial table members atomically.
+    CreateUnionWithMembers {
+        name: String,
+        member_types: Vec<String>,
+        doc_comment: Option<String>,
+    },
+    /// Add one table member to a union using the next discriminator value.
+    AddUnionMember {
+        union_name: String,
+        member_type: String,
+    },
+    /// Remove one table member without renumbering the remaining values.
+    RemoveUnionMember {
+        union_name: String,
+        member_type: String,
+    },
     /// Rename a union.
     RenameUnion { old_name: String, new_name: String },
     /// Delete a union.
     DeleteUnion { name: String },
 
     /// Add or remove an `include "..."` in the file metadata.
-    UpdateImport { import_path: String, remove: bool },
+    UpdateImport {
+        import_path: String,
+        resolved_commit: String,
+        remove: bool,
+    },
 }
 
 impl FbsOp {
@@ -120,7 +140,7 @@ pub fn apply_mutation(
     op: &Mutation,
 ) -> Result<MutationEffect, MutationError> {
     let parsed = FbsOp::decode(&op.operation)?;
-    let mut state = WorkingState::load(schema)?;
+    let mut state = WorkingState::load(schema, false)?;
     state.apply(&parsed)?;
     Ok(state.into_effect())
 }
@@ -130,11 +150,12 @@ pub fn apply_mutations(
     schema: &SchemaObjects,
     ops: &[Mutation],
 ) -> Result<MutationEffect, MutationError> {
-    let mut state = WorkingState::load(schema)?;
+    let mut state = WorkingState::load(schema, true)?;
     for op in ops {
         let parsed = FbsOp::decode(&op.operation)?;
         state.apply(&parsed)?;
     }
+    state.validate_removed_references()?;
     Ok(state.into_effect())
 }
 
@@ -142,28 +163,54 @@ pub fn apply_mutations(
 struct WorkingState {
     /// Live, name-keyed decl payloads (mutated in place).
     decls: std::collections::BTreeMap<String, DeclPayload>,
-    meta: MetaBlob,
+    meta: FbsMeta,
     meta_changed: bool,
     /// Names that have been touched (upserted).
     touched: std::collections::BTreeSet<String>,
     /// Names removed.
     removed: std::collections::BTreeSet<String>,
+    removed_enum_values: std::collections::BTreeSet<(String, String)>,
+    defer_reference_integrity: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedDeclKind {
+    Table,
+    Enum,
+    Union,
+}
+
+impl ExpectedDeclKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::Enum => "enum",
+            Self::Union => "union",
+        }
+    }
 }
 
 impl WorkingState {
-    fn load(schema: &SchemaObjects) -> Result<Self, MutationError> {
+    fn load(
+        schema: &SchemaObjects,
+        defer_reference_integrity: bool,
+    ) -> Result<Self, MutationError> {
         let mut decls = std::collections::BTreeMap::new();
         for (name, blob) in &schema.decls {
             let payload =
                 decode_decl(blob).map_err(|e| MutationError::MalformedBlob(e.to_string()))?;
             decls.insert(name.clone(), payload);
         }
+        let meta =
+            decode_meta(&schema.meta).map_err(|e| MutationError::MalformedBlob(e.to_string()))?;
         Ok(Self {
             decls,
-            meta: schema.meta.clone(),
+            meta,
             meta_changed: false,
             touched: Default::default(),
             removed: Default::default(),
+            removed_enum_values: Default::default(),
+            defer_reference_integrity,
         })
     }
 
@@ -174,14 +221,19 @@ impl WorkingState {
                 upserts.push((name.clone(), encode_decl(payload.clone())));
             }
         }
+        let removes = self
+            .removed
+            .into_iter()
+            .filter(|name| !self.decls.contains_key(name))
+            .collect();
         MutationEffect {
             meta: if self.meta_changed {
-                Some(self.meta)
+                Some(encode_meta(self.meta))
             } else {
                 None
             },
             upserts,
-            removes: self.removed.into_iter().collect(),
+            removes,
         }
     }
 
@@ -203,6 +255,26 @@ impl WorkingState {
             ))),
             None => Err(MutationError::DeclarationNotFound(name.to_string())),
         }
+    }
+
+    fn regular_enum_mut(&mut self, name: &str) -> Result<&mut Enum, MutationError> {
+        let declaration = self.enum_mut(name)?;
+        if declaration.is_union {
+            return Err(MutationError::InvalidOperation(format!(
+                "declaration '{name}' is a union, not an enum"
+            )));
+        }
+        Ok(declaration)
+    }
+
+    fn union_mut(&mut self, name: &str) -> Result<&mut Enum, MutationError> {
+        let declaration = self.enum_mut(name)?;
+        if !declaration.is_union {
+            return Err(MutationError::InvalidOperation(format!(
+                "declaration '{name}' is an enum, not a union"
+            )));
+        }
+        Ok(declaration)
     }
 
     fn apply(&mut self, op: &FbsOp) -> Result<(), MutationError> {
@@ -230,16 +302,20 @@ impl WorkingState {
             ))),
 
             FbsOp::CreateTable { name, doc_comment } => self.create_table(name, doc_comment),
-            FbsOp::RenameTable { old_name, new_name } => self.rename_decl(old_name, new_name, false),
-            FbsOp::DeleteTable { name } => self.delete_decl(name),
+            FbsOp::RenameTable { old_name, new_name } => {
+                self.rename_decl(old_name, new_name, ExpectedDeclKind::Table)
+            }
+            FbsOp::DeleteTable { name } => self.delete_decl(name, ExpectedDeclKind::Table),
 
             FbsOp::CreateEnum {
                 name,
                 underlying_type,
                 doc_comment,
             } => self.create_enum(name, underlying_type, doc_comment, false),
-            FbsOp::RenameEnum { old_name, new_name } => self.rename_decl(old_name, new_name, true),
-            FbsOp::DeleteEnum { name } => self.delete_decl(name),
+            FbsOp::RenameEnum { old_name, new_name } => {
+                self.rename_decl(old_name, new_name, ExpectedDeclKind::Enum)
+            }
+            FbsOp::DeleteEnum { name } => self.delete_decl(name, ExpectedDeclKind::Enum),
             FbsOp::AddEnumValue {
                 enum_name,
                 value_name,
@@ -256,13 +332,29 @@ impl WorkingState {
             } => self.rename_enum_value(enum_name, old_name, new_name),
 
             FbsOp::CreateUnion { name, doc_comment } => self.create_union(name, doc_comment),
-            FbsOp::RenameUnion { old_name, new_name } => self.rename_decl(old_name, new_name, true),
-            FbsOp::DeleteUnion { name } => self.delete_decl(name),
+            FbsOp::CreateUnionWithMembers {
+                name,
+                member_types,
+                doc_comment,
+            } => self.create_union_with_members(name, member_types, doc_comment),
+            FbsOp::AddUnionMember {
+                union_name,
+                member_type,
+            } => self.add_union_member(union_name, member_type),
+            FbsOp::RemoveUnionMember {
+                union_name,
+                member_type,
+            } => self.remove_union_member(union_name, member_type),
+            FbsOp::RenameUnion { old_name, new_name } => {
+                self.rename_decl(old_name, new_name, ExpectedDeclKind::Union)
+            }
+            FbsOp::DeleteUnion { name } => self.delete_decl(name, ExpectedDeclKind::Union),
 
             FbsOp::UpdateImport {
                 import_path,
+                resolved_commit,
                 remove,
-            } => self.update_import(import_path, *remove),
+            } => self.update_import(import_path, resolved_commit, *remove),
         }
     }
 
@@ -360,6 +452,15 @@ impl WorkingState {
                 "cannot rename a field on struct '{table}': struct layout is fixed"
             )));
         }
+        if obj
+            .fields
+            .iter()
+            .any(|field| field.name.as_deref() == Some(new_name))
+        {
+            return Err(MutationError::InvalidOperation(format!(
+                "field '{new_name}' already exists in '{table}'"
+            )));
+        }
         let field = obj
             .fields
             .iter_mut()
@@ -421,6 +522,8 @@ impl WorkingState {
         };
         self.decls
             .insert(name.to_string(), DeclPayload::Object(Box::new(obj)));
+        self.meta.decl_order.push(name.to_string());
+        self.meta_changed = true;
         self.touched.insert(name.to_string());
         Ok(())
     }
@@ -451,6 +554,8 @@ impl WorkingState {
         };
         self.decls
             .insert(name.to_string(), DeclPayload::Enum(Box::new(en)));
+        self.meta.decl_order.push(name.to_string());
+        self.meta_changed = true;
         self.touched.insert(name.to_string());
         Ok(())
     }
@@ -490,7 +595,112 @@ impl WorkingState {
         };
         self.decls
             .insert(name.to_string(), DeclPayload::Enum(Box::new(en)));
+        self.meta.decl_order.push(name.to_string());
+        self.meta_changed = true;
         self.touched.insert(name.to_string());
+        Ok(())
+    }
+
+    fn create_union_with_members(
+        &mut self,
+        name: &str,
+        member_types: &[String],
+        doc_comment: &Option<String>,
+    ) -> Result<(), MutationError> {
+        self.create_union(name, doc_comment)?;
+        for member_type in member_types {
+            self.add_union_member(name, member_type)?;
+        }
+        Ok(())
+    }
+
+    fn add_union_member(
+        &mut self,
+        union_name: &str,
+        member_type: &str,
+    ) -> Result<(), MutationError> {
+        let base_type = match self.decls.get(member_type) {
+            Some(DeclPayload::Object(object)) if !object.is_struct => BaseType::BASE_TYPE_TABLE,
+            Some(DeclPayload::Object(_)) => {
+                return Err(MutationError::InvalidOperation(format!(
+                    "union member '{member_type}' must be a table, not a struct"
+                )))
+            }
+            Some(_) => {
+                return Err(MutationError::InvalidOperation(format!(
+                    "union member '{member_type}' is not a table"
+                )))
+            }
+            None => return Err(MutationError::DeclarationNotFound(member_type.to_string())),
+        };
+        let union = self.union_mut(union_name)?;
+        if union.values.iter().any(|value| {
+            value.name.as_deref() == Some(member_type)
+                || value
+                    .union_type
+                    .as_ref()
+                    .and_then(|member| member.unresolved_name.as_deref())
+                    .is_some_and(|name| type_name_matches(name, member_type))
+        }) {
+            return Err(MutationError::InvalidOperation(format!(
+                "union member '{member_type}' already exists in '{union_name}'"
+            )));
+        }
+        let next_value = union
+            .values
+            .iter()
+            .filter_map(|value| value.value)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                MutationError::InvalidOperation(format!(
+                    "union '{union_name}' has no remaining discriminator values"
+                ))
+            })?;
+        union.values.push(EnumVal {
+            name: Some(member_type.to_string()),
+            value: Some(next_value),
+            union_type: Some(Type {
+                base_type: Some(base_type),
+                base_size: Some(4),
+                unresolved_name: Some(member_type.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        self.touched.insert(union_name.to_string());
+        Ok(())
+    }
+
+    fn remove_union_member(
+        &mut self,
+        union_name: &str,
+        member_type: &str,
+    ) -> Result<(), MutationError> {
+        if member_type == "NONE" {
+            return Err(MutationError::InvalidOperation(
+                "the synthetic NONE union member cannot be removed".to_string(),
+            ));
+        }
+        let union = self.union_mut(union_name)?;
+        let index = union
+            .values
+            .iter()
+            .position(|value| {
+                value.name.as_deref() == Some(member_type)
+                    || value
+                        .union_type
+                        .as_ref()
+                        .and_then(|member| member.unresolved_name.as_deref())
+                        .is_some_and(|name| type_name_matches(name, member_type))
+            })
+            .ok_or_else(|| MutationError::FieldNotFound {
+                declaration: union_name.to_string(),
+                field: member_type.to_string(),
+            })?;
+        union.values.remove(index);
+        self.touched.insert(union_name.to_string());
         Ok(())
     }
 
@@ -498,45 +708,102 @@ impl WorkingState {
         &mut self,
         old_name: &str,
         new_name: &str,
-        expect_enum: bool,
+        expected: ExpectedDeclKind,
     ) -> Result<(), MutationError> {
-        let mut payload = self
+        let payload = self
             .decls
-            .remove(old_name)
+            .get(old_name)
             .ok_or_else(|| MutationError::DeclarationNotFound(old_name.to_string()))?;
-        // Kind sanity check.
-        match (&payload, expect_enum) {
-            (DeclPayload::Enum(_), true) | (DeclPayload::Object(_), false) => {}
-            _ => {
-                // Restore and reject.
-                self.decls.insert(old_name.to_string(), payload);
-                return Err(MutationError::InvalidOperation(format!(
-                    "declaration '{old_name}' kind does not match rename target"
-                )));
-            }
+        if !payload_matches_kind(payload, expected) {
+            return Err(MutationError::InvalidOperation(format!(
+                "declaration '{old_name}' is not a {}",
+                expected.label()
+            )));
+        }
+        if old_name == new_name {
+            return Ok(());
         }
         if self.decls.contains_key(new_name) {
-            self.decls.insert(old_name.to_string(), payload);
             return Err(MutationError::InvalidOperation(format!(
                 "cannot rename '{old_name}' to '{new_name}': target already exists"
             )));
         }
+        let mut payload = self
+            .decls
+            .remove(old_name)
+            .expect("declaration existence checked above");
         match &mut payload {
             DeclPayload::Object(o) => o.name = Some(new_name.to_string()),
             DeclPayload::Enum(e) => e.name = Some(new_name.to_string()),
             DeclPayload::Service(s) => s.name = Some(new_name.to_string()),
         }
         self.decls.insert(new_name.to_string(), payload);
+
+        let changed_references: Vec<String> = self
+            .decls
+            .iter_mut()
+            .filter_map(|(name, payload)| {
+                rewrite_payload_references(payload, old_name, new_name).then(|| name.clone())
+            })
+            .collect();
+        self.touched.extend(changed_references);
+
+        if let Some(root_type) = &mut self.meta.root_type {
+            if let Some(renamed) = rename_type_name(root_type, old_name, new_name) {
+                *root_type = renamed;
+                self.meta_changed = true;
+            }
+        }
+        for name in &mut self.meta.decl_order {
+            if name == old_name {
+                *name = new_name.to_string();
+                self.meta_changed = true;
+            }
+        }
         self.removed.insert(old_name.to_string());
         self.touched.remove(old_name);
         self.touched.insert(new_name.to_string());
         Ok(())
     }
 
-    fn delete_decl(&mut self, name: &str) -> Result<(), MutationError> {
-        if self.decls.remove(name).is_none() {
-            return Err(MutationError::DeclarationNotFound(name.to_string()));
+    fn delete_decl(&mut self, name: &str, expected: ExpectedDeclKind) -> Result<(), MutationError> {
+        let payload = self
+            .decls
+            .get(name)
+            .ok_or_else(|| MutationError::DeclarationNotFound(name.to_string()))?;
+        if !payload_matches_kind(payload, expected) {
+            return Err(MutationError::InvalidOperation(format!(
+                "declaration '{name}' is not a {}",
+                expected.label()
+            )));
         }
+        let mut references: Vec<String> = self
+            .decls
+            .iter()
+            .filter(|(declaration_name, _)| declaration_name.as_str() != name)
+            .filter(|(_, payload)| payload_references(payload, name))
+            .map(|(declaration_name, _)| declaration_name.clone())
+            .collect();
+        if self
+            .meta
+            .root_type
+            .as_deref()
+            .is_some_and(|root| type_name_matches(root, name))
+        {
+            references.push("root_type".to_string());
+        }
+        if !self.defer_reference_integrity && !references.is_empty() {
+            return Err(MutationError::InvalidOperation(format!(
+                "cannot delete {} '{name}': referenced by {}",
+                expected.label(),
+                references.join(", ")
+            )));
+        }
+        self.decls.remove(name);
+        self.meta
+            .decl_order
+            .retain(|declaration| declaration != name);
+        self.meta_changed = true;
         self.touched.remove(name);
         self.removed.insert(name.to_string());
         Ok(())
@@ -550,7 +817,7 @@ impl WorkingState {
         value_name: &str,
         value: i64,
     ) -> Result<(), MutationError> {
-        let en = self.enum_mut(enum_name)?;
+        let en = self.regular_enum_mut(enum_name)?;
         if en
             .values
             .iter()
@@ -560,11 +827,22 @@ impl WorkingState {
                 "enum value '{value_name}' already exists in '{enum_name}'"
             )));
         }
+        if en
+            .values
+            .iter()
+            .any(|existing| existing.value == Some(value))
+        {
+            return Err(MutationError::InvalidOperation(format!(
+                "enum value number '{value}' already exists in '{enum_name}'"
+            )));
+        }
         en.values.push(EnumVal {
             name: Some(value_name.to_string()),
             value: Some(value),
             ..Default::default()
         });
+        self.removed_enum_values
+            .remove(&(enum_name.to_string(), value_name.to_string()));
         self.touched.insert(enum_name.to_string());
         Ok(())
     }
@@ -574,7 +852,14 @@ impl WorkingState {
         enum_name: &str,
         value_name: &str,
     ) -> Result<(), MutationError> {
-        let en = self.enum_mut(enum_name)?;
+        let references = self.enum_value_references(enum_name, value_name);
+        if !self.defer_reference_integrity && !references.is_empty() {
+            return Err(MutationError::InvalidOperation(format!(
+                "cannot remove enum value '{enum_name}.{value_name}': referenced as a default by {}",
+                references.join(", ")
+            )));
+        }
+        let en = self.regular_enum_mut(enum_name)?;
         let before = en.values.len();
         en.values.retain(|v| v.name.as_deref() != Some(value_name));
         if en.values.len() == before {
@@ -583,6 +868,8 @@ impl WorkingState {
                 field: value_name.to_string(),
             });
         }
+        self.removed_enum_values
+            .insert((enum_name.to_string(), value_name.to_string()));
         self.touched.insert(enum_name.to_string());
         Ok(())
     }
@@ -593,7 +880,16 @@ impl WorkingState {
         old_name: &str,
         new_name: &str,
     ) -> Result<(), MutationError> {
-        let en = self.enum_mut(enum_name)?;
+        let en = self.regular_enum_mut(enum_name)?;
+        if en
+            .values
+            .iter()
+            .any(|value| value.name.as_deref() == Some(new_name))
+        {
+            return Err(MutationError::InvalidOperation(format!(
+                "enum value '{new_name}' already exists in '{enum_name}'"
+            )));
+        }
         let val = en
             .values
             .iter_mut()
@@ -603,23 +899,242 @@ impl WorkingState {
                 field: old_name.to_string(),
             })?;
         val.name = Some(new_name.to_string());
+        let changed_defaults: Vec<String> = self
+            .decls
+            .iter_mut()
+            .filter_map(|(name, payload)| match payload {
+                DeclPayload::Object(object) => {
+                    let mut changed = false;
+                    for field in &mut object.fields {
+                        let is_target_enum = field
+                            .type_
+                            .as_ref()
+                            .and_then(|field_type| field_type.unresolved_name.as_deref())
+                            .is_some_and(|name| type_name_matches(name, enum_name));
+                        if is_target_enum && field.default_string.as_deref() == Some(old_name) {
+                            field.default_string = Some(new_name.to_string());
+                            changed = true;
+                        }
+                    }
+                    changed.then(|| name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self.touched.extend(changed_defaults);
         self.touched.insert(enum_name.to_string());
+        Ok(())
+    }
+
+    fn enum_value_references(&self, enum_name: &str, value_name: &str) -> Vec<String> {
+        self.decls
+            .iter()
+            .filter_map(|(name, payload)| match payload {
+                DeclPayload::Object(object)
+                    if object.fields.iter().any(|field| {
+                        field
+                            .type_
+                            .as_ref()
+                            .and_then(|field_type| field_type.unresolved_name.as_deref())
+                            .is_some_and(|name| type_name_matches(name, enum_name))
+                            && field.default_string.as_deref() == Some(value_name)
+                    }) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn validate_removed_references(&self) -> Result<(), MutationError> {
+        for name in &self.removed {
+            let mut references: Vec<String> = self
+                .decls
+                .iter()
+                .filter(|(_, payload)| payload_references(payload, name))
+                .map(|(declaration_name, _)| declaration_name.clone())
+                .collect();
+            if self
+                .meta
+                .root_type
+                .as_deref()
+                .is_some_and(|root| type_name_matches(root, name))
+            {
+                references.push("root_type".to_string());
+            }
+            if !references.is_empty() {
+                return Err(MutationError::InvalidOperation(format!(
+                    "cannot remove declaration '{name}': referenced by {}",
+                    references.join(", ")
+                )));
+            }
+        }
+        for (enum_name, value_name) in &self.removed_enum_values {
+            let references = self.enum_value_references(enum_name, value_name);
+            if !references.is_empty() {
+                return Err(MutationError::InvalidOperation(format!(
+                    "cannot remove enum value '{enum_name}.{value_name}': referenced as a default by {}",
+                    references.join(", ")
+                )));
+            }
+        }
         Ok(())
     }
 
     // ── Meta / imports ─────────────────────────────────────────────────────────
 
-    fn update_import(&mut self, import_path: &str, remove: bool) -> Result<(), MutationError> {
-        let mut meta =
-            decode_meta(&self.meta).map_err(|e| MutationError::MalformedBlob(e.to_string()))?;
+    fn update_import(
+        &mut self,
+        import_path: &str,
+        resolved_commit: &str,
+        remove: bool,
+    ) -> Result<(), MutationError> {
+        self.meta
+            .include_commits
+            .resize(self.meta.includes.len(), String::new());
         if remove {
-            meta.includes.retain(|i| i != import_path);
-        } else if !meta.includes.iter().any(|i| i == import_path) {
-            meta.includes.push(import_path.to_string());
+            if let Some(index) = self
+                .meta
+                .includes
+                .iter()
+                .position(|include| include == import_path)
+            {
+                self.meta.includes.remove(index);
+                self.meta.include_commits.remove(index);
+            }
+        } else if let Some(index) = self
+            .meta
+            .includes
+            .iter()
+            .position(|include| include == import_path)
+        {
+            self.meta.include_commits[index] = resolved_commit.to_string();
+        } else {
+            self.meta.includes.push(import_path.to_string());
+            self.meta.include_commits.push(resolved_commit.to_string());
         }
-        self.meta = encode_meta(meta);
         self.meta_changed = true;
         Ok(())
+    }
+}
+
+fn payload_matches_kind(payload: &DeclPayload, expected: ExpectedDeclKind) -> bool {
+    match (payload, expected) {
+        (DeclPayload::Object(object), ExpectedDeclKind::Table) => !object.is_struct,
+        (DeclPayload::Enum(declaration), ExpectedDeclKind::Enum) => !declaration.is_union,
+        (DeclPayload::Enum(declaration), ExpectedDeclKind::Union) => declaration.is_union,
+        _ => false,
+    }
+}
+
+fn type_name_matches(type_name: &str, target: &str) -> bool {
+    type_name == target
+        || type_name
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == target)
+}
+
+fn rename_type_name(type_name: &str, old_name: &str, new_name: &str) -> Option<String> {
+    if !type_name_matches(type_name, old_name) {
+        return None;
+    }
+    match type_name.rfind('.') {
+        Some(separator) => Some(format!("{}{new_name}", &type_name[..=separator])),
+        None => Some(new_name.to_string()),
+    }
+}
+
+fn payload_references(payload: &DeclPayload, target: &str) -> bool {
+    match payload {
+        DeclPayload::Object(object) => object.fields.iter().any(|field| {
+            field
+                .type_
+                .as_ref()
+                .and_then(|field_type| field_type.unresolved_name.as_deref())
+                .is_some_and(|name| type_name_matches(name, target))
+        }),
+        DeclPayload::Enum(declaration) if declaration.is_union => {
+            declaration.values.iter().any(|value| {
+                value
+                    .union_type
+                    .as_ref()
+                    .and_then(|member_type| member_type.unresolved_name.as_deref())
+                    .is_some_and(|name| type_name_matches(name, target))
+            })
+        }
+        DeclPayload::Service(service) => service.calls.iter().any(|call| {
+            call.request
+                .as_ref()
+                .and_then(|request| request.name.as_deref())
+                .is_some_and(|name| type_name_matches(name, target))
+                || call
+                    .response
+                    .as_ref()
+                    .and_then(|response| response.name.as_deref())
+                    .is_some_and(|name| type_name_matches(name, target))
+        }),
+        DeclPayload::Enum(_) => false,
+    }
+}
+
+fn rewrite_payload_references(payload: &mut DeclPayload, old_name: &str, new_name: &str) -> bool {
+    match payload {
+        DeclPayload::Object(object) => {
+            let mut changed = false;
+            for field in &mut object.fields {
+                let Some(field_type) = &mut field.type_ else {
+                    continue;
+                };
+                let Some(type_name) = &field_type.unresolved_name else {
+                    continue;
+                };
+                if let Some(renamed) = rename_type_name(type_name, old_name, new_name) {
+                    field_type.unresolved_name = Some(renamed);
+                    changed = true;
+                }
+            }
+            changed
+        }
+        DeclPayload::Enum(declaration) if declaration.is_union => {
+            let mut changed = false;
+            for value in &mut declaration.values {
+                let Some(member_type) = &mut value.union_type else {
+                    continue;
+                };
+                let Some(type_name) = &member_type.unresolved_name else {
+                    continue;
+                };
+                if let Some(renamed) = rename_type_name(type_name, old_name, new_name) {
+                    member_type.unresolved_name = Some(renamed);
+                    if value.name.as_deref() == Some(old_name) {
+                        value.name = Some(new_name.to_string());
+                    }
+                    changed = true;
+                }
+            }
+            changed
+        }
+        DeclPayload::Service(service) => {
+            let mut changed = false;
+            for call in &mut service.calls {
+                for object in [&mut call.request, &mut call.response]
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(name) = &object.name else {
+                        continue;
+                    };
+                    if let Some(renamed) = rename_type_name(name, old_name, new_name) {
+                        object.name = Some(renamed);
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        }
+        DeclPayload::Enum(_) => false,
     }
 }
 

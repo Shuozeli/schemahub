@@ -54,6 +54,8 @@ message LogEntry {
 
 message LogResponse {
   repeated LogEntry entries = 1;
+  // Exact immutable traversal root resolved from `at`.
+  string at_commit = 2;
 }
 
 // ── OpLog ─────────────────────────────────────────────────────────────────────
@@ -61,7 +63,7 @@ message LogResponse {
 message OpLogRequest {
   string project = 1;
   string repo    = 2;
-  // Max operations to return (newest-first ordering preserved). 0 = no limit.
+  // Max operations to return (oldest→newest within the selected tail). 0 = no limit.
   uint32 limit   = 3;
 }
 
@@ -96,7 +98,9 @@ message RenderConflictRequest {
   string     repo             = 2;
   string     schema_path      = 3;
   string     declaration_name = 4;
-  VersionRef at               = 5;  // bookmark/tag/commit; resolved to a bookmark for reads
+  // Must be a branch because conflicts are mutable bookmark state. Omission
+  // selects the repository's configured default bookmark.
+  VersionRef at               = 5;
 }
 
 message RenderConflictResponse {

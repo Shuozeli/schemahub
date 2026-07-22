@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 
-use crate::blob::{DeclBlob, MetaBlob};
+use crate::blob::DeclBlob;
 use crate::change::DeclChange;
 use crate::compat::{CompatibilityRules, CompatibilityViolation};
 use crate::conflict::ConflictSides;
@@ -76,10 +76,24 @@ pub trait Compiler: Send + Sync + 'static {
     // ── Read / exploration ────────────────────────────────────────────────────
     fn summarize_decl(&self, blob: &DeclBlob) -> Result<DeclSummary, ReadError>;
     fn decl_detail(&self, blob: &DeclBlob) -> Result<DeclDetail, ReadError>;
-    fn imports(&self, meta: &MetaBlob) -> Result<Vec<Import>, ReadError>;
+    /// Every schema imported by this file.
+    ///
+    /// The complete object set is provided because some formats keep imports
+    /// in file metadata (Protobuf and FlatBuffers), while others embed them in
+    /// declaration bodies (OpenAPI external `$ref` values).
+    fn imports(&self, schema: &SchemaObjects) -> Result<Vec<Import>, ReadError>;
 
     /// The type names a declaration references (for FollowType / rename propagation).
     fn type_refs(&self, blob: &DeclBlob) -> Result<Vec<TypeRef>, ReadError>;
+
+    /// Resolve the declared type reference of one named field/property.
+    /// `Ok(None)` means the field exists but is scalar/inline and therefore has
+    /// no declaration for `FollowType` to navigate to.
+    fn field_type_ref(
+        &self,
+        blob: &DeclBlob,
+        field_name: &str,
+    ) -> Result<Option<TypeRef>, ReadError>;
 
     // ── Codegen (reuse sibling codegen) ───────────────────────────────────────
     /// Reassemble the transitive closure into the native descriptor artifact.

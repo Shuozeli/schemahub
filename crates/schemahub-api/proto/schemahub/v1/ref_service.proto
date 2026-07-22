@@ -10,7 +10,10 @@ import "schemahub/v1/errors.proto";
 service RefService {
   // ── Commits ─────────────────────────────────────────────────────────────────
   rpc GetCommit(GetCommitRequest) returns (GetCommitResponse);
-  // Streams commits in reverse chronological order (newest first).
+  // Streams commits in reverse chronological order (newest first). Initial
+  // response metadata includes `x-schemahub-at-commit`, the exact traversal
+  // root. The server scans at most 10,000 commits and fails rather than
+  // returning a silently truncated range.
   // Terminate the stream when the client has received enough (standard gRPC cancellation).
   rpc ListCommits(ListCommitsRequest) returns (stream CommitInfo);
   // Returns the semantic diff between two refs (or two commits).
@@ -49,8 +52,8 @@ message ListCommitsRequest {
   string     project = 1;
   string     repo    = 2;
   VersionRef from    = 3;  // start walking from here (default: HEAD of default branch)
-  // Optional: stop when this ref is reached (exclusive). Used to list only the
-  // commits on a feature branch: from=feature/xyz, stop_at=main.
+  // Optional retained commit at which traversal stops (exclusive). Resolve a
+  // mutable base bookmark first when listing a feature-branch interval.
   string     stop_at_commit = 4;
   // Optional: filter to commits that touched a specific schema file.
   string     schema_path    = 5;
@@ -69,6 +72,8 @@ message DiffRequest {
 
 message DiffResponse {
   repeated SchemaDiff schema_diffs = 1;
+  string base_commit = 2; // exact immutable base snapshot used
+  string head_commit = 3; // exact immutable head snapshot used
 }
 
 message SchemaDiff {
@@ -172,7 +177,7 @@ message MergeRequest {
   string repo            = 2;
   string source_branch   = 3;  // the branch to merge in
   string target_branch   = 4;  // the branch to merge into
-  string base_revision   = 5;  // current HEAD of target_branch (OCC)
+  string base_revision   = 5;  // retained causal commit; stale is allowed, foreign/unknown is rejected
   string idempotency_key = 6;
   string message         = 7;  // optional; used in commit message if a merge commit is created
 }

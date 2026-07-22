@@ -34,7 +34,7 @@ use bytes::Bytes;
 use schemahub_types::{
     CodegenError, CompatibilityRules, CompatibilityViolation, Compiler, ConflictError,
     ConflictSides, DeclBlob, DeclChange, DeclDetail, DeclSummary, DescriptorError, DiffError,
-    Import, Language, MetaBlob, Mutation, MutationEffect, MutationError, ParseError, ParsedSchema,
+    Import, Language, Mutation, MutationEffect, MutationError, ParseError, ParsedSchema,
     PrintError, ReadError, SchemaClosure, SchemaObjects, TypeRef,
 };
 
@@ -107,12 +107,20 @@ impl Compiler for ProtobufCompiler {
         read::detail(blob)
     }
 
-    fn imports(&self, meta: &MetaBlob) -> Result<Vec<Import>, ReadError> {
-        read::imports(meta)
+    fn imports(&self, schema: &SchemaObjects) -> Result<Vec<Import>, ReadError> {
+        read::imports(&schema.meta)
     }
 
     fn type_refs(&self, blob: &DeclBlob) -> Result<Vec<TypeRef>, ReadError> {
         read::type_refs(blob)
+    }
+
+    fn field_type_ref(
+        &self,
+        blob: &DeclBlob,
+        field_name: &str,
+    ) -> Result<Option<TypeRef>, ReadError> {
+        read::field_type_ref(blob, field_name)
     }
 
     fn generate_descriptors(&self, closure: &SchemaClosure) -> Result<Bytes, DescriptorError> {

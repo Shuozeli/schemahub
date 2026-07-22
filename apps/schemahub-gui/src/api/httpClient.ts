@@ -1,13 +1,27 @@
 import type {
+  ArtifactDownload,
+  ArtifactDownloadRequest,
+  ChangeAction,
+  ChangeActionRequest,
+  ChangeRecord,
+  ConflictDetail,
+  ConflictList,
   CodegenPreview,
   CodegenPreviewRequest,
   CommitEntry,
+  CreateChangeRequest,
   DiffResult,
   OperationEntry,
   ProjectSummary,
   RepoDashboard,
+  RepoSummary,
+  ResolveConflictRequest,
+  ResolveConflictResult,
   SchemaDetail,
+  SearchResponse,
+  SchemaRevision,
   ServerConfig,
+  SessionInfo,
 } from './types';
 import type { SchemaHubClient } from './client';
 
@@ -17,10 +31,17 @@ type HistoryResponse = {
 };
 
 export class HttpSchemaHubClient implements SchemaHubClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly token: () => string | undefined = () => undefined,
+  ) {}
 
   async listProjects(): Promise<ProjectSummary[]> {
     return this.get('/api/projects');
+  }
+
+  async listRepos(project: string): Promise<RepoSummary[]> {
+    return this.get(`/api/projects/${encode(project)}/repos`);
   }
 
   async getRepoDashboard(project: string, repo: string, ref: string): Promise<RepoDashboard> {
@@ -70,13 +91,125 @@ export class HttpSchemaHubClient implements SchemaHubClient {
     return history.commits;
   }
 
-  async listOperations(project: string, repo: string, limit: number): Promise<OperationEntry[]> {
-    const history = await this.history(project, repo, 'main', limit);
+  async listOperations(
+    project: string,
+    repo: string,
+    ref: string,
+    limit: number,
+  ): Promise<OperationEntry[]> {
+    const history = await this.history(project, repo, ref, limit);
     return history.operations;
   }
 
   async getServerConfig(): Promise<ServerConfig> {
     return this.get('/api/admin/config');
+  }
+
+  async getSession(): Promise<SessionInfo> {
+    return this.get('/api/session');
+  }
+
+  async listChanges(project: string, repo: string): Promise<ChangeRecord[]> {
+    return this.get(`/api/projects/${encode(project)}/repos/${encode(repo)}/changes`);
+  }
+
+  async getChange(project: string, repo: string, changeId: string): Promise<ChangeRecord> {
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/changes/${encode(changeId)}`,
+    );
+  }
+
+  async createChange(
+    project: string,
+    repo: string,
+    request: CreateChangeRequest,
+  ): Promise<ChangeRecord> {
+    return this.post(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/changes`,
+      request,
+    );
+  }
+
+  async changeAction(
+    project: string,
+    repo: string,
+    changeId: string,
+    action: ChangeAction,
+    request: ChangeActionRequest,
+  ): Promise<ChangeRecord> {
+    return this.post(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/changes/${encode(
+        changeId,
+      )}/actions/${encode(action)}`,
+      request,
+    );
+  }
+
+  async search(
+    project: string,
+    repo: string,
+    query: string,
+    ref: string,
+    limit = 50,
+  ): Promise<SearchResponse> {
+    const params = new URLSearchParams({ q: query, ref, limit: String(limit) });
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/search?${params.toString()}`,
+    );
+  }
+
+  async downloadArtifact(request: ArtifactDownloadRequest): Promise<ArtifactDownload> {
+    const revision = await this.resolveRevision(request.project, request.repo, request.ref);
+    const params = new URLSearchParams({ kind: request.kind });
+    if (request.language) params.set('language', request.language);
+    if (request.rustPluggableBuffer) params.set('rustPluggableBuffer', 'true');
+    const response = await fetch(
+      `${this.baseUrl}/api/projects/${encode(request.project)}/repos/${encode(
+        request.repo,
+      )}/revisions/${encode(revision.commitId)}/artifacts/${encodePath(
+        request.schemaPath,
+      )}?${params.toString()}`,
+      { headers: this.authHeaders() },
+    );
+    if (!response.ok) return readJson<never>(response);
+    return {
+      revision,
+      content: await response.blob(),
+      mediaType: response.headers.get('content-type') || 'application/octet-stream',
+      artifactDigest: unquote(response.headers.get('etag') || ''),
+      closureDigest: response.headers.get('x-schemahub-closure-digest') || '',
+    };
+  }
+
+  async listConflicts(project: string, repo: string, bookmark: string): Promise<ConflictList> {
+    const params = new URLSearchParams({ bookmark });
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/conflicts?${params.toString()}`,
+    );
+  }
+
+  async renderConflict(
+    project: string,
+    repo: string,
+    bookmark: string,
+    schemaPath: string,
+    declarationName: string,
+  ): Promise<ConflictDetail> {
+    const params = new URLSearchParams({ bookmark, schemaPath, declarationName });
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/conflicts/render?${params.toString()}`,
+    );
+  }
+
+  async resolveConflict(
+    project: string,
+    repo: string,
+    request: ResolveConflictRequest,
+  ): Promise<ResolveConflictResult> {
+    return this.post(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/conflicts/resolve`,
+      request,
+    );
   }
 
   private async history(
@@ -93,17 +226,34 @@ export class HttpSchemaHubClient implements SchemaHubClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`);
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.authHeaders(),
+    });
     return readJson<T>(response);
+  }
+
+  private async resolveRevision(
+    project: string,
+    repo: string,
+    ref: string,
+  ): Promise<SchemaRevision> {
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/revisions/resolve?ref=${encode(ref)}`,
+    );
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
     return readJson<T>(response);
+  }
+
+  private authHeaders(): Record<string, string> {
+    const token = this.token()?.trim();
+    return token ? { authorization: `Bearer ${token}` } : {};
   }
 }
 
@@ -127,4 +277,8 @@ function encode(value: string) {
 
 function encodePath(value: string) {
   return value.split('/').map(encode).join('/');
+}
+
+function unquote(value: string) {
+  return value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 }

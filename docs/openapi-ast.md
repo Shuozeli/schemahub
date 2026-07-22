@@ -1,3 +1,4 @@
+<!-- agent-updated: 2026-07-21T20:46:16Z -->
 # schemahub — OpenAPI AST (v2: per-declaration, in-tree compiler)
 
 > This document specifies the internal AST model for OpenAPI schemas in schemahub, **as implemented** in `crates/schemahub-compiler-openapi/`. OpenAPI has no sibling compiler (unlike Protobuf/FlatBuffers), so the AST, parser, and printer are in-tree (`design.md` §3.3, `crate-structure.md` §3.5).
@@ -132,9 +133,11 @@ pub struct PropertyDef { pub name: String, pub schema: Option<SchemaOrRef> }
 ### 5.4 Parameter / RequestBody / Response / Operation
 
 - `ParameterDef { name, location, description?, required, deprecated?, schema?, extensions? }`
-- `ParameterOrRef = Inline(ParameterDef) | Ref(String)` (Ref is the component name)
-- `RequestBodyDef { description?, required, content: Vec<MediaTypeEntry>, extensions? }`; `MediaTypeEntry { media_type, schema?, extensions? }`; `RequestBodyOrRef = Inline | Ref(String)`
-- `ResponseDef { description, content, headers: Vec<HeaderDef>, extensions? }`; `HeaderDef { name, description?, required?, schema? }`; `ResponseOrRef = Inline | Ref(String)`
+- `ParameterOrRef = Inline(ParameterDef) | Ref(String)` (a local Ref stores the
+  decoded component name; an external Ref retains its complete canonical
+  source reference)
+- `RequestBodyDef { description?, required, content: Vec<MediaTypeEntry>, extensions? }`; `MediaTypeEntry { media_type, schema?, extensions? }`; `RequestBodyOrRef = Inline | Ref(String)` with the same compact-local/full-external Ref representation
+- `ResponseDef { description, content, headers: Vec<HeaderDef>, extensions? }`; `HeaderDef { name, description?, required?, schema? }`; `ResponseOrRef = Inline | Ref(String)` with the same Ref representation
 - `OperationDef { method, operation_id?, summary?, description?, tags, parameters: Vec<ParameterOrRef>, request_body?: RequestBodyOrRef, responses: Vec<ResponseEntry>, deprecated?, extensions? }`; `ResponseEntry { status_code: String, response?: ResponseOrRef }`. `OperationDef::empty(method)` builds a bare op.
 
 ### 5.5 Blob types (the stored payloads)
@@ -179,8 +182,20 @@ Reassembles the whole schema file from `SchemaObjects` (a `MetaBlob` + `BTreeMap
 
 - `summarize_decl(&DeclBlob) -> DeclSummary` — decodes the `OpenApiDecl`, returns `{ name, kind, doc_comment }` with `name` re-prefixed (`path:<pattern>`, `schema:<name>`, …) and `kind` the matching `DeclKind`.
 - `decl_detail(&DeclBlob) -> DeclDetail` — human/agent-readable rendering of one declaration (`print_decl_detail`).
-- `imports(&MetaBlob) -> Vec<Import>` — **AS-BUILT: returns empty.** External cross-file `$ref` imports are modeled in the AST (`SchemaRef.external_import`) but live inside decl blobs, not the meta blob; the trait scopes `imports` to the meta blob, and OpenAPI v1 has no document-level imports.
-- `type_refs(&DeclBlob) -> Vec<TypeRef>` — collects the local component refs a decl references, deduplicated, as `schema:<name>` / `param:<name>` / `response:<name>` / `requestBody:<name>` keys (used for `FollowType` and the dependency index).
+- `imports(&SchemaObjects) -> Vec<Import>` — validates metadata, scans every
+  declaration blob, and returns a stable deduplicated set of supported external
+  component refs. This whole-schema signature also lets Protobuf and
+  FlatBuffers continue reading their metadata import lists without teaching
+  Core format-specific rules.
+- `type_refs(&DeclBlob) -> Vec<TypeRef>` — collects local and external component
+  refs, deduplicated by full coordinate, as `schema:<name>` / `param:<name>` /
+  `response:<name>` / `requestBody:<name>` keys (used for `FollowType` and
+  reference integrity). Path-level parameters and response-header schemas are
+  included.
+- `field_type_ref(&DeclBlob, field_name) -> Option<TypeRef>` — selects the
+  requested component-schema property and returns its one modeled reference.
+  Scalars return `None`; absent properties and ambiguous composite references
+  return explicit read errors rather than falling back to another property.
 
 ### 6.4 `diff_decl` / `check_compatibility`
 
@@ -190,8 +205,31 @@ Reassembles the whole schema file from `SchemaObjects` (a `MetaBlob` + `BTreeMap
 
 ### 6.5 `$ref` handling
 
-- **Local** `#/components/schemas/User` → `SchemaOrRef::Ref(SchemaRef { local_name: "User", external_import: None })`; the `ComponentSchemaBlob` for `User` is a separate `schema:User` decl in the same file. Refs stay symbolic. Parameter/response/requestBody refs strip their `#/components/<kind>/` prefix to the bare component name.
-- **External** (cross-file) → `SchemaRef { local_name: "", external_import: Some(ExternalImport { path, resolved_commit, decl_name }) }`. Modeled but v2-resolved (not surfaced via `imports`).
+- **Local** `#/components/schemas/User` → `SchemaOrRef::Ref(SchemaRef {
+  local_name: "User", external_import: None })`; the `ComponentSchemaBlob` for
+  `User` is a separate `schema:User` declaration in the same file. JSON Pointer
+  `~0`/`~1` escapes are decoded for lookup and restored by the printer.
+- **External** `<schema-path>#/components/schemas/User` → `SchemaRef {
+  local_name: "", external_import: Some(ExternalImport { path,
+  resolved_commit: "", decl_name: "User" }) }`. Parameter, response, and
+  request-body component refs use the same rule in their modeled positions.
+  Source-text refs are live/unpinned; Core resolves them at the importing
+  immutable snapshot for the same repository or at one configured-default
+  snapshot for a cross-repository logical path. `ListDependencies`,
+  `ListDependents`, closure generation, `FollowType`, and whole-schema deletion
+  all consume the resulting import coordinate. Repository-root paths are used
+  as written; explicit `./` and `../` paths resolve lexically against the
+  importing schema's directory and cannot escape the repository root.
+- Network URLs, absolute paths, query-bearing refs, arbitrary fragments,
+  `$ref` sibling fields, and standalone reference shapes the AST cannot
+  preserve are rejected rather than reinterpreted or silently dropped. Other
+  OpenAPI component categories remain outside the 1.0 dependency guarantee.
+  The selected AST surface therefore has
+  an authoritative graph for its supported component refs without claiming
+  general-purpose remote URI resolution. OpenAPI has no text mutation for an
+  immutable import pin; durable cross-repository consumers should materialize
+  and retain the resolved SchemaRevision/artifact digest, or use a format with
+  explicit pinned-import mutation support.
 
 ### 6.6 Mutations (`operations.rs`, `lib.rs::apply_one`)
 
@@ -209,7 +247,7 @@ Reassembles the whole schema file from `SchemaObjects` (a `MetaBlob` + `BTreeMap
 > | `AddComponentSchema { schema_name, schema_type, description }` | new `schema:<name>` decl |
 > | `RemoveComponentSchema { schema_name }` | remove the `schema:<name>` decl |
 >
-> Any other granular op returns `MutationError::UnsupportedInV1`. These map to the `OpenApiMutation` oneof in `mutations.proto` (see `grpc-api.md` §4.3) and are reachable via `ApplyMutation` but **not** `ApplyTransaction`.
+> Any other granular op returns `MutationError::UnsupportedInV1`. These map to the `OpenApiMutation` oneof in `mutations.proto` (see `grpc-api.md` §4.3) and are reachable via both `ApplyMutation` and `ApplyTransaction`. `RemoveComponentSchema` rejects a remaining local `$ref`; an ordered transaction validates references only after the final document is assembled.
 
 ### 6.7 Conflicts
 

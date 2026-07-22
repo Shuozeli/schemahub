@@ -1,0 +1,29 @@
+include "complex/flatbuffers/z_sensor.fbs";
+
+namespace telemetry.complex;
+
+table Alert {
+  code: string (required);
+  message: string;
+}
+
+union TelemetryPayload {
+  sensor: Sensor,
+  alert: Alert
+}
+
+table TelemetryEnvelope {
+  id: string (key, id: 0);
+  payload: TelemetryPayload (id: 1);
+  related_sensors: [Sensor] (id: 2);
+  labels: [string] (id: 3);
+  samples: [double] (id: 4);
+}
+
+rpc_service TelemetryService {
+  Publish(TelemetryEnvelope): TelemetryEnvelope;
+}
+
+root_type TelemetryEnvelope;
+file_identifier "TELM";
+file_extension "tlm";

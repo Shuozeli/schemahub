@@ -1,10 +1,11 @@
+<!-- agent-updated: 2026-07-21T23:31:27Z -->
 # Code Quality Findings
 
 Audit of `v2-rearchitecture` @ `516639f`. Baseline before fixes: `cargo build
 --workspace` clean, `cargo test --workspace` = 288 passed / 0 failed / 0
 ignored. `cargo build --workspace --features schemahub-jj/postgres` clean.
 
-## Status (after Phase 3 — 2026-05-30)
+## Historical Status (after Phase 3 — 2026-05-30)
 
 | Section | Items | Status |
 |---|---|---|
@@ -18,6 +19,57 @@ ignored. `cargo build --workspace --features schemahub-jj/postgres` clean.
 | 8. Style / clippy (P2) | 7 | All actioned (62d892a; large_err deferred as tonic idiom) |
 
 After fixes: 292 passed / 0 failed / 0 ignored (4 new tests).
+
+The detailed findings below preserve the original audit context and locations;
+most have since been resolved by the 2026-07-21 production work. Current
+release evidence and remaining blockers are authoritative in `tasks.md`.
+
+## 2026-07-21 immutable-read and dependency audit
+
+Resolved in the current worktree:
+
+- Every public exploration, history, diff, and codegen `VersionRef` path now
+  resolves once to an immutable commit and returns its exact snapshot
+  coordinate. Omission uses the repository's configured default rather than a
+  transport hard-code.
+- JJ validates every raw commit against the named repository's current or
+  historical retained graph before reads, branch/tag creation, or other ref
+  operations. Public tests attempt the same foreign commit through source,
+  descriptors, GetCommit, Diff, CreateBranch, and CreateTag.
+- `ListCommits` now honors its exclusive stop and schema filter, reports its
+  immutable root in initial gRPC metadata, enforces a 10,000-commit bound, and
+  compares raw merged subtrees so conflict-to-conflict changes remain visible.
+- `FollowType` resolves the requested Protobuf/FlatBuffers field or OpenAPI
+  component property rather than choosing an arbitrary declaration reference.
+  It returns real summary/detail plus source/target commit and pin/import data,
+  and fails explicitly on scalar, missing, and ambiguous references.
+- Forward dependency traversal preserves normalized edges across immutable
+  `(schema, commit)` nodes, resolves cross-repository live defaults once, honors
+  pins and authorization, returns unavailable external targets as explicit
+  leaves, and fails closed on invalid pins, decoding/storage faults, unknown
+  formats, or bounds.
+- The browser BFF now rejects non-ASCII Authorization values as unauthorized,
+  and omitted gRPC/BFF ChangeRecord targets use repository configuration.
+
+- The compiler import boundary now receives complete `SchemaObjects`, allowing
+  metadata imports and declaration-level dependencies to coexist. Supported
+  external OpenAPI schema/parameter/response/request-body component refs are
+  parsed, round-tripped, deduplicated, followed, traversed in immutable
+  closures, included in reverse discovery, and enforced by deletion guards.
+  Unsupported network/arbitrary-fragment refs fail closed rather than becoming
+  false logical edges.
+
+## 2026-07-21 compiler dependency audit
+
+- The Protobuf parser/schema/codegen dependencies now use canonical Git sources
+  pinned at upstream commit
+  `a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac`; a release validator checks every
+  corresponding `Cargo.lock` package source.
+- The FlatBuffers parser/schema/codegen dependencies now use canonical Git
+  sources pinned at published commit
+  `7dc2c76c08f452b9a208230057c0cb6327e65f24`. Normal and release builds reject
+  cross-repository path dependencies, resolving the prior P1 release-boundary
+  violation.
 
 Priorities:
 
@@ -54,7 +106,12 @@ Priorities:
 
 ## 2. Silent failure (P1)
 
-### `SchemaService` swallows real VCS errors when loading the base
+### `SchemaService` swallows real VCS errors when loading the base — resolved 2026-07-21
+
+**Resolution:** Lifecycle RPCs are now thin adapters over Core's centralized
+Create/Update/Delete orchestration. Core distinguishes absent schemas from JJ
+storage/corruption failures and propagates the latter; the service no longer
+uses a default value for a failed base read.
 
 - **Location:** `crates/schemahub-server/src/services/schema.rs:88-92`
   (`create_schema`) and `:124-129` (`update_schema`).
@@ -72,7 +129,12 @@ Priorities:
   it (move it to `pub(crate)` and call from server, or add a `Core` wrapper)
   or inline the same `match` in `schema.rs`.
 
-### `BookmarkHandler::diff` swallows `list_schemas` errors
+### `BookmarkHandler::diff` swallows `list_schemas` errors — resolved 2026-07-21
+
+**Resolution:** Repository diffing moved into
+`Core::diff_repository_resolved`, which resolves both coordinates once and
+propagates every schema-list/read error except the explicitly modeled absent
+schema on one side.
 
 - **Location:** `crates/schemahub-server/src/services/bookmark.rs:109-114`
   in `diff`.
@@ -85,7 +147,11 @@ Priorities:
 - **Fix:** Match on the specific NotFound variants like `mutation::load_base`
   does, and propagate other errors.
 
-### `BearerTokenAuthn` swallows `MetadataValue::to_str` decode errors
+### `BearerTokenAuthn` swallows `MetadataValue::to_str` decode errors — resolved 2026-07-21
+
+**Resolution:** `token_from` returns `UNAUTHENTICATED` when a present
+Authorization value is not ASCII. gRPC and browser integration tests cover the
+malformed-header boundary.
 
 - **Location:** `crates/schemahub-server/src/services/mod.rs:17-23` in
   `token_from`.
@@ -101,7 +167,11 @@ Priorities:
 
 ## 3. API / contract drift (P1)
 
-### `CodegenService` never returns the resolved `at_commit`
+### `CodegenService` never returns the resolved `at_commit` — resolved 2026-07-21
+
+**Resolution:** Descriptor and preview methods call the resolved Core variants,
+render from one repository-owned immutable commit, and return that exact
+coordinate in `at_commit`.
 
 - **Location:**
   `crates/schemahub-server/src/services/codegen.rs:53`
@@ -114,7 +184,10 @@ Priorities:
   the same RefSpec) and populate `at_commit`. The history service uses
   the same pattern at `bookmark.rs:39-58` (`get_commit`).
 
-### `AdminService.get_server_config` reports a hard-coded storage backend
+### `AdminService.get_server_config` reports a hard-coded storage backend — resolved 2026-07-21
+
+**Resolution:** The composition root passes the opened backend identifier into
+`AdminHandler`; contract tests assert the configured value.
 
 - **Location:** `crates/schemahub-server/src/services/admin.rs:80`.
 - **Problem:** `storage_backend: "redb".to_string()` ignores the actual
@@ -122,7 +195,12 @@ Priorities:
 - **Fix:** Thread the resolved `Config` (or just the backend string) into
   `AdminHandler::new` and return the real value.
 
-### Project + repo RPCs are echo-only
+### Project + repo RPCs are echo-only — resolved 2026-07-21
+
+**Resolution:** Project, membership, and repository resources now persist in
+ObjectDb on redb/PostgreSQL. Every method authorizes, validates, paginates, and
+uses ETags where it mutates; delete is a history-preserving archive. Coverage
+lives in `e2e_projects.rs` and `e2e_repositories.rs`.
 
 - **Location:**
   `crates/schemahub-server/src/services/project.rs:106-171`
@@ -144,7 +222,12 @@ Priorities:
   cannot enumerate without a repo registry — return `unimplemented`
   rather than empty success to make the gap visible to clients.
 
-### CLI commands other than `project` don't send the bearer token
+### CLI commands other than `project` don't send the bearer token — resolved 2026-07-21
+
+**Resolution:** The shared `cmd::bearer` helper is used by every RPC command.
+`crates/schemahub-cli/tests/rbac_cli.rs` now executes the real CLI binary
+against an authenticated server and proves both repository initialization and
+schema creation succeed only through the configured bearer path.
 
 - **Location:** `crates/schemahub-cli/src/main.rs:75-119` —
   `Repo`/`Schema`/`Field`/`Branch`/`Tag`/`Log`/`Op`/`Undo`/`Resolve`/
@@ -162,7 +245,10 @@ Priorities:
   wrap each request with `bearer(body, token)?` before calling the
   client. Update `main.rs` to forward the token to every match arm.
 
-### CLI `config.token` warns it's used while marked dead code
+### CLI `config.token` warns it's used while marked dead code — resolved 2026-07-21
+
+**Resolution:** The resolved token is load-bearing in every RPC dispatch path;
+the dead-code suppression is gone.
 
 - **Location:** `crates/schemahub-cli/src/config.rs:17-21`.
 - **Problem:** `Config.token` is marked `#[allow(dead_code)]` — a
@@ -173,7 +259,13 @@ Priorities:
 - **Fix:** Remove `#[allow(dead_code)]` after the CLI bearer wiring
   fix lands — the field is then load-bearing in every command.
 
-### CLI silently defaults on a bad config file
+### CLI silently defaults on a bad config file — resolved 2026-07-21
+
+**Resolution:** Only a missing config file is optional. Read and TOML errors
+carry the config path and abort the command, including when overrides are
+present. The CLI also requires an explicit server from flags, environment, or
+the selected profile instead of guessing a loopback endpoint. Four AAA unit
+tests and two authenticated CLI-process tests cover the boundary.
 
 - **Location:** `crates/schemahub-cli/src/config.rs:52-57`,
   `:47-51`.
@@ -188,7 +280,12 @@ Priorities:
 
 ## 4. Auth / audit (P1)
 
-### Mutation handlers ignore the authenticated identity for audit author
+### Mutation handlers ignore the authenticated identity for audit author — resolved 2026-07-21
+
+**Resolution:** Every mutating service resolves its author from the trusted
+authentication provider through the shared `resolve_author` helper. Client
+author fields are ignored, while anonymous callers use the documented
+`schemahub` fallback only after authorization permits the operation.
 
 - **Location:**
   `crates/schemahub-server/src/services/schema.rs:25,104,141,185,209`
@@ -212,7 +309,12 @@ Priorities:
   author. Drop the client-supplied `r.author` paths entirely — they
   let any authenticated caller forge an arbitrary audit string.
 
-### VCS ref ops silently drop the `author` parameter
+### VCS ref ops silently drop the `author` parameter — resolved 2026-07-21
+
+**Resolution:** Every JJ publishing transaction stamps `schemahub.author` in
+operation metadata, including bookmark/tag changes, undo, merge, conflict
+resolution, and schema writes. Op-log reads prefer this authenticated identity
+over JJ's host username.
 
 - **Location:**
   `crates/schemahub-jj/src/lib.rs:562` (`create_bookmark`), `:585`
@@ -234,15 +336,12 @@ Priorities:
 
 ## 5. Lifecycle / consistency (P1)
 
-### `create_project` is not atomic between project-store and role-store [DEFERRED]
+### `create_project` is not atomic between project-store and role-store — resolved 2026-07-21
 
-- **Status:** Not fixed. The right fix requires adding `delete` to the
-  `ProjectStore` trait (so we can roll back project_store.set if role_store.set
-  fails). This is a noticeable surface change; deferred to a follow-up. The
-  TOCTOU window between the existence check and the set is acceptable for
-  v1 (concurrent create with the same name produces one project, one role,
-  same end-state). The half-create-on-role-failure window is narrow and the
-  resulting state is detectable by `guard_last_owner` on the next mutation.
+- **Resolution:** `ProjectStore::create_with_owner` now owns the invariant.
+  The production ObjectDb implementation creates the project and Owner records
+  atomically through one multi-record transaction; collision/failure tests
+  prove no half-created project is visible.
 - **Location:** `crates/schemahub-core/src/projects.rs:43-60`.
 - **Problem:** Sequence is:
   1. check `project_store.get(name).is_none()`,
@@ -264,7 +363,11 @@ Priorities:
   the trait) so we don't leave a half-created project. Document the
   TOCTOU explicitly if accepted.
 
-### `EmptyProjectStore` / `EmptyRoleStore` silently swallow writes in production
+### `EmptyProjectStore` / `EmptyRoleStore` silently swallow writes in production — resolved 2026-07-21
+
+**Resolution:** Empty stores reject mutation methods with an explicit
+`Unsupported` error instead of claiming persistence. The composition root uses
+durable ObjectDb-backed project/repository stores in normal server operation.
 
 - **Location:** `crates/schemahub-core/src/lib.rs:184-214`. Used in
   `Core::with_config` (`:100-116`) — the production path when
@@ -286,6 +389,11 @@ Priorities:
 
 ### `IdempotencyStore` grows unbounded
 
+**Resolved 2026-07-21.** The in-process map was replaced by bounded ObjectDb
+receipts with a 24-hour completed TTL, a 1,024-entry cap, compare-and-delete
+cleanup, and JJ-operation crash reconciliation. `GetServerConfig` and `RunGC`
+now expose the TTL and cleanup count. See `idempotency.md`.
+
 - **Location:**
   `crates/schemahub-core/src/mutation/idempotency.rs:17-40`.
 - **Problem:** Every unique idempotency key the server has ever seen
@@ -304,7 +412,10 @@ Priorities:
 
 ## 6. std-trait drift (P1)
 
-### `from_str` methods on `HttpMethod` / `ParameterLocation` / `JsonSchemaType` should be `std::str::FromStr`
+### `from_str` methods on `HttpMethod` / `ParameterLocation` / `JsonSchemaType` should be `std::str::FromStr` — resolved 2026-07-21
+
+**Resolution:** All three enums implement `std::str::FromStr` with a typed,
+displayable `UnknownVariant` error; parser callers now propagate invalid input.
 
 - **Location:**
   `crates/schemahub-compiler-openapi/src/ast.rs:31`,
@@ -326,7 +437,13 @@ Priorities:
 
 ## 7. Defensive coding (P1)
 
-### `tree_from_proto` / `tree_value_from_proto` unwrap on optional proto fields
+### `tree_from_proto` / `tree_value_from_proto` unwrap on optional proto fields — resolved 2026-07-21
+
+**Resolution:** Stored commits, trees, operations, and views now validate every
+required field and exact object-ID length before constructing JJ objects. Git
+submodule tree values return `Unsupported`, malformed records return read
+errors, and backend faults remain backend errors rather than being mislabeled
+as missing objects. Focused corruption tests cover each boundary.
 
 - **Location:** `crates/schemahub-jj/src/jj_backend.rs:280`, `:281`,
   `:317`.
@@ -341,7 +458,11 @@ Priorities:
   `BackendError::Other("malformed tree value …")`. Match the existing
   `to_other_err` helper at line 51.
 
-### Op-heads store silently drops invalid hex ids
+### Op-heads store silently drops invalid hex ids — resolved 2026-07-21
+
+**Resolution:** The op-head store fails the entire read on malformed UTF-8 or
+the first invalid hex ID, so a later update cannot persist a silently shrunken
+head set.
 
 - **Location:** `crates/schemahub-jj/src/jj_op_heads.rs:49`
   (`filter_map(|hex| OperationId::try_from_hex(hex))`).
@@ -415,7 +536,11 @@ Priorities:
 - **Fix:** Allowed convention — skip. Documented here so future
   reviewers can see this was considered.
 
-### `pg_db.rs` spawns a fresh OS thread per DB call
+### `pg_db.rs` spawns a fresh OS thread per DB call — resolved 2026-07-21
+
+**Resolution:** `PgObjectDb` owns one bounded, long-lived Tokio executor and
+schedules database futures onto it. Tests prove worker reuse across many calls
+and safe invocation from an existing Tokio runtime.
 
 - **Location:**
   `crates/schemahub-jj/src/pg_db.rs:135-153` (`block_on`).
@@ -425,7 +550,13 @@ Priorities:
   documented), fine. Worth flagging.
 - **Fix:** Not actionable in this pass. Documented as a known cost.
 
-### `Core::op_log` loads the full op-log to return the last N
+### `Core::op_log` loads the full op-log to return the last N — resolved 2026-07-21
+
+**Resolution:** Bounded Core reads call `Jj::list_operations_tail`. Linear
+operation histories load only the requested suffix; if concurrent JJ history
+branches inside that suffix, the implementation deliberately falls back to the
+complete graph walk to preserve ordering and deduplication. JJ and Core tests
+cover the bounded result and newest-operation identity.
 
 - **Location:**
   `crates/schemahub-core/src/history.rs:38-44`.
@@ -435,7 +566,11 @@ Priorities:
 - **Fix:** Add `Jj::list_operations_tail(n)` that walks the op
   parent chain back N steps. Defer unless someone reports it.
 
-### Config silently skips malformed `[repos.*]` keys
+### Config silently skips malformed `[repos.*]` keys — resolved 2026-07-21
+
+**Resolution:** Startup validation requires exactly one non-empty
+`project/repo` pair before building the repository policy store; malformed keys
+produce a contextual configuration error and a regression test covers it.
 
 - **Location:** `crates/schemahub-server/src/config.rs:272`.
 - **Problem:** `let Some((project, repo)) = key.split_once('/') else {
@@ -443,7 +578,14 @@ Priorities:
   "fail-fast".
 - **Fix:** Emit a startup error: "[repos.{key}] is not 'project/repo'".
 
-### OpenAPI parser silently drops non-string keys / unknown JSON-schema types
+### OpenAPI parser silently drops non-string keys / unknown JSON-schema types — resolved 2026-07-21
+
+**Resolution:** Recursive OpenAPI parsing is now fallible. It rejects malformed
+object/array shapes, non-string declaration/property/media/header keys,
+unknown or non-string JSON Schema types, invalid parameter locations, malformed
+references, and JSON serialization failures instead of synthesizing empty
+declarations. Five focused AAA tests cover the original hazards and preserve
+support for YAML's common unquoted numeric response codes.
 
 - **Location:** `crates/schemahub-compiler-openapi/src/parser.rs:73,
   86, 100, 113, 126, 417, 420`.
@@ -457,20 +599,69 @@ Priorities:
 
 ---
 
-## Test gaps (P1)
+## Historical test gaps (P1)
 
-- No e2e tests for `ProjectService.{create_repo, get_repo,
-  update_repo, list_repos}` — see finding §3 ("echo-only repo
-  RPCs"). Status quo is "they always succeed regardless of project
-  state" and no test asserts that. Add one
-  e2e test per RPC that exercises the (future) authorize path.
-- No tests for `AdminService.get_server_config` against a
-  configured backend; the hardcoded "redb" bug is undetected.
-- No tests for CLI bearer forwarding — the only command that
-  forwards is `project`, and only its happy path is exercised
-  through unit tests in `cmd/project.rs`. An e2e test that hits a
-  RBAC-enabled server with `schemahub schema list …` would catch
-  the missing-bearer regression.
+- ~~No e2e tests for `ProjectService.{create_repo, get_repo, update_repo,
+  list_repos}`.~~ Resolved: durable CRUD, authorization, policy, pagination,
+  ETag, and archive paths are covered in `e2e_repositories.rs`; project
+  lifecycle and migration are covered in `e2e_projects.rs`.
+- ~~No tests for `AdminService.get_server_config` against a configured
+  backend.~~ Resolved: composition-root and HTTP contract tests assert the
+  configured `memory` backend instead of a hard-coded redb value.
+- ~~No tests for CLI bearer forwarding.~~ Resolved: `rbac_cli.rs` runs the real
+  binary against an RBAC-enabled server for both `repo init` and
+  `schema create`, covering ProjectService and SchemaService dispatch.
+
+## 2026-07-21 lifecycle and publication audit
+
+Resolved in the current worktree:
+
+- Create/Update/Delete no longer publish raw JJ writes from the gRPC service;
+  Core now owns format, existence, auth, compatibility, dependency, and
+  idempotency policy.
+- Create now requires a format matching the extension and returns
+  `ALREADY_EXISTS`; Update returns `NOT_FOUND` rather than creating implicitly.
+- Whole-source compatibility and top-level removals are checked on protected
+  bookmarks. Force requires Maintainer, is stored on the JJ operation, and does
+  not bypass reference integrity.
+- Mutable bookmarks are captured as immutable planning commits before compiler
+  work. Deterministic races prove same-declaration writers form a first-class
+  conflict instead of overwriting the concurrent edit.
+- Nested schema paths are listed losslessly, so repository-wide dependency
+  scans see `common/types.proto` rather than only `common`.
+- Direct and ChangeRecord whole-schema deletion reject remaining live unpinned
+  consumers; one ChangeRecord can update/delete consumers and the provider in
+  its validated final state.
+- Every publisher now holds an exclusive backend repository guard across
+  operation-head load, final merge, policy validation, and JJ commit.
+  PostgreSQL uses a repository-keyed advisory lock across server instances;
+  deterministic tests prove same-repository serialization and cross-repository
+  concurrency.
+- Protected writes, merges, and bookmark moves reject conflicted final trees
+  before publication even under force. Final-state deletion/import validation
+  runs at the same boundary, including both consumer-first and delete-first
+  race orderings.
+- Known policy rejection deletes a pending direct-write receipt or releases a
+  ChangeRecord Apply lease back to Ready; ambiguous JJ errors retain durable
+  correlation state for recovery.
+- `ApplyTransaction` now executes synchronous compiler/storage work on the
+  blocking executor under an independent 30-second server timer. A shared
+  monotonic cancellation token is checked by Core before publication; expiry
+  at the publication-lock queue aborts the claimed idempotency receipt.
+
+Resolved in the dependency-discovery increment:
+
+- `ListDependents` now supplies a bounded direct reverse scan across repositories
+  visible to one resolved identity. Every result is tied to an immutable
+  per-repository snapshot, live versus pinned imports remain explicit, and
+  unreadable repositories do not leak. The synchronous scan runs on the
+  blocking executor and fails closed on limits or read/decoding errors.
+
+Resolved in the API-boundary increment:
+
+- ADR 0002 designates `schemahub.v1` as the public API and excludes unversioned
+  `/api/*` GUI BFF routes from that compatibility promise. Runtime headers and
+  per-path OpenAPI metadata make the classification machine-readable.
 
 ---
 
@@ -481,10 +672,5 @@ Priorities:
   Rust idiom for poisoned-lock panic. Not a real concern.
 - **`tonic::Status` is large** (see §8) — tonic-idiomatic, leave
   as-is.
-- **`PgObjectDb` thread-per-call** (see §8) — design-acknowledged.
 - **`flatbuffers/blob.rs:287` "panic in test"** — actually
   inside a `#[test]`. Fine.
-- **Author field unused on `commit_write` calls that pass
-  `DEFAULT_AUTHOR`** — this is a *consequence* of finding §4
-  ("server hardcodes author"); fixing that finding fixes this
-  implicitly. No separate fix.

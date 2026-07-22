@@ -1,7 +1,7 @@
-import { List, Paper, Stack, Table, Tabs, Text, Title } from '@mantine/core';
+import { Alert, List, Paper, Stack, Table, Tabs, Text, Title } from '@mantine/core';
 import { useParams, useSearchParams } from 'react-router-dom';
 
-import { useSchemaDetail } from '../api/queries';
+import { useRepoDashboard, useRepository, useSchemaDetail } from '../api/queries';
 import { FormatBadge } from '../components/badges';
 import { CodegenPreviewPanel } from '../components/CodegenPreview';
 import { CodeViewer } from '../components/CodeViewer';
@@ -14,11 +14,17 @@ function languageForPath(path: string) {
 }
 
 export function SchemaDetailPage() {
-  const { project = 'acme', repo = 'commerce', '*': wildcard } = useParams();
-  const schemaPath = wildcard || 'order.proto';
+  const { project = '', repo = '', '*': wildcard } = useParams();
+  const schemaPath = wildcard || '';
   const [searchParams, setSearchParams] = useSearchParams();
-  const refName = searchParams.get('ref') || 'main';
-  const { data, isLoading } = useSchemaDetail(project, repo, schemaPath, refName);
+  const { data: repository } = useRepository(project, repo);
+  const refName = searchParams.get('ref') || repository?.defaultBranch || '';
+  const { data, error, isLoading } = useSchemaDetail(project, repo, schemaPath, refName);
+  const { data: dashboard } = useRepoDashboard(project, repo, refName);
+
+  if (error) {
+    return <Alert color="red">{error.message}</Alert>;
+  }
 
   if (isLoading || !data) {
     return <Text>Loading schema...</Text>;
@@ -31,6 +37,10 @@ export function SchemaDetailPage() {
         title={data.path}
         subtitle="Canonical source, declarations, dependencies, and codegen preview."
         refName={refName}
+        refs={[
+          ...(dashboard?.branches ?? []),
+          ...(dashboard?.tags ?? []).map((tag) => `tag:${tag}`),
+        ]}
         onRefChange={(value) => setSearchParams({ ref: value })}
       />
 
@@ -153,4 +163,3 @@ export function SchemaDetailPage() {
     </Stack>
   );
 }
-

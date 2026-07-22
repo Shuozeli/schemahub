@@ -50,6 +50,12 @@ pub enum ReadError {
     MalformedBlob(String),
     #[error("declaration '{0}' not found in blob")]
     NotFound(String),
+    #[error("field or property '{0}' not found in declaration")]
+    FieldNotFound(String),
+    #[error("field or property '{0}' does not reference a named declaration")]
+    NotATypeReference(String),
+    #[error("field or property '{0}' has more than one possible type declaration")]
+    AmbiguousTypeReference(String),
 }
 
 #[derive(Debug, Error)]
@@ -96,4 +102,6 @@ pub enum AuthnError {
 pub enum AuthzError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    #[error("authorization backend error: {0}")]
+    Backend(String),
 }

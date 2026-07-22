@@ -5,6 +5,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+    #[error("failed precondition: {0}")]
+    FailedPrecondition(String),
+    #[error("resource exhausted: {0}")]
+    ResourceExhausted(String),
     #[error("no compiler registered for format '{0}'")]
     UnknownFormat(String),
     #[error("could not detect a format for schema '{0}'")]
@@ -31,6 +39,14 @@ pub enum CoreError {
     Descriptor(#[from] schemahub_types::DescriptorError),
     #[error("codegen error: {0}")]
     Codegen(#[from] schemahub_types::CodegenError),
+    #[error(transparent)]
+    ChangeLedger(#[from] crate::change_record::ChangeLedgerError),
+    #[error(transparent)]
+    Repository(#[from] crate::repository::RepositoryError),
+    #[error(transparent)]
+    AccessStore(#[from] crate::auth_store::AccessStoreError),
+    #[error(transparent)]
+    Idempotency(#[from] crate::mutation::idempotency::IdempotencyError),
     /// One or more compatibility violations blocked a protected-bookmark write
     /// (design.md §7). Carries the per-declaration violations.
     #[error("compatibility violation: {} issue(s) on protected bookmark", .0.len())]
@@ -46,6 +62,10 @@ pub enum CoreError {
     /// transaction is repo- and format-scoped; design.md §5.2).
     #[error("invalid transaction batch: {0}")]
     MixedTransaction(String),
+    /// The server-owned monotonic transaction deadline elapsed or its
+    /// cancellation token fired before publication could safely begin.
+    #[error("transaction execution deadline exceeded")]
+    TransactionDeadlineExceeded,
     #[error("{0}")]
     Other(String),
 }

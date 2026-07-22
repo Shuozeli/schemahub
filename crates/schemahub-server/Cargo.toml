@@ -17,17 +17,26 @@ schemahub-compiler-flatbuffers = { path = "../schemahub-compiler-flatbuffers" }
 schemahub-compiler-openapi     = { path = "../schemahub-compiler-openapi" }
 tokio    = { workspace = true }
 tonic    = { workspace = true }
+tonic-health = { workspace = true }
+tracing  = { workspace = true }
+tracing-subscriber = { workspace = true }
 anyhow   = { workspace = true }
 prost    = { workspace = true }
 prost-types = { workspace = true }
 bytes    = { workspace = true }
+hex      = { workspace = true }
 serde    = { workspace = true }
 serde_json = { workspace = true }
 toml     = { workspace = true }
 clap     = { workspace = true }
 tokio-stream = "0.1"
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "request-id", "trace"] }
+uuid = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 
 [features]
 default = []
@@ -38,3 +47,4 @@ postgres = ["schemahub-jj/postgres"]
 [dev-dependencies]
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
+tower = { version = "0.5", features = ["util"] }

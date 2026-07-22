@@ -1,115 +1,63 @@
-# Cloud Build checks for SchemaHub.
+# Supplemental Cloud Build checks for SchemaHub. The complete canonical matrix
+# (PostgreSQL, GUI, container, and release artifacts) is in GitHub Actions.
 #
-# SchemaHub is not hermetic as a standalone checkout: Cargo.toml uses sibling
-# path dependencies at ../../compilers/{protobuf-rs,flatbuffers-rs}. Cloud Build
-# normally places the submitted source at /workspace, so this config recreates
-# the expected monorepo-style layout under /workspace/shuozeli before running
-# Cargo.
-#
-# Override the compiler repo/ref substitutions when building against private
-# mirrors, pinned release branches, or a feature branch that must move together
-# with a SchemaHub change.
+# Both sibling compiler boundaries resolve from immutable Cargo Git revisions,
+# so the submitted SchemaHub checkout is sufficient for every build step.
+---
 substitutions:
-  _RUST_IMAGE: rust:1-bookworm
-  _PROTOBUF_RS_REPO: https://github.com/Shuozeli/protobuf-rs.git
-  _PROTOBUF_RS_REF: main
-  _FLATBUFFERS_RS_REPO: https://github.com/Shuozeli/flatbuffers-rs.git
-  _FLATBUFFERS_RS_REF: main
+  _RUST_IMAGE: rust:1.95.0-bookworm
 
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8
 
 steps:
-  - id: prepare-workspace-layout
-    name: gcr.io/cloud-builders/git
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        set -o pipefail
-
-        schemahub_dir=/workspace/shuozeli/codegen/schemahub
-        compilers_dir=/workspace/shuozeli/compilers
-
-        if [[ ! -f /workspace/Cargo.toml ]]; then
-          echo "expected SchemaHub source at /workspace, but Cargo.toml is missing" >&2
-          exit 2
-        fi
-
-        mkdir -p "$schemahub_dir" "$compilers_dir"
-
-        # Copy submitted source into the path expected by Cargo.toml's sibling
-        # dependencies. Exclude the destination parent to avoid copying into
-        # itself after /workspace/shuozeli has been created.
-        tar --exclude='./shuozeli' -C /workspace -cf - . \
-          | tar -C "$schemahub_dir" -xf -
-
-        git clone --depth=1 --branch "${_PROTOBUF_RS_REF}" \
-          "${_PROTOBUF_RS_REPO}" "$compilers_dir/protobuf-rs"
-        git clone --depth=1 --branch "${_FLATBUFFERS_RS_REF}" \
-          "${_FLATBUFFERS_RS_REPO}" "$compilers_dir/flatbuffers-rs"
-
-  - id: validate-path-dependencies
+  - id: validate-immutable-compiler-dependencies
     name: ${_RUST_IMAGE}
-    dir: shuozeli/codegen/schemahub
     entrypoint: bash
     args:
       - -ceu
       - |
         set -o pipefail
-
-        required_paths=(
-          ../../compilers/protobuf-rs/parser/Cargo.toml
-          ../../compilers/protobuf-rs/schema/Cargo.toml
-          ../../compilers/protobuf-rs/codegen/Cargo.toml
-          ../../compilers/flatbuffers-rs/parser/Cargo.toml
-          ../../compilers/flatbuffers-rs/schema/Cargo.toml
-          ../../compilers/flatbuffers-rs/codegen/Cargo.toml
-        )
-
-        for path in "${required_paths[@]}"; do
-          if [[ ! -f "$path" ]]; then
-            echo "missing required sibling path dependency: $path" >&2
-            echo "Set _PROTOBUF_RS_REPO/_PROTOBUF_RS_REF and _FLATBUFFERS_RS_REPO/_FLATBUFFERS_RS_REF to check out compatible compiler repos." >&2
-            exit 2
-          fi
-        done
-
+        protobuf_revision="$(
+          scripts/validate-compiler-lock.sh protobuf --development
+        )"
+        flatbuffers_revision="$(
+          scripts/validate-compiler-lock.sh flatbuffers --development
+        )"
+        scripts/validate-compiler-lock.sh protobuf "$protobuf_revision"
+        scripts/validate-compiler-lock.sh flatbuffers "$flatbuffers_revision"
         cargo metadata --locked --format-version=1 >/dev/null
 
   - id: cargo-fmt
     name: ${_RUST_IMAGE}
-    dir: shuozeli/codegen/schemahub
     entrypoint: bash
     args:
       - -ceu
       - |
         rustup component add rustfmt
-        cargo fmt --all --check
+        cargo fmt --all -- --check
 
   - id: cargo-clippy
     name: ${_RUST_IMAGE}
-    dir: shuozeli/codegen/schemahub
     entrypoint: bash
     args:
       - -ceu
       - |
         rustup component add clippy
-        cargo clippy --workspace --all-targets --locked -- -D warnings
+        CARGO_INCREMENTAL=0 cargo clippy \
+          --release --workspace --all-targets --all-features --locked -- -D warnings
 
   - id: cargo-test-workspace
     name: ${_RUST_IMAGE}
-    dir: shuozeli/codegen/schemahub
     entrypoint: bash
     args:
       - -ceu
-      - cargo test --workspace --locked
+      - CARGO_INCREMENTAL=0 cargo test --release --workspace --locked
 
   - id: cargo-check-server-postgres
     name: ${_RUST_IMAGE}
-    dir: shuozeli/codegen/schemahub
     entrypoint: bash
     args:
       - -ceu
-      - cargo check -p schemahub-server --features postgres --locked
+      - CARGO_INCREMENTAL=0 cargo check --release -p schemahub-server --features postgres --locked

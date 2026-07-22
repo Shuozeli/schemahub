@@ -1,31 +1,40 @@
-import { Group, Paper, Select, Stack, Table, Text, Title } from '@mantine/core';
+import { Alert, Group, Paper, Select, Stack, Table, Text, Title } from '@mantine/core';
 import { useParams, useSearchParams } from 'react-router-dom';
 
-import { useDiff } from '../api/queries';
+import { useDiff, useRepoDashboard, useRepository } from '../api/queries';
 import { CompatibilityBadge } from '../components/badges';
 import { CodeViewer } from '../components/CodeViewer';
 import { ResourceHeader } from '../components/ResourceHeader';
 
-const refs = [
-  { value: 'tag:release-2026-06-05', label: 'tag:release-2026-06-05' },
-  { value: 'main', label: 'main' },
-  { value: 'feature/shipping-note', label: 'feature/shipping-note' },
-];
-
 export function ComparePage() {
-  const { project = 'acme', repo = 'commerce' } = useParams();
+  const { project = '', repo = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const refName = searchParams.get('ref') || 'main';
-  const base = searchParams.get('base') || 'tag:release-2026-06-05';
-  const head = searchParams.get('head') || 'main';
+  const { data: repository } = useRepository(project, repo);
+  const defaultRef = repository?.defaultBranch || '';
+  const base = searchParams.get('base') || defaultRef;
+  const head = searchParams.get('head') || defaultRef;
+  const refName = searchParams.get('ref') || head;
   const schema = searchParams.get('schema') || '';
-  const { data, isLoading } = useDiff(project, repo, base, head, schema || undefined);
+  const { data, error, isLoading } = useDiff(project, repo, base, head, schema || undefined);
+  const { data: dashboard } = useRepoDashboard(project, repo, refName);
+  const refs = [
+    ...(dashboard?.branches ?? []).map((value) => ({ value, label: value })),
+    ...(dashboard?.tags ?? []).map((tag) => ({ value: `tag:${tag}`, label: `tag:${tag}` })),
+  ];
+  const schemas = [
+    { value: '', label: 'All schemas' },
+    ...(dashboard?.schemas ?? []).map(({ path }) => ({ value: path, label: path })),
+  ];
 
   const updateParam = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams);
     next.set(key, value);
     setSearchParams(next);
   };
+
+  if (error) {
+    return <Alert color="red">{error.message}</Alert>;
+  }
 
   return (
     <Stack>
@@ -34,6 +43,7 @@ export function ComparePage() {
         title="Compare"
         subtitle="Review schema changes between refs before merge or release."
         refName={refName}
+        refs={refs.map(({ value }) => value)}
         onRefChange={(value) => updateParam('ref', value)}
       />
 
@@ -45,11 +55,7 @@ export function ComparePage() {
             label="Schema"
             value={schema}
             onChange={(v) => updateParam('schema', v || '')}
-            data={[
-              { value: '', label: 'All schemas' },
-              { value: 'order.proto', label: 'order.proto' },
-              { value: 'commerce.yaml', label: 'commerce.yaml' },
-            ]}
+            data={schemas}
           />
         </Group>
       </Paper>
@@ -90,13 +96,14 @@ export function ComparePage() {
         <CodeViewer
           language="diff"
           height={520}
-          value={`--- ${base}/order.proto
-+++ ${head}/order.proto
-@@ message Order
-   string id = 1;
-   Money total = 2;
-+  string shipping_note = 3;
-`}
+          value={
+            data?.changes
+              .map(
+                (change) =>
+                  `${change.kind.toUpperCase()} ${change.schemaPath} :: ${change.declaration}\n${change.summary}`,
+              )
+              .join('\n\n') || `No declaration changes between ${base} and ${head}.`
+          }
         />
 
         <Paper withBorder p="md" radius="sm">
@@ -119,4 +126,3 @@ export function ComparePage() {
     </Stack>
   );
 }
-

@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package commerce.platform.v1;
+
+import "complex/protobuf/common.proto";
+import "complex/protobuf/customer.proto";
+
+enum OrderState {
+  ORDER_STATE_UNSPECIFIED = 0;
+  ORDER_STATE_PENDING = 1;
+  ORDER_STATE_CONFIRMED = 2;
+  ORDER_STATE_FULFILLED = 3;
+}
+
+message Order {
+  message LineItem {
+    string sku = 1;
+    uint32 quantity = 2;
+    Money unit_price = 3;
+    repeated bytes adjustment_tokens = 4;
+  }
+
+  string id = 1;
+  Customer customer = 2;
+  repeated LineItem items = 3;
+  OrderState state = 4;
+  map<string, string> metadata = 5;
+  optional string purchase_order_number = 6;
+
+  oneof settlement {
+    Money charged_total = 7;
+    string invoice_reference = 8;
+  }
+}
+
+message WatchOrdersRequest {
+  string customer_id = 1;
+  repeated OrderState states = 2;
+}
+
+service OrderService {
+  rpc GetOrder(Order) returns (Order);
+  rpc WatchOrders(WatchOrdersRequest) returns (stream Order);
+  rpc ImportOrders(stream Order) returns (WatchOrdersRequest);
+}

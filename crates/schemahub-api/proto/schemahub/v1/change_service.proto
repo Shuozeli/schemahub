@@ -1,0 +1,221 @@
+syntax = "proto3";
+package schemahub.v1;
+
+option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// ChangeService records human and agent schema-change intent before that
+// intent is applied to versioned schema state. Validation results and review
+// decisions are server-derived lifecycle data on the same durable resource.
+service ChangeService {
+  rpc CreateChange(CreateChangeRequest)   returns (ChangeRecord);
+  rpc GetChange(GetChangeRequest)         returns (ChangeRecord);
+  rpc ListChanges(ListChangesRequest)     returns (ListChangesResponse);
+  rpc UpdateChange(UpdateChangeRequest)   returns (ChangeRecord);
+  rpc ValidateChange(ValidateChangeRequest)       returns (ChangeRecord);
+  rpc MarkChangeReady(MarkChangeReadyRequest)     returns (ChangeRecord);
+  rpc ApproveChange(ApproveChangeRequest)         returns (ChangeRecord);
+  rpc RejectChange(RejectChangeRequest)           returns (ChangeRecord);
+  rpc ApplyChange(ApplyChangeRequest)             returns (ChangeRecord);
+
+  // Compatibility-shaped soft delete. The record remains in the audit log in
+  // ABANDONED state; no schema history is erased.
+  rpc DeleteChange(DeleteChangeRequest)   returns (google.protobuf.Empty);
+  rpc AbandonChange(AbandonChangeRequest) returns (ChangeRecord);
+}
+
+enum ActorKind {
+  ACTOR_KIND_UNSPECIFIED = 0;
+  ACTOR_KIND_ANONYMOUS   = 1;
+  ACTOR_KIND_HUMAN       = 2;
+  ACTOR_KIND_AGENT       = 3;
+  ACTOR_KIND_SERVICE     = 4;
+}
+
+enum ChangeStatus {
+  CHANGE_STATUS_UNSPECIFIED = 0;
+  CHANGE_STATUS_DRAFT       = 1;
+  CHANGE_STATUS_READY       = 2;
+  CHANGE_STATUS_APPLYING    = 3;
+  CHANGE_STATUS_APPLIED     = 4;
+  CHANGE_STATUS_REJECTED    = 5;
+  CHANGE_STATUS_ABANDONED   = 6;
+}
+
+enum ReviewDecision {
+  REVIEW_DECISION_UNSPECIFIED = 0;
+  REVIEW_DECISION_APPROVED    = 1;
+  REVIEW_DECISION_REJECTED    = 2;
+}
+
+message Actor {
+  string    identity     = 1;
+  ActorKind kind         = 2;
+  string    display_name = 3;
+  string    delegated_by = 4;
+}
+
+// Compiler-specific mutation bytes keep their format discriminator. The
+// format compiler, not the change ledger, interprets operation.
+message MutationChangeEdit {
+  string schema_path = 1;
+  string format_id   = 2;
+  bytes  operation   = 3;
+}
+
+message ReplaceSchemaSourceEdit {
+  string schema_path = 1;
+  string format_id   = 2;
+  string source      = 3;
+}
+
+message DeleteSchemaEdit {
+  string schema_path = 1;
+  string format_id   = 2;
+}
+
+message ChangeEdit {
+  oneof edit {
+    MutationChangeEdit      mutation       = 1;
+    ReplaceSchemaSourceEdit replace_source = 2;
+    DeleteSchemaEdit        delete_schema  = 3;
+  }
+}
+
+message ValidationIssue {
+  string code             = 1;
+  string message          = 2;
+  string schema_name      = 3;
+  string declaration_name = 4;
+}
+
+message ChangeValidationResult {
+  bool                     valid                = 1;
+  string                   resolved_base_commit = 2;
+  string                   edit_digest          = 3;
+  repeated ValidationIssue issues               = 4;
+  google.protobuf.Timestamp validated_at        = 5;
+  string                   validator_version    = 6;
+}
+
+message ChangeReview {
+  Actor                     reviewer    = 1;
+  ReviewDecision            decision    = 2;
+  string                    reason      = 3;
+  google.protobuf.Timestamp create_time = 4;
+}
+
+message ChangeApplyResult {
+  string          commit_id               = 1;
+  string          change_id               = 2;
+  string          operation_id            = 3;
+  repeated string conflicted_declarations = 4;
+  string          artifact_digest         = 5;
+}
+
+message ChangeApplyAttempt {
+  string                    request_id       = 1;
+  string                    attempt_id       = 2;
+  Actor                     actor            = 3;
+  string                    lease_owner      = 4;
+  google.protobuf.Timestamp lease_expires_at = 5;
+  google.protobuf.Timestamp start_time       = 6;
+  google.protobuf.Timestamp update_time      = 7;
+}
+
+// A durable, auditable statement of schema-change intent.
+message ChangeRecord {
+  string                    name            = 1;
+  // Defaults to the repository's configured default bookmark when omitted.
+  string                    target_bookmark = 2;
+  string                    base_revision   = 3;
+  string                    title           = 4;
+  string                    description     = 5;
+  repeated ChangeEdit       edits           = 6;
+  Actor                     created_by      = 7;
+  ChangeStatus              status          = 8;
+  ChangeValidationResult    validation      = 9;
+  repeated ChangeReview     reviews         = 10;
+  ChangeApplyResult         apply_result    = 11;
+  string                    etag            = 12;
+  google.protobuf.Timestamp create_time     = 13;
+  google.protobuf.Timestamp update_time     = 14;
+  ChangeApplyAttempt        apply_attempt   = 15;
+  // Human-readable issue, incident, design, or automation correlation links.
+  // Entries are ordered, deduplicated, bounded opaque strings.
+  repeated string           external_references = 16;
+}
+
+message CreateChangeRequest {
+  // projects/{project}/repos/{repo}
+  string       parent    = 1;
+  ChangeRecord change    = 2;
+  // Optional caller-selected id for stable automation correlation. The server
+  // generates one when empty; request-id idempotency is a separate concern.
+  string       change_id = 3;
+}
+
+message GetChangeRequest {
+  // projects/{project}/repos/{repo}/changes/{change}
+  string name = 1;
+}
+
+message ListChangesRequest {
+  // projects/{project}/repos/{repo}
+  string       parent        = 1;
+  int32        page_size     = 2;
+  string       page_token    = 3;
+  ChangeStatus status_filter = 4;
+}
+
+message ListChangesResponse {
+  repeated ChangeRecord changes         = 1;
+  string                next_page_token = 2;
+}
+
+message UpdateChangeRequest {
+  ChangeRecord              change      = 1;
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+message DeleteChangeRequest {
+  string name = 1;
+  string etag = 2;
+}
+
+message AbandonChangeRequest {
+  string name = 1;
+  string etag = 2;
+}
+
+message ValidateChangeRequest {
+  string name = 1;
+  string etag = 2;
+}
+
+message MarkChangeReadyRequest {
+  string name = 1;
+  string etag = 2;
+}
+
+message ApproveChangeRequest {
+  string name   = 1;
+  string etag   = 2;
+  string reason = 3;
+}
+
+message RejectChangeRequest {
+  string name   = 1;
+  string etag   = 2;
+  string reason = 3;
+}
+
+message ApplyChangeRequest {
+  string name       = 1;
+  string etag       = 2;
+  // Stable idempotency/correlation key. Retries must reuse the same value.
+  string request_id = 3;
+}

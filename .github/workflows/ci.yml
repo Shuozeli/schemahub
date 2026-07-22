@@ -1,0 +1,314 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  SCHEMAHUB_DIR: shuozeli/codegen/schemahub
+
+jobs:
+  rust-quality:
+    name: Rust format and Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: shuozeli/codegen/schemahub
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: shuozeli/codegen/schemahub
+      - name: Test immutable compiler and release-metadata validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          protobuf_revision="$(
+            scripts/validate-compiler-lock.sh protobuf --development
+          )"
+          flatbuffers_revision="$(
+            scripts/validate-compiler-lock.sh flatbuffers --development
+          )"
+          scripts/validate-release-metadata.sh \
+            0.0.0-ci \
+            "$protobuf_revision" \
+            "$flatbuffers_revision"
+          scripts/validate-compiler-lock.sh \
+            protobuf "$protobuf_revision"
+          scripts/validate-compiler-lock.sh \
+            flatbuffers "$flatbuffers_revision"
+          if scripts/validate-release-metadata.sh \
+            0.0.0-ci main "$flatbuffers_revision"; then
+            echo "mutable compiler ref unexpectedly passed release validation" >&2
+            exit 1
+          fi
+      - name: Test every versioned release-note contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/schemahub-release-notes"
+          mkdir -p "$output_dir"
+          protobuf_revision="$(
+            scripts/validate-compiler-lock.sh protobuf --development
+          )"
+          flatbuffers_revision="$(
+            scripts/validate-compiler-lock.sh flatbuffers --development
+          )"
+          for notes in docs/releases/*.md; do
+            version="$(basename "$notes" .md)"
+            scripts/render-release-notes.sh \
+              "$version" \
+              "$GITHUB_SHA" \
+              "$protobuf_revision" \
+              "$flatbuffers_revision" \
+              ghcr.io/shuozeli/schemahub \
+              sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+              "$output_dir/$version.md" >/dev/null
+          done
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: shuozeli/codegen/schemahub -> target
+          shared-key: quality
+      - name: Validate the immutable compiler dependency layout
+        run: cargo metadata --locked --format-version=1 >/dev/null
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run strict release Clippy for every feature and target
+        run: cargo clippy --release --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust-tests:
+    name: Rust release suite (redb)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: shuozeli/codegen/schemahub
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: shuozeli/codegen/schemahub
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: shuozeli/codegen/schemahub -> target
+          shared-key: release-tests
+      - name: Run the full release workspace suite
+        run: cargo test --release --workspace --locked
+      - name: Validate generated HTTP OpenAPI output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --locked -p schemahub-server -- --print-openapi \
+            | jq -e '
+                .openapi == "3.1.0"
+                and .info["x-schemahub-public-api"] == "schemahub.v1"
+                and .info["x-schemahub-gui-bff-prefix"] == "/api/"
+                and (.paths | length == 22)
+                and ([
+                  .paths[]
+                  | to_entries[]
+                  | select(
+                      .key == "get" or .key == "put" or .key == "post"
+                      or .key == "delete" or .key == "options"
+                      or .key == "head" or .key == "patch" or .key == "trace"
+                    )
+                ] | length == 23)
+                and ([
+                  .paths
+                  | to_entries[]
+                  | select(.key | startswith("/api/"))
+                ] | all(
+                  .value["x-schemahub-api-surface"] == "gui-bff"
+                  and .value["x-schemahub-compatibility-promise"] == "excluded"
+                ))
+                and ([
+                  .paths
+                  | to_entries[]
+                  | select(.key | startswith("/api/") | not)
+                ] | all(
+                  .value["x-schemahub-api-surface"] == "operations"
+                  and .value["x-schemahub-compatibility-promise"] == "supported"
+                ))
+                and ([
+                  .paths
+                  | keys[]
+                  | select(startswith("/api/") | not)
+                ] | sort == ["/healthz", "/metrics", "/readyz"])
+                and ([
+                  .paths[]
+                  | to_entries[]
+                  | select(
+                      .key == "get" or .key == "put" or .key == "post"
+                      or .key == "delete" or .key == "options"
+                      or .key == "head" or .key == "patch" or .key == "trace"
+                    )
+                  | .value.operationId
+                ] as $ids
+                  | ($ids | length) == 23
+                    and ($ids | unique | length) == 23)
+              ' >/dev/null
+
+  postgres-tests:
+    name: PostgreSQL 17 integration suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: schemahub_test
+          POSTGRES_PASSWORD: schemahub
+          POSTGRES_USER: schemahub
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U schemahub -d schemahub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: shuozeli/codegen/schemahub
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: shuozeli/codegen/schemahub
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: shuozeli/codegen/schemahub -> target
+          shared-key: postgres-tests
+      - name: Run PostgreSQL migration, load, fencing, and recovery tests
+        env:
+          SCHEMAHUB_TEST_POSTGRES_URL: postgres://schemahub:schemahub@127.0.0.1:5432/schemahub_test
+        run: >-
+          cargo test --release --locked
+          -p schemahub-jj
+          --features postgres-integration
+          pg_db::tests::
+          -- --test-threads=4
+
+  gui:
+    name: GUI typecheck and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/schemahub-gui
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.2.2
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/schemahub-gui/pnpm-lock.yaml
+      - name: Install locked GUI dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the production GUI
+        run: pnpm run build
+
+  container:
+    name: Runtime container smoke and graceful stop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: shuozeli/codegen/schemahub
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: shuozeli/codegen/schemahub
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build the production runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: shuozeli/codegen/schemahub/Dockerfile
+          load: true
+          push: false
+          tags: schemahub:ci
+          build-args: |
+            SCHEMAHUB_VERSION=0.0.0-ci.${{ github.run_id }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify probes, capabilities, and graceful shutdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="schemahub-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          network="schemahub-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f -v "$container" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker network create "$network" >/dev/null
+          docker run --detach --name "$container" --network "$network" schemahub:ci >/dev/null
+
+          for _ in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
+            if [[ "$status" == healthy ]]; then
+              break
+            fi
+            if [[ "$status" == unhealthy ]]; then
+              docker logs "$container" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
+          docker run --rm --network "$network" curlimages/curl:8.14.1 \
+            --fail --silent "http://$container:8080/readyz" >/dev/null
+          docker run --rm --network "$network" curlimages/curl:8.14.1 \
+            --fail --silent "http://$container:8080/metrics" \
+            | grep -q 'schemahub_build_info'
+          docker exec "$container" schemahub \
+            --server http://127.0.0.1:50051 capabilities --json \
+            | grep -q '"matrix_version"'
+
+          docker stop --timeout 35 "$container" >/dev/null
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0

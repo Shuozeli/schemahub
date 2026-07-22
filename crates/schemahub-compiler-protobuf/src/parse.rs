@@ -71,6 +71,7 @@ pub fn split_file(mut file: FileDescriptorProto) -> ParsedSchema {
         .map(|s| s.name.clone().unwrap_or_default())
         .collect();
 
+    let dependency_commit = vec![String::new(); file.dependency.len()];
     let meta = MetaPayload {
         name: file.name,
         package: file.package,
@@ -86,6 +87,7 @@ pub fn split_file(mut file: FileDescriptorProto) -> ParsedSchema {
         enum_order,
         service_order,
         extension: file.extension,
+        dependency_commit,
     };
 
     ParsedSchema {

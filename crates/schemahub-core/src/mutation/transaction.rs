@@ -13,19 +13,39 @@
 //! commit, one operation. All ops in a transaction must still share a single
 //! `format_id` (a transaction does not mix formats).
 
-use schemahub_jj::RefSpec;
+use schemahub_jj::SchemaWrite;
 use schemahub_types::{Action, Mutation, MutationEffect};
 
 use crate::auth::authorize;
 use crate::error::{CoreError, CoreResult};
-use crate::mutation::{compat, load_base};
-use crate::request::{MutationResponse, TransactionLimits, TransactionRequest};
+use crate::mutation::idempotency::{force_audit_attributes, FingerprintBuilder};
+use crate::mutation::{compat, immutable_bookmark_base, load_base};
+use crate::request::{
+    MutationResponse, TransactionDeadline, TransactionLimits, TransactionRequest,
+};
 use crate::Core;
 
 impl Core {
     /// Transaction flow with default limits.
     pub fn apply_mutations(&self, req: TransactionRequest) -> CoreResult<MutationResponse> {
-        self.apply_mutations_with_limits(req, TransactionLimits::default())
+        self.apply_mutations_with_limits_and_deadline(req, TransactionLimits::default(), None)
+    }
+
+    /// Transaction flow bounded by a server-owned monotonic deadline.
+    ///
+    /// The deadline is checked throughout planning and again while JJ holds the
+    /// repository publication guard. Cancellation therefore prevents work that
+    /// outlives its RPC from starting a late publication.
+    pub fn apply_mutations_with_deadline(
+        &self,
+        req: TransactionRequest,
+        deadline: TransactionDeadline,
+    ) -> CoreResult<MutationResponse> {
+        self.apply_mutations_with_limits_and_deadline(
+            req,
+            TransactionLimits::default(),
+            Some(&deadline),
+        )
     }
 
     /// Transaction flow with explicit limits (design.md §5.2).
@@ -34,13 +54,15 @@ impl Core {
         req: TransactionRequest,
         limits: TransactionLimits,
     ) -> CoreResult<MutationResponse> {
-        // 1. Idempotency dedupe at the edge.
-        if let Some(key) = &req.idempotency_key {
-            if let Some(stored) = self.idempotency.get(key) {
-                return Ok(stored);
-            }
-        }
+        self.apply_mutations_with_limits_and_deadline(req, limits, None)
+    }
 
+    fn apply_mutations_with_limits_and_deadline(
+        &self,
+        req: TransactionRequest,
+        limits: TransactionLimits,
+        deadline: Option<&TransactionDeadline>,
+    ) -> CoreResult<MutationResponse> {
         // Validate limits *before* doing any work (design.md §5.2).
         if req.mutations.is_empty() {
             return Err(CoreError::EmptyTransaction);
@@ -56,6 +78,7 @@ impl Core {
         // Validate the shared target: one (project, repo) + one format_id, and
         // group ops by schema file (preserving order within each file).
         let plan = TransactionPlan::build(&req.mutations, limits)?;
+        ensure_before_deadline(deadline)?;
 
         // 2/3. Auth (one repo for the whole transaction).
         let action = if req.force {
@@ -71,6 +94,38 @@ impl Core {
             &plan.project,
             &plan.repo,
         )?;
+        ensure_before_deadline(deadline)?;
+        let mut fingerprint = FingerprintBuilder::new("apply-transaction");
+        for field in [
+            plan.project.as_bytes(),
+            plan.repo.as_bytes(),
+            req.bookmark.as_bytes(),
+            req.author.as_bytes(),
+            req.message.as_bytes(),
+            req.base_revision.as_deref().unwrap_or_default().as_bytes(),
+        ] {
+            fingerprint.update(field);
+        }
+        fingerprint.update(&[u8::from(req.force)]);
+        for mutation in &req.mutations {
+            fingerprint.update(mutation.schema_path.schema_name.as_bytes());
+            fingerprint.update(mutation.format_id.as_bytes());
+            fingerprint.update(mutation.operation.as_ref());
+        }
+        let fingerprint = fingerprint.finish();
+        let scope = format!("apply-transaction/{}/{}", plan.project, plan.repo);
+        if let Some(response) = self.replay_idempotent_write(
+            &scope,
+            req.idempotency_key.as_deref(),
+            &fingerprint,
+            &plan.project,
+            &plan.repo,
+            &req.bookmark,
+        )? {
+            return Ok(response);
+        }
+        self.validate_base_revision(&plan.project, &plan.repo, req.base_revision.as_deref())?;
+        ensure_before_deadline(deadline)?;
 
         let compiler = self
             .registry
@@ -81,43 +136,58 @@ impl Core {
         // 4/5/6. For each touched file: load its base, apply that file's ops (only
         // the final state is validated), and compat-check the change on protected
         // bookmarks. Collect one effect per file for the atomic commit.
-        let base_ref = RefSpec::bookmark(req.bookmark.clone());
-        let config = self.repo_configs.get(&plan.project, &plan.repo);
+        let base_ref = immutable_bookmark_base(&self.jj, &plan.project, &plan.repo, &req.bookmark)?;
+        self.ensure_direct_write_allowed(&plan.project, &plan.repo)?;
+        let config = self.effective_repo_config(&plan.project, &plan.repo)?;
         let protected = !req.force
             && schemahub_jj::bookmark::is_protected(&req.bookmark, &config.protected_bookmarks);
+        ensure_before_deadline(deadline)?;
 
         let mut effects: Vec<(String, MutationEffect)> = Vec::with_capacity(plan.by_file.len());
         for (schema_name, ops) in &plan.by_file {
+            ensure_before_deadline(deadline)?;
             let base = load_base(&self.jj, &plan.project, &plan.repo, schema_name, &base_ref)?;
             let effect = compiler.apply_mutations(&base, ops)?;
+            ensure_before_deadline(deadline)?;
             if protected {
                 compat::gate(compiler.as_ref(), &config.compat_rules(), &base, &effect)?;
             }
             effects.push((schema_name.clone(), effect));
         }
 
-        // 7. One commit / one operation across ALL touched files.
-        let write = self.jj.commit_write_multi(
+        let writes = effects
+            .into_iter()
+            .map(|(schema_path, effect)| SchemaWrite::Patch {
+                schema_path,
+                effect,
+            })
+            .collect();
+        ensure_before_deadline(deadline)?;
+
+        // One commit / one operation across all touched files, correlated with
+        // the durable receipt for safe restart replay.
+        self.commit_idempotent_schema_changes_with_attributes_and_deadline(
+            &scope,
+            req.idempotency_key.as_deref(),
+            &fingerprint,
             &plan.project,
             &plan.repo,
             &req.bookmark,
             &base_ref,
-            effects,
+            writes,
             &req.author,
             &req.message,
-        )?;
+            force_audit_attributes(req.force),
+            deadline,
+        )
+    }
+}
 
-        let response = MutationResponse {
-            commit_id: write.commit_id,
-            change_id: write.change_id,
-            conflicted_decls: write.conflicted_decls,
-        };
-
-        if let Some(key) = &req.idempotency_key {
-            self.idempotency.put(key, response.clone());
-        }
-
-        Ok(response)
+fn ensure_before_deadline(deadline: Option<&TransactionDeadline>) -> CoreResult<()> {
+    if deadline.is_some_and(TransactionDeadline::is_exceeded) {
+        Err(CoreError::TransactionDeadlineExceeded)
+    } else {
+        Ok(())
     }
 }
 

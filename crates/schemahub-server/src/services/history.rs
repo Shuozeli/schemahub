@@ -4,17 +4,15 @@
 use std::sync::Arc;
 
 use schemahub_core::{detect_format_from_name, Core};
-use schemahub_types::{DeclBlob, SchemaPath};
+use schemahub_jj::RefSpec;
+use schemahub_types::{Action, DeclBlob, SchemaPath};
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::history_service_server::HistoryService;
 
 use crate::error::to_status;
-use crate::services::{resolve_author, token_from};
-use crate::wire;
-
-const DEFAULT_BOOKMARK: &str = "main";
+use crate::services::{refspec_or_repository_default, resolve_author, token_from};
 
 pub struct HistoryHandler {
     core: Arc<Core>,
@@ -34,24 +32,25 @@ impl HistoryService for HistoryHandler {
     ) -> Result<Response<pb::LogResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        // Honor the optional `at` ref (branch / tag / commit). When omitted,
-        // pass `None` so Core resolves the repo's configured default bookmark
-        // (which may not be "main"). `limit = 0` means "use Core's default"
-        // (currently 100).
-        let at_refspec =
-            r.at.as_ref()
-                .map(|_| wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK));
+        let at_refspec = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let limit = if r.limit == 0 {
             None
         } else {
             Some(r.limit as usize)
         };
-        let entries = self
+        let (entries, at_commit) = self
             .core
-            .log(
+            .log_resolved(
                 &r.project,
                 &r.repo,
-                at_refspec.as_ref(),
+                Some(&at_refspec),
                 limit,
                 token.as_deref(),
             )
@@ -67,7 +66,7 @@ impl HistoryService for HistoryHandler {
                 timestamp: e.timestamp,
             })
             .collect();
-        Ok(Response::new(pb::LogResponse { entries }))
+        Ok(Response::new(pb::LogResponse { entries, at_commit }))
     }
 
     async fn op_log(
@@ -124,7 +123,19 @@ impl HistoryService for HistoryHandler {
     ) -> Result<Response<pb::RenderConflictResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let bookmark = wire::version_ref_bookmark(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let RefSpec::Bookmark(bookmark) = at else {
+            return Err(Status::invalid_argument(
+                "render_conflict requires a branch VersionRef",
+            ));
+        };
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
         let rendered = self
             .core

@@ -4,9 +4,8 @@
 use bytes::Bytes;
 
 use schemahub_jj::RefSpec;
-use schemahub_types::{Action, CodegenOptions, Language, SchemaPath};
+use schemahub_types::{CodegenOptions, Language, SchemaPath};
 
-use crate::auth::authorize;
 use crate::error::CoreResult;
 use crate::mutation::closure;
 use crate::request::CodegenRequest;
@@ -32,37 +31,33 @@ impl Core {
         at: &RefSpec,
         token: Option<&str>,
     ) -> CoreResult<Bytes> {
-        authorize(
-            self.authn.as_ref(),
-            self.authz.as_ref(),
-            token,
-            Action::Read,
-            &schema.project,
-            &schema.repo,
-        )?;
+        let (bytes, _) = self.generate_descriptors_resolved(schema, at, token)?;
+        Ok(bytes)
+    }
+
+    /// Generate descriptors from one immutable, repository-owned snapshot and
+    /// return the exact commit used for the payload.
+    pub fn generate_descriptors_resolved(
+        &self,
+        schema: &SchemaPath,
+        at: &RefSpec,
+        token: Option<&str>,
+    ) -> CoreResult<(Bytes, String)> {
+        let commit_id = self.resolve_read_commit(&schema.project, &schema.repo, at, token)?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let closure = closure::build(&self.jj, compiler.as_ref(), schema, at)?;
-        Ok(compiler.generate_descriptors(&closure)?)
+        let closure = closure::build(self, schema, &commit_id, token)?;
+        Ok((compiler.generate_descriptors(&closure)?, commit_id))
     }
 
     /// Render generated code for a schema closure in `lang` (PreviewCodegen).
     pub fn generate_code(&self, req: CodegenRequest, token: Option<&str>) -> CoreResult<String> {
-        authorize(
-            self.authn.as_ref(),
-            self.authz.as_ref(),
-            token,
-            Action::Read,
-            &req.schema.project,
-            &req.schema.repo,
-        )?;
-        let compiler = self.compiler_for(&req.schema.schema_name)?;
-        let closure = closure::build(
-            &self.jj,
-            compiler.as_ref(),
+        self.preview_codegen_at(
             &req.schema,
             &RefSpec::bookmark(&req.bookmark),
-        )?;
-        Ok(compiler.generate_code(&closure, req.lang, &req.options)?)
+            req.lang,
+            &req.options,
+            token,
+        )
     }
 
     /// Convenience: generate code without a request wrapper (used by the CLI
@@ -92,16 +87,23 @@ impl Core {
         options: &CodegenOptions,
         token: Option<&str>,
     ) -> CoreResult<String> {
-        authorize(
-            self.authn.as_ref(),
-            self.authz.as_ref(),
-            token,
-            Action::Read,
-            &schema.project,
-            &schema.repo,
-        )?;
+        let (content, _) = self.preview_codegen_resolved(schema, at, lang, options, token)?;
+        Ok(content)
+    }
+
+    /// Render code from one immutable, repository-owned snapshot and return
+    /// the exact commit used for the payload.
+    pub fn preview_codegen_resolved(
+        &self,
+        schema: &SchemaPath,
+        at: &RefSpec,
+        lang: Language,
+        options: &CodegenOptions,
+        token: Option<&str>,
+    ) -> CoreResult<(String, String)> {
+        let commit_id = self.resolve_read_commit(&schema.project, &schema.repo, at, token)?;
         let compiler = self.compiler_for(&schema.schema_name)?;
-        let closure = closure::build(&self.jj, compiler.as_ref(), schema, at)?;
-        Ok(compiler.generate_code(&closure, lang, options)?)
+        let closure = closure::build(self, schema, &commit_id, token)?;
+        Ok((compiler.generate_code(&closure, lang, options)?, commit_id))
     }
 }

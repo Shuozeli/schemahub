@@ -20,8 +20,8 @@ pub mod parsed;
 pub mod schema_path;
 
 pub use auth::{
-    Action, AuthnProvider, AuthzPolicy, Identity, NoopAuthn, NoopAuthz, ResourcePath, Role,
-    Visibility,
+    Action, AuthnProvider, AuthzPolicy, Identity, IdentityKind, NoopAuthn, NoopAuthz, ResourcePath,
+    Role, Visibility,
 };
 pub use blob::{DeclBlob, MetaBlob};
 pub use change::DeclChange;

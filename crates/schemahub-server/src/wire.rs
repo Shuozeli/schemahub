@@ -15,32 +15,23 @@ use schemahub_compiler_flatbuffers::FbsOp;
 use schemahub_compiler_openapi::operations::OpenApiOp;
 use schemahub_compiler_protobuf::{
     OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality, OpChangeFieldType,
-    OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage, OpRemoveEnumValue, OpRemoveField,
-    OpRemoveRpc, OpRemoveService, OpRenameEnumValue, OpRenameField, OpRenameMessage, OpRenameRpc,
-    OpUpdateImport, ProtoOp,
+    OpChangeRpcType, OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage,
+    OpRemoveEnumValue, OpRemoveField, OpRemoveRpc, OpRemoveService, OpRenameEnumValue,
+    OpRenameField, OpRenameMessage, OpRenameRpc, OpRenameService, OpUpdateImport, ProtoOp,
 };
 use schemahub_jj::RefSpec;
 use schemahub_types::{DeclKind, DeclSummary, Language, Mutation, SchemaPath};
 
-/// Resolve a [`pb::VersionRef`] to a [`RefSpec`], defaulting to the `default`
-/// bookmark when unset. Tags/commits are honored; a bare branch maps to a
-/// bookmark (branch == bookmark in the jj model).
-pub fn version_ref_to_refspec(at: &Option<pb::VersionRef>, default: &str) -> RefSpec {
+/// Convert only an explicitly supplied version ref. An absent/empty message is
+/// left as `None` so callers can use the repository's configured default.
+pub fn version_ref_to_optional_refspec(at: &Option<pb::VersionRef>) -> Option<RefSpec> {
     match at.as_ref().and_then(|v| v.r#ref.as_ref()) {
         Some(pb::version_ref::Ref::Branch(b)) => RefSpec::bookmark(b.clone()),
         Some(pb::version_ref::Ref::Tag(t)) => RefSpec::Tag(t.clone()),
         Some(pb::version_ref::Ref::Commit(c)) => RefSpec::commit(c.clone()),
-        None => RefSpec::bookmark(default.to_string()),
+        None => return None,
     }
-}
-
-/// Extract the bookmark name a [`pb::VersionRef`] refers to (for write paths
-/// that operate on a bookmark). Falls back to `default`.
-pub fn version_ref_bookmark(at: &Option<pb::VersionRef>, default: &str) -> String {
-    match at.as_ref().and_then(|v| v.r#ref.as_ref()) {
-        Some(pb::version_ref::Ref::Branch(b)) => b.clone(),
-        _ => default.to_string(),
-    }
+    .into()
 }
 
 /// Map a proto [`pb::SchemaFormat`] to a compiler format id.
@@ -198,10 +189,26 @@ pub fn protobuf_mutation_to_core(
             old_rpc_name: r.old_rpc_name.clone(),
             new_rpc_name: r.new_rpc_name.clone(),
         }),
+        Op::RenameService(service) => ProtoOp::RenameService(OpRenameService {
+            old_name: service.old_name.clone(),
+            new_name: service.new_name.clone(),
+        }),
+        Op::ChangeRpcType(rpc) => ProtoOp::ChangeRpcType(OpChangeRpcType {
+            service_name: rpc.service_name.clone(),
+            rpc_name: rpc.rpc_name.clone(),
+            new_request_type: rpc.new_request_type.clone(),
+            new_response_type: rpc.new_response_type.clone(),
+        }),
         Op::UpdateImport(i) => ProtoOp::UpdateImport(OpUpdateImport {
             import_path: i.import_path.clone(),
-            resolved_commit: i.to_commit.clone(),
-            remove: false,
+            resolved_commit: validated_import_commit(
+                "protobuf",
+                &i.import_path,
+                &i.to_commit,
+                &i.to_tag,
+                i.remove,
+            )?,
+            remove: i.remove,
         }),
     };
 
@@ -243,6 +250,11 @@ pub fn fbs_mutation_to_core(
             old_name: f.old_field_name.clone(),
             new_name: f.new_field_name.clone(),
         },
+        Op::ChangeFieldType(field) => FbsOp::ChangeFieldType {
+            table: field.table_name.clone(),
+            field_name: field.field_name.clone(),
+            new_type: field.new_type.clone(),
+        },
         Op::AddTable(t) => FbsOp::CreateTable {
             name: t.table_name.clone(),
             doc_comment: opt(&t.doc_comment),
@@ -264,18 +276,52 @@ pub fn fbs_mutation_to_core(
             value_name: e.value_name.clone(),
             value: e.value,
         },
-        Op::AddUnion(u) => FbsOp::CreateUnion {
+        Op::RemoveEnum(e) => FbsOp::DeleteEnum {
+            name: e.enum_name.clone(),
+        },
+        Op::RenameEnum(e) => FbsOp::RenameEnum {
+            old_name: e.old_name.clone(),
+            new_name: e.new_name.clone(),
+        },
+        Op::RemoveEnumValue(e) => FbsOp::RemoveEnumValue {
+            enum_name: e.enum_name.clone(),
+            value_name: e.value_name.clone(),
+        },
+        Op::RenameEnumValue(e) => FbsOp::RenameEnumValue {
+            enum_name: e.enum_name.clone(),
+            old_name: e.old_value_name.clone(),
+            new_name: e.new_value_name.clone(),
+        },
+        Op::AddUnion(u) => FbsOp::CreateUnionWithMembers {
             name: u.union_name.clone(),
+            member_types: u.member_types.clone(),
             doc_comment: opt(&u.doc_comment),
         },
-        Op::AddUnionMember(_) | Op::RemoveUnionMember(_) => {
-            return Err(Status::unimplemented(
-                "flatbuffers union member add/remove is not modeled by the compiler op set",
-            ));
-        }
+        Op::AddUnionMember(member) => FbsOp::AddUnionMember {
+            union_name: member.union_name.clone(),
+            member_type: member.member_type.clone(),
+        },
+        Op::RemoveUnionMember(member) => FbsOp::RemoveUnionMember {
+            union_name: member.union_name.clone(),
+            member_type: member.member_type.clone(),
+        },
+        Op::RemoveUnion(union) => FbsOp::DeleteUnion {
+            name: union.union_name.clone(),
+        },
+        Op::RenameUnion(union) => FbsOp::RenameUnion {
+            old_name: union.old_name.clone(),
+            new_name: union.new_name.clone(),
+        },
         Op::UpdateImport(i) => FbsOp::UpdateImport {
             import_path: i.import_path.clone(),
-            remove: false,
+            resolved_commit: validated_import_commit(
+                "flatbuffers",
+                &i.import_path,
+                &i.to_commit,
+                &i.to_tag,
+                i.remove,
+            )?,
+            remove: i.remove,
         },
     };
 
@@ -364,7 +410,38 @@ pub fn transaction_op_to_core(
     match op {
         pb::transaction_op::Operation::ProtobufOp(m) => protobuf_mutation_to_core(project, repo, m),
         pb::transaction_op::Operation::FbsOp(m) => fbs_mutation_to_core(project, repo, m),
+        pb::transaction_op::Operation::OpenapiOp(m) => openapi_mutation_to_core(project, repo, m),
     }
+}
+
+fn validated_import_commit(
+    format_id: &str,
+    import_path: &str,
+    to_commit: &str,
+    to_tag: &str,
+    remove: bool,
+) -> Result<String, Status> {
+    if import_path.trim().is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{format_id} import_path must not be empty"
+        )));
+    }
+    if !to_commit.is_empty() && !to_tag.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{format_id} import update accepts at most one of to_commit and to_tag"
+        )));
+    }
+    if remove && (!to_commit.is_empty() || !to_tag.is_empty()) {
+        return Err(Status::invalid_argument(format!(
+            "{format_id} import removal must not include a commit or tag pin"
+        )));
+    }
+    if !to_tag.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{format_id} import tag was not resolved by the schema service"
+        )));
+    }
+    Ok(to_commit.to_string())
 }
 
 /// Detect the schema-file path inside a mutation oneof (so the request envelope

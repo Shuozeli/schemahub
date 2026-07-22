@@ -78,9 +78,10 @@ pub fn imports(meta: &MetaBlob) -> Result<Vec<Import>, ReadError> {
     Ok(meta
         .includes
         .into_iter()
-        .map(|path| Import {
+        .enumerate()
+        .map(|(index, path)| Import {
             path,
-            resolved_commit: String::new(),
+            resolved_commit: meta.include_commits.get(index).cloned().unwrap_or_default(),
             decl_name: String::new(),
         })
         .collect())
@@ -106,6 +107,25 @@ pub fn type_refs(blob: &DeclBlob) -> Result<Vec<TypeRef>, ReadError> {
         DeclPayload::Service(s) => collect_service_refs(s, &mut push),
     }
     Ok(refs)
+}
+
+/// Resolve the user-defined type of one direct table/struct field. Builtin
+/// scalar/string fields return `None`.
+pub fn field_type_ref(blob: &DeclBlob, field_name: &str) -> Result<Option<TypeRef>, ReadError> {
+    let payload = decode_decl(blob).map_err(read_decode_err)?;
+    let DeclPayload::Object(object) = payload else {
+        return Err(ReadError::FieldNotFound(field_name.to_string()));
+    };
+    let field = object
+        .fields
+        .iter()
+        .find(|field| field.name.as_deref() == Some(field_name))
+        .ok_or_else(|| ReadError::FieldNotFound(field_name.to_string()))?;
+    Ok(field
+        .type_
+        .as_ref()
+        .and_then(type_ref_name)
+        .map(TypeRef::new))
 }
 
 /// The user-defined type name a `Type` references, if any.

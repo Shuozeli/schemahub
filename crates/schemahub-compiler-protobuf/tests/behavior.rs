@@ -1,6 +1,6 @@
 //! Behavior tests for diff, compatibility, mutations, conflicts, and codegen.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
 use schemahub_types::{
@@ -12,7 +12,7 @@ use schemahub_compiler_protobuf::{
     OpAddEnumValue, OpAddField, OpAddRpc, OpAddService, OpChangeCardinality, OpChangeFieldType,
     OpChangeRpcType, OpCreateEnum, OpCreateMessage, OpDeleteEnum, OpDeleteMessage,
     OpRemoveEnumValue, OpRemoveField, OpRemoveRpc, OpRenameEnumValue, OpRenameField,
-    OpRenameMessage, OpRenameRpc, OpReorderFields, ProtoOp, ProtobufCompiler,
+    OpRenameMessage, OpRenameRpc, OpReorderFields, OpUpdateImport, ProtoOp, ProtobufCompiler,
 };
 
 fn parse_to_objects(source: &str) -> SchemaObjects {
@@ -526,6 +526,26 @@ fn type_refs_lists_referenced_messages() {
 }
 
 #[test]
+fn field_type_ref_selects_the_requested_message_field() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax=\"proto3\"; message Address {} message Order { string id = 1; Address shipping = 2; }",
+    );
+    let order = decl(&objects, "Order");
+
+    // Act
+    let reference = compiler
+        .field_type_ref(&order, "shipping")
+        .expect("read field type")
+        .expect("shipping has a named type");
+
+    // Assert
+    assert_eq!(reference.name, "Address");
+    assert!(reference.import.is_none());
+}
+
+#[test]
 fn imports_lists_dependencies() {
     // Arrange
     let compiler = ProtobufCompiler::new();
@@ -533,13 +553,77 @@ fn imports_lists_dependencies() {
         parse_to_objects("syntax=\"proto3\";\nimport \"dep.proto\";\nmessage M { int32 a = 1; }\n");
 
     // Act
-    let imports = compiler.imports(&objects.meta).expect("imports ok");
+    let imports = compiler.imports(&objects).expect("imports ok");
 
     // Assert
     assert!(
         imports.iter().any(|i| i.path == "dep.proto"),
         "got: {imports:?}"
     );
+}
+
+#[test]
+fn update_import_retains_immutable_commit_pin() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects("syntax=\"proto3\";\nmessage M {}\n");
+    let op = mutation(
+        "m.proto",
+        ProtoOp::UpdateImport(OpUpdateImport {
+            import_path: "shared/models/common.proto".into(),
+            resolved_commit: "abc123".into(),
+            remove: false,
+        }),
+    );
+
+    // Act
+    let effect = compiler
+        .apply_mutation(&objects, &op)
+        .expect("update import");
+
+    // Assert
+    let mut updated = objects.clone();
+    updated.meta = effect.meta.expect("updated meta");
+    let imports = compiler.imports(&updated).expect("read imports");
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].path, "shared/models/common.proto");
+    assert_eq!(imports[0].resolved_commit, "abc123");
+}
+
+#[test]
+fn import_add_then_remove_has_no_dependency() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects("syntax=\"proto3\";\nmessage M {}\n");
+    let ops = [
+        mutation(
+            "m.proto",
+            ProtoOp::UpdateImport(OpUpdateImport {
+                import_path: "shared/models/common.proto".into(),
+                resolved_commit: "abc123".into(),
+                remove: false,
+            }),
+        ),
+        mutation(
+            "m.proto",
+            ProtoOp::UpdateImport(OpUpdateImport {
+                import_path: "shared/models/common.proto".into(),
+                resolved_commit: String::new(),
+                remove: true,
+            }),
+        ),
+    ];
+
+    // Act
+    let effect = compiler
+        .apply_mutations(&objects, &ops)
+        .expect("apply import transaction");
+
+    // Assert
+    let mut updated = objects.clone();
+    updated.meta = effect.meta.expect("updated meta");
+    let imports = compiler.imports(&updated).expect("read imports");
+    assert!(imports.is_empty());
 }
 
 // ── Codegen ────────────────────────────────────────────────────────────────
@@ -567,6 +651,100 @@ fn generate_code_rust_produces_struct() {
     assert!(
         code.contains("struct M"),
         "expected a struct M; got:\n{code}"
+    );
+}
+
+#[test]
+fn generate_code_resolves_imported_and_nested_types_across_closure() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let common = parse_to_objects(
+        r#"syntax = "proto3";
+package commerce.v1;
+message Money { int64 units = 1; }
+enum Region { REGION_UNSPECIFIED = 0; REGION_EMEA = 1; }
+"#,
+    );
+    let order = parse_to_objects(
+        r#"syntax = "proto3";
+package commerce.v1;
+import "p/r/common.proto";
+message Order {
+  message LineItem { Money price = 1; }
+  enum State { STATE_UNSPECIFIED = 0; STATE_READY = 1; }
+  Money total = 1;
+  LineItem item = 2;
+  Region region = 3;
+  State state = 4;
+}
+service Orders { rpc Get(Order) returns (Order); }
+"#,
+    );
+    let mut closure = SchemaClosure::new();
+    closure
+        .entries
+        .insert(SchemaPath::new("p", "r", "common.proto"), common);
+    closure
+        .entries
+        .insert(SchemaPath::new("p", "r", "order.proto"), order);
+
+    // Act
+    let code = compiler
+        .generate_code(
+            &closure,
+            Language::Rust,
+            &schemahub_types::CodegenOptions::default(),
+        )
+        .expect("closure codegen ok");
+
+    // Assert
+    assert!(
+        code.contains("pub total: ::core::option::Option<Money>"),
+        "imported message should retain its Rust type:\n{code}"
+    );
+    assert!(
+        code.contains("pub item: ::core::option::Option<order::LineItem>"),
+        "nested message should use its generated module path:\n{code}"
+    );
+    assert!(
+        code.contains("enumeration = \"Region\""),
+        "imported enum should retain its prost type annotation:\n{code}"
+    );
+    assert!(
+        code.contains("enumeration = \"order::State\""),
+        "nested enum should use its generated module path:\n{code}"
+    );
+    assert!(
+        code.contains("pub price: ::core::option::Option<super::Money>"),
+        "nested message should resolve an imported package sibling:\n{code}"
+    );
+}
+
+#[test]
+fn generate_code_rejects_unresolved_named_type() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects =
+        parse_to_objects("syntax=\"proto3\"; package test; message M { Missing value = 1; }");
+    let mut closure = SchemaClosure::new();
+    closure
+        .entries
+        .insert(SchemaPath::new("p", "r", "m.proto"), objects);
+
+    // Act
+    let result = compiler.generate_code(
+        &closure,
+        Language::Rust,
+        &schemahub_types::CodegenOptions::default(),
+    );
+
+    // Assert
+    let error = result.expect_err("unresolved type must fail codegen");
+    assert!(
+        error
+            .to_string()
+            .contains("unresolved protobuf type `Missing`"),
+        "unexpected error: {error}"
     );
 }
 
@@ -887,6 +1065,84 @@ fn delete_message_removes_decl() {
     assert!(!printed.contains("message N {"), "N gone; got:\n{printed}");
 }
 
+#[test]
+fn delete_message_rejects_same_file_field_and_rpc_references() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax=\"proto3\";\nmessage M {}\nmessage N { M value = 1; }\nservice S { rpc Get(M) returns (N); }\n",
+    );
+    let op = mutation(
+        "m.proto",
+        ProtoOp::DeleteMessage(OpDeleteMessage {
+            message_name: "M".into(),
+        }),
+    );
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &op);
+
+    // Assert
+    let error = result.expect_err("referenced message deletion must fail");
+    assert!(error.to_string().contains("referenced by N, S"), "{error}");
+}
+
+#[test]
+fn transaction_checks_message_references_on_final_state() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects =
+        parse_to_objects("syntax=\"proto3\";\nmessage M {}\nmessage N { M value = 1; }\n");
+    let ops = [
+        mutation(
+            "m.proto",
+            ProtoOp::DeleteMessage(OpDeleteMessage {
+                message_name: "M".into(),
+            }),
+        ),
+        mutation(
+            "m.proto",
+            ProtoOp::DeleteMessage(OpDeleteMessage {
+                message_name: "N".into(),
+            }),
+        ),
+    ];
+
+    // Act
+    let effect = compiler
+        .apply_mutations(&objects, &ops)
+        .expect("final state has no dangling reference");
+
+    // Assert
+    assert_eq!(
+        effect.removes.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from(["M".to_string(), "N".to_string()])
+    );
+}
+
+#[test]
+fn rename_message_rejects_existing_cross_kind_target() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects("syntax=\"proto3\";\nmessage M {}\nenum E { ZERO = 0; }\n");
+    let op = mutation(
+        "m.proto",
+        ProtoOp::RenameMessage(OpRenameMessage {
+            old_name: "M".into(),
+            new_name: "E".into(),
+        }),
+    );
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &op);
+
+    // Assert
+    assert!(result
+        .expect_err("cross-kind target collision must fail")
+        .to_string()
+        .contains("target already exists"));
+}
+
 // ── Service & RPC ops ───────────────────────────────────────────────────────
 
 #[test]
@@ -1096,6 +1352,99 @@ fn rename_enum_value_changes_name_keeps_number() {
 }
 
 #[test]
+fn remove_enum_value_rejects_a_proto2_default_reference() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax = \"proto2\";\n\
+         enum State { UNKNOWN = 0; READY = 1; }\n\
+         message Item { optional State state = 1 [default = READY]; }\n",
+    );
+    let op = mutation(
+        "state.proto",
+        ProtoOp::RemoveEnumValue(OpRemoveEnumValue {
+            enum_name: "State".into(),
+            value_name: "READY".into(),
+        }),
+    );
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &op);
+
+    // Assert
+    let error = result.expect_err("a referenced enum default cannot be removed");
+    assert!(
+        error.to_string().contains("referenced as a default"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rename_enum_value_propagates_a_proto2_default_reference() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax = \"proto2\";\n\
+         enum State { UNKNOWN = 0; READY = 1; }\n\
+         message Item { optional State state = 1 [default = READY]; }\n",
+    );
+    let op = mutation(
+        "state.proto",
+        ProtoOp::RenameEnumValue(OpRenameEnumValue {
+            enum_name: "State".into(),
+            old_value_name: "READY".into(),
+            new_value_name: "ACTIVE".into(),
+        }),
+    );
+
+    // Act
+    let effect = compiler
+        .apply_mutation(&objects, &op)
+        .expect("default follows the enum-value rename");
+
+    // Assert
+    assert!(effect.upserts.iter().any(|(name, _)| name == "Item"));
+    let printed = print_with(&compiler, &objects, &effect);
+    assert!(printed.contains("default = ACTIVE"), "{printed}");
+    assert!(!printed.contains("default = READY"), "{printed}");
+}
+
+#[test]
+fn transaction_can_remove_enum_value_after_removing_its_consumer() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax = \"proto2\";\n\
+         enum State { UNKNOWN = 0; READY = 1; }\n\
+         message Item { optional State state = 1 [default = READY]; }\n",
+    );
+    let ops = [
+        mutation(
+            "state.proto",
+            ProtoOp::RemoveEnumValue(OpRemoveEnumValue {
+                enum_name: "State".into(),
+                value_name: "READY".into(),
+            }),
+        ),
+        mutation(
+            "state.proto",
+            ProtoOp::DeleteMessage(OpDeleteMessage {
+                message_name: "Item".into(),
+            }),
+        ),
+    ];
+
+    // Act
+    let effect = compiler
+        .apply_mutations(&objects, &ops)
+        .expect("final state contains no default reference");
+
+    // Assert
+    assert!(effect.removes.iter().any(|name| name == "Item"));
+    assert!(effect.upserts.iter().any(|(name, _)| name == "State"));
+}
+
+#[test]
 fn create_enum_adds_empty_enum() {
     // Arrange
     let compiler = ProtobufCompiler::new();
@@ -1135,6 +1484,61 @@ fn delete_enum_removes_decl() {
     assert!(effect.removes.iter().any(|n| n == "E"), "E removed");
     let printed = print_with(&compiler, &objects, &effect);
     assert!(!printed.contains("enum E {"), "E gone; got:\n{printed}");
+}
+
+#[test]
+fn delete_enum_rejects_same_file_field_reference() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects =
+        parse_to_objects("syntax=\"proto3\";\nenum E { ZERO = 0; }\nmessage M { E value = 1; }\n");
+    let op = mutation(
+        "m.proto",
+        ProtoOp::DeleteEnum(OpDeleteEnum {
+            enum_name: "E".into(),
+        }),
+    );
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &op);
+
+    // Assert
+    assert!(result
+        .expect_err("referenced enum deletion must fail")
+        .to_string()
+        .contains("referenced by M"));
+}
+
+#[test]
+fn first_proto3_enum_value_must_use_zero() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects("syntax=\"proto3\";\nmessage M {}\n");
+    let ops = [
+        mutation(
+            "m.proto",
+            ProtoOp::CreateEnum(OpCreateEnum {
+                enum_name: "E".into(),
+            }),
+        ),
+        mutation(
+            "m.proto",
+            ProtoOp::AddEnumValue(OpAddEnumValue {
+                enum_name: "E".into(),
+                value_name: "ONE".into(),
+                number: 1,
+            }),
+        ),
+    ];
+
+    // Act
+    let result = compiler.apply_mutations(&objects, &ops);
+
+    // Assert
+    assert!(result
+        .expect_err("non-zero first proto3 enum value must fail")
+        .to_string()
+        .contains("must use number 0"));
 }
 
 // ── oneof ops ───────────────────────────────────────────────────────────────
@@ -1250,6 +1654,58 @@ fn rename_message_propagates_references() {
         !printed.contains(" A a = 1") && !printed.contains("rpc Do(A)"),
         "no dangling reference to old name 'A'; got:\n{printed}"
     );
+}
+
+#[test]
+fn rename_message_propagates_top_level_extension_extendee() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax = \"proto2\";\n\
+         message Host { extensions 100 to max; }\n\
+         extend Host { optional string note = 100; }\n",
+    );
+    let op = mutation(
+        "extensions.proto",
+        ProtoOp::RenameMessage(OpRenameMessage {
+            old_name: "Host".into(),
+            new_name: "RenamedHost".into(),
+        }),
+    );
+
+    // Act
+    let effect = compiler
+        .apply_mutation(&objects, &op)
+        .expect("extension extendee follows the rename");
+
+    // Assert
+    let printed = print_with(&compiler, &objects, &effect);
+    assert!(printed.contains("extend RenamedHost"), "{printed}");
+    assert!(!printed.contains("extend Host"), "{printed}");
+}
+
+#[test]
+fn delete_message_rejects_top_level_extension_extendee_reference() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let objects = parse_to_objects(
+        "syntax = \"proto2\";\n\
+         message Host { extensions 100 to max; }\n\
+         extend Host { optional string note = 100; }\n",
+    );
+    let op = mutation(
+        "extensions.proto",
+        ProtoOp::DeleteMessage(OpDeleteMessage {
+            message_name: "Host".into(),
+        }),
+    );
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &op);
+
+    // Assert
+    let error = result.expect_err("an extension cannot target a deleted message");
+    assert!(error.to_string().contains("file extension"), "{error}");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

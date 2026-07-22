@@ -28,7 +28,9 @@ message DeclSummary {
 message SchemaInfo {
   string       name      = 1;  // e.g. "user.proto"
   SchemaFormat format    = 2;
-  string       head_blob = 3;  // hash of the schema tree at HEAD
+  // Legacy placeholder from the pre-JJ design. Always empty; use the enclosing
+  // response's at_commit as the immutable snapshot identity.
+  string       head_blob = 3 [deprecated = true];
 }
 
 // A branch ref.

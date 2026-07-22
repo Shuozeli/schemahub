@@ -4,11 +4,14 @@ package schemahub.v1;
 option go_package = "github.com/shuozeli/schemahub/gen/go/schemahub/v1";
 
 import "schemahub/v1/enums.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
 
 service ProjectService {
   // ── Projects ─────────────────────────────────────────────────────────────────
   rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
   rpc GetProject(GetProjectRequest)       returns (GetProjectResponse);
+  rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
   rpc ListProjects(ListProjectsRequest)   returns (ListProjectsResponse);
   rpc DeleteProject(DeleteProjectRequest) returns (DeleteProjectResponse);
 
@@ -32,6 +35,11 @@ message ProjectInfo {
   string name       = 1;
   bool   is_public  = 2;  // public projects: read RPCs require no auth
   string owner      = 3;  // identity of the Owner role member
+  string etag       = 4;
+  google.protobuf.Timestamp create_time = 5;
+  google.protobuf.Timestamp update_time = 6;
+  bool archived = 7;
+  google.protobuf.Timestamp archive_time = 8;
 }
 
 message CreateProjectRequest {
@@ -45,25 +53,44 @@ message CreateProjectResponse {
 
 message GetProjectRequest {
   string name = 1;
+  // Archived projects are visible only to project Owners.
+  bool include_archived = 2;
 }
 
 message GetProjectResponse {
   ProjectInfo project = 1;
 }
 
+message UpdateProjectRequest {
+  // The project resource must carry the current etag. Only is_public is mutable.
+  ProjectInfo project = 1;
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+message UpdateProjectResponse {
+  ProjectInfo project = 1;
+}
+
 message ListProjectsRequest {
   // If empty, returns all projects visible to the caller.
   string name_prefix = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  // Archived projects are visible only to their project Owners.
+  bool include_archived = 4;
 }
 
 message ListProjectsResponse {
   repeated ProjectInfo projects = 1;
+  string next_page_token = 2;
 }
 
 message DeleteProjectRequest {
   string name = 1;
   // Requires Owner role. Fails if the project has repos unless force=true.
   bool   force = 2;
+  // Required optimistic-concurrency token.
+  string etag = 3;
 }
 
 message DeleteProjectResponse {}
@@ -76,6 +103,24 @@ message RepoConfig {
   string                 default_branch           = 3;  // e.g. "main"
   CompatibilityDirection compatibility_direction  = 4;
   repeated string        protected_branches       = 5;  // supports glob patterns
+  ReviewPolicy           review_policy            = 6;
+  ServingPolicy          serving_policy           = 7;
+  string                 etag                     = 8;
+  google.protobuf.Timestamp create_time           = 9;
+  google.protobuf.Timestamp update_time           = 10;
+  bool                   archived                 = 11;
+  google.protobuf.Timestamp archive_time          = 12;
+}
+
+message ReviewPolicy {
+  uint32 required_approvals   = 1;
+  bool   require_change_record = 2;
+}
+
+message ServingPolicy {
+  bool source         = 1;
+  bool descriptors    = 2;
+  bool generated_code = 3;
 }
 
 message CreateRepoRequest {
@@ -84,6 +129,8 @@ message CreateRepoRequest {
   string                 default_branch          = 3;  // default: "main"
   CompatibilityDirection compatibility_direction = 4;  // default: FULL
   repeated string        protected_branches      = 5;  // default: ["main"]
+  ReviewPolicy           review_policy           = 6;  // default: no required review
+  ServingPolicy          serving_policy          = 7;  // absent: serve every artifact kind
 }
 
 message CreateRepoResponse {
@@ -93,6 +140,7 @@ message CreateRepoResponse {
 message GetRepoRequest {
   string project = 1;
   string repo    = 2;
+  bool   include_archived = 3;
 }
 
 message GetRepoResponse {
@@ -106,6 +154,10 @@ message UpdateRepoRequest {
   CompatibilityDirection compatibility_direction = 3;
   repeated string        protected_branches      = 4;  // full replacement; empty = no change
   string                 default_branch          = 5;
+  // AIP-style resource + field mask. The legacy inline fields above remain
+  // reserved for source compatibility but new callers should populate this.
+  RepoConfig             repo_config             = 6;
+  google.protobuf.FieldMask update_mask          = 7;
 }
 
 message UpdateRepoResponse {
@@ -115,10 +167,14 @@ message UpdateRepoResponse {
 message ListReposRequest {
   string project     = 1;
   string name_prefix = 2;
+  int32  page_size   = 3;
+  string page_token  = 4;
+  bool   include_archived = 5;
 }
 
 message ListReposResponse {
   repeated RepoConfig repos = 1;
+  string next_page_token    = 2;
 }
 
 message DeleteRepoRequest {
@@ -126,6 +182,7 @@ message DeleteRepoRequest {
   string repo    = 2;
   // Fails if the repo has schemas unless force=true.
   bool   force   = 3;
+  string etag    = 4;
 }
 
 message DeleteRepoResponse {}

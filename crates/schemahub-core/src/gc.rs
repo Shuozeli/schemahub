@@ -6,16 +6,22 @@ use schemahub_types::Action;
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
-use crate::Core;
+use crate::{Core, CoreError};
 
 impl Core {
     /// Garbage-collect unreachable objects across the given `(project, repo)`
     /// roots. Returns the number of objects swept. Requires `ManageRepo`.
     pub fn gc(&self, repos: &[(String, String)], token: Option<&str>) -> CoreResult<usize> {
+        if repos.is_empty() {
+            return Err(CoreError::InvalidArgument(
+                "GC requires at least one authorized repository scope".to_string(),
+            ));
+        }
         // Authorize against the first repo (admin op). With more than one repo,
         // each must be authorized; for the common single-repo call this is exact.
-        for (project, repo) in repos {
-            authorize(
+        let mut actor_id = "anonymous".to_string();
+        for (index, (project, repo)) in repos.iter().enumerate() {
+            let identity = authorize(
                 self.authn.as_ref(),
                 self.authz.as_ref(),
                 token,
@@ -23,8 +29,19 @@ impl Core {
                 project,
                 repo,
             )?;
+            if index == 0 {
+                actor_id = identity.id().unwrap_or("anonymous").to_string();
+            }
         }
-        Ok(self.jj.gc(repos)?)
+        let swept = self.jj.gc(repos)?;
+        tracing::info!(
+            event = "schemahub.gc.completed",
+            actor_id,
+            requested_repo_count = repos.len(),
+            objects_deleted = swept,
+            "garbage collection completed"
+        );
+        Ok(swept)
     }
 
     /// Rebuild the derived dependency/name index for a repo (design.md §8).

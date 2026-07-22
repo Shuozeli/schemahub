@@ -52,6 +52,19 @@ fn integration_fixture(name: &str) -> String {
     fs::read_to_string(path).expect("read integration fixture")
 }
 
+fn flatbuffers_git_coordinate() -> (String, String) {
+    let manifest: toml::Value =
+        toml::from_str(include_str!("../../../Cargo.toml")).expect("parse workspace Cargo.toml");
+    let dependency = &manifest["workspace"]["dependencies"]["flatc-rs-codegen"];
+    let repository = dependency["git"]
+        .as_str()
+        .expect("flatc-rs-codegen Git repository");
+    let revision = dependency["rev"]
+        .as_str()
+        .expect("flatc-rs-codegen immutable revision");
+    (repository.to_owned(), revision.to_owned())
+}
+
 fn preview_request(
     project: &str,
     repo: &str,
@@ -66,6 +79,73 @@ fn preview_request(
         language: language as i32,
         rust_pluggable_buffer: false,
     }
+}
+
+#[tokio::test]
+async fn immutable_serving_rust_artifact_compiles_in_local_cargo_project() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let source = r#"syntax = "proto3";
+package immutable.compile.v1;
+
+message StoredEvent {
+  string id = 1;
+  int64 sequence = 2;
+}
+"#;
+    create_schema(
+        &mut c.schema,
+        "immutable",
+        "compile",
+        "main",
+        "stored_event.proto",
+        pb::SchemaFormat::Protobuf,
+        source,
+        "immutable-serving-compile",
+    )
+    .await;
+    let revision = c
+        .serving
+        .resolve_revision(pb::ResolveRevisionRequest {
+            parent: "projects/immutable/repos/compile".to_string(),
+            at: Some(vref_branch("main")),
+        })
+        .await
+        .expect("resolve immutable revision")
+        .into_inner();
+
+    // Act.
+    let artifact = c
+        .serving
+        .get_schema_artifact(pb::GetSchemaArtifactRequest {
+            revision: revision.name,
+            schema_path: "stored_event.proto".to_string(),
+            kind: pb::SchemaArtifactKind::GeneratedCode as i32,
+            language: pb::Language::Rust as i32,
+            ..Default::default()
+        })
+        .await
+        .expect("fetch immutable generated code")
+        .into_inner();
+
+    // Assert.
+    assert!(artifact.artifact_digest.starts_with("sha256:"));
+    assert!(artifact.closure_digest.starts_with("sha256:"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_compile_crate(
+        tmp.path(),
+        r#"[package]
+name = "schemahub-immutable-serving-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13"
+"#,
+        &artifact.content,
+    );
+    cargo_check(tmp.path());
 }
 
 #[tokio::test]
@@ -203,6 +283,155 @@ prost = "0.13"
 }
 
 #[tokio::test]
+async fn rich_protobuf_three_level_closure_codegen_compiles_in_local_cargo_project() {
+    // Arrange: three files in one package exercise transitive imports together
+    // with maps, nested messages, oneofs, proto3 optional, bytes, and streaming
+    // service declarations.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    for (path, fixture, idempotency_key) in [
+        (
+            "common.proto",
+            "complex_common.proto",
+            "complex-protobuf-common",
+        ),
+        (
+            "customer.proto",
+            "complex_customer.proto",
+            "complex-protobuf-customer",
+        ),
+        (
+            "order.proto",
+            "complex_order.proto",
+            "complex-protobuf-order",
+        ),
+    ] {
+        let source = integration_fixture(fixture);
+        create_schema(
+            &mut c.schema,
+            "complex",
+            "protobuf",
+            "main",
+            path,
+            pb::SchemaFormat::Protobuf,
+            &source,
+            idempotency_key,
+        )
+        .await;
+    }
+
+    // Act.
+    let preview = c
+        .codegen
+        .preview_codegen(preview_request(
+            "complex",
+            "protobuf",
+            "order.proto",
+            pb::Language::Rust,
+        ))
+        .await
+        .expect("preview rich protobuf closure rust codegen")
+        .into_inner();
+
+    // Assert: every layer of the closure contributes generated types, and the
+    // complete artifact compiles as downstream Rust code.
+    let code = String::from_utf8(preview.content.clone()).expect("generated rust is utf-8");
+    for symbol in [
+        "struct Money",
+        "enum Region",
+        "struct Customer",
+        "struct Address",
+        "enum Contact",
+        "struct Order",
+        "struct LineItem",
+        "enum Settlement",
+        "struct WatchOrdersRequest",
+    ] {
+        assert!(
+            code.contains(symbol),
+            "generated protobuf closure lost `{symbol}`:\n{code}"
+        );
+    }
+    assert!(
+        !preview.at_commit.is_empty(),
+        "complex protobuf preview should report a concrete commit"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_compile_crate(
+        tmp.path(),
+        r#"[package]
+name = "schemahub-rich-protobuf-closure-local-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13"
+"#,
+        &preview.content,
+    );
+    cargo_check(tmp.path());
+}
+
+#[tokio::test]
+async fn proto2_defaults_extensions_and_service_codegen_compiles_in_local_cargo_project() {
+    // Arrange.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let source = integration_fixture("legacy_account.proto");
+    create_schema(
+        &mut c.schema,
+        "legacy",
+        "protobuf",
+        "main",
+        "legacy_account.proto",
+        pb::SchemaFormat::Protobuf,
+        &source,
+        "local-compile-protobuf-proto2",
+    )
+    .await;
+
+    // Act.
+    let preview = c
+        .codegen
+        .preview_codegen(preview_request(
+            "legacy",
+            "protobuf",
+            "legacy_account.proto",
+            pb::Language::Rust,
+        ))
+        .await
+        .expect("preview proto2 rust codegen")
+        .into_inner();
+
+    // Assert.
+    let code = String::from_utf8(preview.content.clone()).expect("generated rust is utf-8");
+    assert!(
+        code.contains("struct LegacyAccount"),
+        "proto2 message missing from generated Rust:\n{code}"
+    );
+    assert!(
+        code.contains("enum State"),
+        "nested proto2 enum missing from generated Rust:\n{code}"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_compile_crate(
+        tmp.path(),
+        r#"[package]
+name = "schemahub-proto2-local-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13"
+"#,
+        &preview.content,
+    );
+    cargo_check(tmp.path());
+}
+
+#[tokio::test]
 async fn flatbuffers_preview_codegen_compiles_in_local_cargo_project() {
     // Arrange.
     let url = start_server().await;
@@ -311,10 +540,7 @@ root_type BuildRecord;
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let flatc_runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../compilers/flatbuffers-rs/runtime")
-        .canonicalize()
-        .expect("flatc-rs-runtime path");
+    let (flatbuffers_repository, flatbuffers_revision) = flatbuffers_git_coordinate();
     let cargo_toml = format!(
         r#"[package]
 name = "schemahub-flatbuffers-pluggable-buffer-local-compile"
@@ -323,9 +549,8 @@ edition = "2021"
 
 [dependencies]
 flatbuffers = "25.12.19"
-flatc-rs-runtime = {{ path = "{}" }}
+flatc-rs-runtime = {{ git = "{flatbuffers_repository}", rev = "{flatbuffers_revision}" }}
 "#,
-        flatc_runtime.display()
     );
     write_compile_crate(tmp.path(), &cargo_toml, &preview.content);
     cargo_check(tmp.path());
@@ -399,6 +624,92 @@ root_type BuildRecord;
         tmp.path(),
         r#"[package]
 name = "schemahub-flatbuffers-closure-local-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+flatbuffers = "25.12.19"
+"#,
+        &preview.content,
+    );
+    cargo_check(tmp.path());
+}
+
+#[tokio::test]
+async fn complex_flatbuffers_codegen_uses_requested_root_when_dependency_sorts_last() {
+    // Arrange: the requested root path sorts before its dependency, and both
+    // files declare root_type. This proves root selection follows the request,
+    // not lexical closure order. The schemas also cover bit flags, unions,
+    // vectors, required/key fields, and rpc_service declarations.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    let sensor = integration_fixture("complex_sensor.fbs");
+    let telemetry = integration_fixture("complex_telemetry.fbs");
+    create_schema(
+        &mut c.schema,
+        "complex",
+        "flatbuffers",
+        "main",
+        "z_sensor.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        &sensor,
+        "complex-flatbuffers-sensor",
+    )
+    .await;
+    create_schema(
+        &mut c.schema,
+        "complex",
+        "flatbuffers",
+        "main",
+        "a_telemetry.fbs",
+        pb::SchemaFormat::Flatbuffers,
+        &telemetry,
+        "complex-flatbuffers-telemetry",
+    )
+    .await;
+
+    // Act.
+    let preview = c
+        .codegen
+        .preview_codegen(preview_request(
+            "complex",
+            "flatbuffers",
+            "a_telemetry.fbs",
+            pb::Language::Rust,
+        ))
+        .await
+        .expect("preview complex flatbuffers closure rust codegen")
+        .into_inner();
+
+    // Assert.
+    let code = String::from_utf8(preview.content.clone()).expect("generated rust is utf-8");
+    for symbol in [
+        "SensorState",
+        "ReadingFlags",
+        "Sensor",
+        "Alert",
+        "TelemetryPayload",
+        "TelemetryEnvelope",
+    ] {
+        assert!(
+            code.contains(symbol),
+            "generated FlatBuffers closure lost `{symbol}`:\n{code}"
+        );
+    }
+    assert!(
+        code.contains("root_as_telemetry_envelope"),
+        "requested root helper missing; dependency root may have won:\n{code}"
+    );
+    assert!(
+        !code.contains("root_as_sensor"),
+        "dependency root helper should not replace the requested root:\n{code}"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_compile_crate(
+        tmp.path(),
+        r#"[package]
+name = "schemahub-complex-flatbuffers-closure-local-compile"
 version = "0.0.0"
 edition = "2021"
 

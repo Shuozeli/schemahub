@@ -7,22 +7,19 @@ type ResourceHeaderProps = {
   title: string;
   subtitle?: string;
   refName: string;
+  refs?: string[];
   onRefChange: (value: string) => void;
 };
-
-const refs = [
-  { value: 'main', label: 'main' },
-  { value: 'feature/shipping-note', label: 'feature/shipping-note' },
-  { value: 'tag:release-2026-06-05', label: 'tag:release-2026-06-05' },
-];
 
 export function ResourceHeader({
   eyebrow,
   title,
   subtitle,
   refName,
+  refs = [],
   onRefChange,
 }: ResourceHeaderProps) {
+  const refOptions = [...new Set([refName, ...refs])].map((value) => ({ value, label: value }));
   return (
     <Group justify="space-between" align="flex-start" mb="md">
       <Stack gap={4}>
@@ -44,10 +41,9 @@ export function ResourceHeader({
         aria-label="Active ref"
         value={refName}
         onChange={(value) => value && onRefChange(value)}
-        data={refs}
+        data={refOptions}
         w={280}
       />
     </Group>
   );
 }
-

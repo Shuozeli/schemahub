@@ -1,9 +1,9 @@
-import { Badge, Group, Paper, Stack, Table, Tabs, Text, Title } from '@mantine/core';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Boxes, GitBranch, GitCommit, GitPullRequest, ShieldCheck } from 'lucide-react';
+import { Alert, Badge, Button, Group, Paper, Stack, Table, Tabs, Text, Title } from '@mantine/core';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Boxes, GitBranch, GitCommit, GitMerge, GitPullRequest, ShieldCheck } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { useRepoDashboard } from '../api/queries';
+import { useRepoDashboard, useRepository } from '../api/queries';
 import { FormatBadge } from '../components/badges';
 import { ResourceHeader } from '../components/ResourceHeader';
 
@@ -33,10 +33,15 @@ function MetricCell({
 
 export function RepoDashboardPage() {
   const navigate = useNavigate();
-  const { project = 'acme', repo = 'commerce' } = useParams();
+  const { project = '', repo = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const refName = searchParams.get('ref') || 'main';
-  const { data, isLoading } = useRepoDashboard(project, repo, refName);
+  const { data: repository } = useRepository(project, repo);
+  const refName = searchParams.get('ref') || repository?.defaultBranch || '';
+  const { data, error, isLoading } = useRepoDashboard(project, repo, refName);
+
+  if (error) {
+    return <Alert color="red">{error.message}</Alert>;
+  }
 
   if (isLoading || !data) {
     return <Text>Loading repo dashboard...</Text>;
@@ -49,8 +54,28 @@ export function RepoDashboardPage() {
         title="Repo dashboard"
         subtitle="Schema inventory, refs, protection policy, and recent audit activity."
         refName={refName}
+        refs={[...data.branches, ...data.tags.map((tag) => `tag:${tag}`)]}
         onRefChange={(value) => setSearchParams({ ref: value })}
       />
+
+      <Group justify="flex-end">
+        <Button
+          component={Link}
+          to={`/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}/conflicts?bookmark=${encodeURIComponent(refName)}`}
+          variant="default"
+          leftSection={<GitMerge size={16} />}
+        >
+          Resolve conflicts ({data.openConflicts})
+        </Button>
+        <Button
+          component={Link}
+          to={`/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repo)}/changes`}
+          variant="light"
+          leftSection={<GitPullRequest size={16} />}
+        >
+          Review change proposals
+        </Button>
+      </Group>
 
       <div className="metricStrip">
         <MetricCell label="Schemas" value={data.schemas.length} icon={<Boxes size={16} />} />

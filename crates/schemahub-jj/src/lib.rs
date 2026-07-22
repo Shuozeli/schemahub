@@ -27,6 +27,7 @@ pub mod pg_db;
 pub mod redb_db;
 pub mod repo;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use memory_db::MemoryObjectDb;
@@ -35,8 +36,8 @@ pub use object_db::{ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKin
 pub use pg_db::PgObjectDb;
 pub use redb_db::RedbObjectDb;
 
-use jj_lib::backend::{CommitId, CopyId, FileId, Signature, Timestamp, TreeValue};
-use jj_lib::merge::Merge;
+use jj_lib::backend::{BackendError, CommitId, CopyId, FileId, Signature, Timestamp, TreeValue};
+use jj_lib::merge::{Merge, MergedTreeValue};
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefName;
@@ -72,6 +73,8 @@ pub enum JjError {
     BookmarkExists(String),
     #[error("tag not found: {0}")]
     TagNotFound(String),
+    #[error("tag already exists: {0}")]
+    TagExists(String),
     #[error("ref does not resolve to a commit: {0}")]
     BadRef(String),
     #[error("nothing to undo")]
@@ -109,6 +112,8 @@ impl RefSpec {
 pub struct WriteResult {
     pub commit_id: String,
     pub change_id: String,
+    /// The JJ operation that atomically published this commit/bookmark view.
+    pub operation_id: String,
     /// Declarations that landed conflicted (same-decl concurrent edits), as
     /// `<schema_path>/<decl>` paths or bare decl names within the touched file.
     pub conflicted_decls: Vec<String>,
@@ -122,6 +127,75 @@ pub struct OpRecord {
     pub description: String,
     pub author: String,
     pub timestamp: String,
+    /// Structured correlation metadata stamped by SchemaHub workflows.
+    pub attributes: BTreeMap<String, String>,
+}
+
+/// One final schema-file write within an atomic multi-file commit.
+#[derive(Clone, Debug)]
+pub enum SchemaWrite {
+    Patch {
+        schema_path: String,
+        effect: MutationEffect,
+    },
+    Delete {
+        schema_path: String,
+    },
+}
+
+/// Result boundary for a JJ publication that runs a caller-supplied policy
+/// against the exact final tree while holding the repository publication lock.
+/// A policy rejection is known to happen before any commit or operation is
+/// published; a JJ error can be operationally ambiguous and must retain its
+/// durable retry/reconciliation marker.
+#[derive(Debug)]
+pub enum PublicationError<E> {
+    Jj(JjError),
+    Rejected(E),
+}
+
+impl<E> From<JjError> for PublicationError<E> {
+    fn from(error: JjError) -> Self {
+        Self::Jj(error)
+    }
+}
+
+/// Read-only view of the exact merged tree proposed for publication.
+///
+/// The value is valid only during the publication-policy callback. It exposes
+/// schema-shaped reads without leaking jj-lib tree types across the crate
+/// boundary. `known_schema_names` is the union of schemas visible in the
+/// publication inputs and final tree, which lets reference-integrity policy
+/// identify an import whose provider disappeared during a concurrent merge.
+pub struct PublicationSnapshot<'a> {
+    jj: &'a Jj,
+    repo: &'a Arc<ReadonlyRepo>,
+    final_tree: &'a jj_lib::merged_tree::MergedTree,
+    known_schema_names: BTreeSet<String>,
+    bookmark_target_conflicted: bool,
+}
+
+impl PublicationSnapshot<'_> {
+    pub fn conflicted_declarations(&self) -> JjResult<Vec<String>> {
+        self.jj.conflicted_declaration_paths(self.final_tree)
+    }
+
+    pub fn list_schemas(&self) -> JjResult<Vec<String>> {
+        self.jj.list_schemas_in_tree(self.final_tree)
+    }
+
+    pub fn load_schema(&self, schema_path: &str) -> JjResult<SchemaObjects> {
+        self.jj
+            .load_schema_from_tree(self.repo, self.final_tree, schema_path)
+    }
+
+    pub fn known_schema_names(&self) -> &BTreeSet<String> {
+        &self.known_schema_names
+    }
+
+    pub fn bookmark_target_conflicted(&self) -> bool {
+        self.bookmark_target_conflicted
+    }
 }
 
 /// A commit/change graph node returned by [`Jj::commit_log`].
@@ -142,6 +216,22 @@ pub struct CommitRecord {
 /// pair scopes the op-log and bookmarks; content objects dedup globally.
 pub struct Jj {
     store: Store,
+    maintenance: std::sync::RwLock<()>,
+}
+
+struct MutationGuard<'a> {
+    _local: std::sync::RwLockReadGuard<'a, ()>,
+    _backend: Box<dyn object_db::ObjectDbLockGuard + 'a>,
+}
+
+struct PublicationGuard<'a> {
+    _mutation: MutationGuard<'a>,
+    _publication: Box<dyn object_db::ObjectDbLockGuard + 'a>,
+}
+
+struct GcGuard<'a> {
+    _local: std::sync::RwLockWriteGuard<'a, ()>,
+    _backend: Box<dyn object_db::ObjectDbLockGuard + 'a>,
 }
 
 impl Jj {
@@ -149,7 +239,51 @@ impl Jj {
     pub fn new(db: Arc<dyn ObjectDb>) -> Self {
         Self {
             store: Store::new(db),
+            maintenance: std::sync::RwLock::new(()),
         }
+    }
+
+    /// Clone the durable object-store handle backing this JJ instance.
+    ///
+    /// Higher format-agnostic layers use the same database for control-plane
+    /// records that must be committed alongside the repository's lifetime but
+    /// are not themselves JJ objects (for example first-materialized serving
+    /// artifacts). Callers receive only the narrow [`ObjectDb`] abstraction.
+    pub fn object_db(&self) -> Arc<dyn ObjectDb> {
+        self.store.db.clone()
+    }
+
+    fn mutation_guard(&self) -> JjResult<MutationGuard<'_>> {
+        let local = self
+            .maintenance
+            .read()
+            .map_err(|error| JjError::Other(format!("poisoned maintenance lock: {error}")))?;
+        let backend = self.store.db.acquire_mutation_guard()?;
+        Ok(MutationGuard {
+            _local: local,
+            _backend: backend,
+        })
+    }
+
+    fn publication_guard(&self, repo_key: &str) -> JjResult<PublicationGuard<'_>> {
+        let mutation = self.mutation_guard()?;
+        let publication = self.store.db.acquire_publication_guard(repo_key)?;
+        Ok(PublicationGuard {
+            _mutation: mutation,
+            _publication: publication,
+        })
+    }
+
+    fn gc_guard(&self) -> JjResult<GcGuard<'_>> {
+        let local = self
+            .maintenance
+            .write()
+            .map_err(|error| JjError::Other(format!("poisoned maintenance lock: {error}")))?;
+        let backend = self.store.db.acquire_gc_guard()?;
+        Ok(GcGuard {
+            _local: local,
+            _backend: backend,
+        })
     }
 
     /// The per-repo key used to scope the op-log and refs.
@@ -160,7 +294,16 @@ impl Jj {
     // ── Ref resolution ────────────────────────────────────────────────────────
 
     /// Resolve a [`RefSpec`] to a [`CommitId`] against the repo's current view.
-    fn resolve_ref(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> JjResult<CommitId> {
+    ///
+    /// Raw commit ids require an ownership proof because backend objects are
+    /// deduplicated across repositories. Bookmark and tag targets already come
+    /// from this repository's scoped view.
+    fn resolve_ref(
+        &self,
+        repo_key: &str,
+        repo: &Arc<ReadonlyRepo>,
+        at: &RefSpec,
+    ) -> JjResult<CommitId> {
         let view = repo.view();
         match at {
             RefSpec::Bookmark(name) => {
@@ -180,19 +323,146 @@ impl Jj {
                     .ok_or_else(|| JjError::TagNotFound(name.clone()))
             }
             RefSpec::Commit(id_hex) => {
-                CommitId::try_from_hex(id_hex).ok_or_else(|| JjError::BadRef(id_hex.clone()))
+                let commit = CommitId::try_from_hex(id_hex)
+                    .ok_or_else(|| JjError::BadRef(id_hex.clone()))?;
+                self.validate_revision_in_repo(repo_key, repo, &commit)?;
+                Ok(commit)
             }
         }
     }
 
     /// Resolve a ref for a write, tolerating a missing bookmark (returns None so
     /// a fresh bookmark can be created).
-    fn try_resolve(&self, repo: &Arc<ReadonlyRepo>, at: &RefSpec) -> JjResult<Option<CommitId>> {
-        match self.resolve_ref(repo, at) {
+    fn try_resolve(
+        &self,
+        repo_key: &str,
+        repo: &Arc<ReadonlyRepo>,
+        at: &RefSpec,
+    ) -> JjResult<Option<CommitId>> {
+        match self.resolve_ref(repo_key, repo, at) {
             Ok(id) => Ok(Some(id)),
             Err(JjError::BookmarkNotFound(_)) | Err(JjError::TagNotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Resolve a ref to an immutable commit id for planning a future write.
+    /// A missing bookmark resolves to jj's root commit so callers can validate
+    /// the first schema change in a new repository without inventing a mutable
+    /// or empty base identifier. Raw commit ids are loaded before returning,
+    /// which rejects syntactically valid ids that are not present in storage.
+    pub fn resolve_ref_or_root(&self, project: &str, repo: &str, at: &RefSpec) -> JjResult<String> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self
+            .try_resolve(&repo_key, &jj_repo, at)?
+            .unwrap_or_else(|| jj_repo.store().root_commit_id().clone());
+        match self
+            .store
+            .block_on(jj_repo.store().get_commit_async(&commit_id))
+        {
+            Ok(_) => {}
+            Err(BackendError::ObjectNotFound { .. }) => return Err(JjError::ObjectNotFound),
+            Err(error) => return Err(JjError::Other(error.to_string())),
+        }
+        Ok(commit_id.hex())
+    }
+
+    /// Resolve an existing bookmark/tag/commit to an immutable commit id.
+    /// Unlike [`Jj::resolve_ref_or_root`], a missing mutable ref is an error.
+    pub fn resolve_ref_id(&self, project: &str, repo: &str, at: &RefSpec) -> JjResult<String> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at)?;
+        match self
+            .store
+            .block_on(jj_repo.store().get_commit_async(&commit_id))
+        {
+            Ok(_) => Ok(commit_id.hex()),
+            Err(BackendError::ObjectNotFound { .. }) => Err(JjError::ObjectNotFound),
+            Err(error) => Err(JjError::Other(error.to_string())),
+        }
+    }
+
+    /// List every repository represented by the shared ObjectDb's ref or
+    /// operation namespaces. The returned `(project, repo)` pairs are sorted
+    /// and deduplicated; malformed storage keys fail closed rather than making
+    /// a global inventory silently incomplete.
+    pub fn list_repository_keys(&self) -> JjResult<Vec<(String, String)>> {
+        let mut repositories = Vec::new();
+        for key in self.store.db.list_repo_keys()? {
+            let Some((project, repo)) = key.split_once('/') else {
+                return Err(JjError::Other(format!(
+                    "malformed repository key in object database: {key:?}"
+                )));
+            };
+            if project.is_empty() || repo.is_empty() || repo.contains('/') {
+                return Err(JjError::Other(format!(
+                    "malformed repository key in object database: {key:?}"
+                )));
+            }
+            repositories.push((project.to_string(), repo.to_string()));
+        }
+        repositories.sort();
+        repositories.dedup();
+        Ok(repositories)
+    }
+
+    /// Verify that a commit belongs to the named repository's retained JJ
+    /// history. Content objects deduplicate globally, so checking existence
+    /// alone would let a caller present another repository's commit id. This
+    /// walks heads retained by current and historical operation views, then
+    /// their commit ancestors.
+    pub fn validate_revision(&self, project: &str, repo: &str, commit_hex: &str) -> JjResult<()> {
+        let target = CommitId::try_from_hex(commit_hex)
+            .ok_or_else(|| JjError::BadRef(commit_hex.to_string()))?;
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        self.validate_revision_in_repo(&repo_key, &jj_repo, &target)
+    }
+
+    fn validate_revision_in_repo(
+        &self,
+        repo_key: &str,
+        jj_repo: &Arc<ReadonlyRepo>,
+        target: &CommitId,
+    ) -> JjResult<()> {
+        let loader = jj_repo.loader();
+        let root_op_id = loader.op_store().root_operation_id().clone();
+        let mut queue: Vec<CommitId> = jj_repo.view().heads().iter().cloned().collect();
+        for op_id in self.store.db.list_ops(repo_key)? {
+            let op_id = jj_lib::op_store::OperationId::new(op_id.0);
+            if op_id == root_op_id {
+                continue;
+            }
+            let operation = Self::map_jj(self.store.block_on(loader.load_operation(&op_id)))?;
+            let view = Self::map_jj(self.store.block_on(operation.view()))?;
+            queue.extend(view.heads().iter().cloned());
+        }
+        queue.push(jj_repo.store().root_commit_id().clone());
+
+        let mut seen = std::collections::HashSet::new();
+        while let Some(commit_id) = queue.pop() {
+            if !seen.insert(commit_id.clone()) {
+                continue;
+            }
+            if &commit_id == target {
+                return Ok(());
+            }
+            let commit = match self
+                .store
+                .block_on(jj_repo.store().get_commit_async(&commit_id))
+            {
+                Ok(commit) => commit,
+                Err(BackendError::ObjectNotFound { .. }) => continue,
+                Err(error) => return Err(JjError::Other(error.to_string())),
+            };
+            queue.extend(commit.parent_ids().iter().cloned());
+        }
+        Err(JjError::BadRef(format!(
+            "commit {} is not retained by repository {repo_key}",
+            target.hex()
+        )))
     }
 
     fn map_jj<T, E: std::fmt::Display>(r: Result<T, E>) -> JjResult<T> {
@@ -212,13 +482,20 @@ impl Jj {
     ) -> JjResult<SchemaObjects> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
         let commit = Self::map_jj(
             self.store
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
         )?;
-        let tree = commit.tree();
+        self.load_schema_from_tree(&jj_repo, &commit.tree(), schema_path)
+    }
 
+    fn load_schema_from_tree(
+        &self,
+        repo: &Arc<ReadonlyRepo>,
+        tree: &jj_lib::merged_tree::MergedTree,
+        schema_path: &str,
+    ) -> JjResult<SchemaObjects> {
         // Enumerate the schema subtree's direct entries.
         let prefix = format!("{schema_path}/");
         let mut found_schema = false;
@@ -241,7 +518,7 @@ impl Jj {
             let Ok(Some(TreeValue::File { id, .. })) = value.into_resolved() else {
                 continue;
             };
-            let bytes = self.read_file(&jj_repo, &id)?;
+            let bytes = self.read_file(repo, &id)?;
             if name == META_NAME {
                 meta = MetaBlob::new(bytes);
             } else {
@@ -254,6 +531,47 @@ impl Jj {
         Ok(SchemaObjects { meta, decls })
     }
 
+    /// List conflicted declaration paths at an immutable ref. Paths retain the
+    /// schema-file prefix and decode the declaration-name component, making the
+    /// result suitable for validation and audit output without exposing JJ's
+    /// internal path encoding.
+    pub fn list_conflicted_declarations(
+        &self,
+        project: &str,
+        repo: &str,
+        at_ref: &RefSpec,
+    ) -> JjResult<Vec<String>> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
+        self.conflicted_declaration_paths(&commit.tree())
+    }
+
+    fn conflicted_declaration_paths(
+        &self,
+        tree: &jj_lib::merged_tree::MergedTree,
+    ) -> JjResult<Vec<String>> {
+        let mut conflicts = Vec::new();
+        for (path, value) in tree.conflicts() {
+            Self::map_jj(value)?;
+            let internal = path.as_internal_file_string();
+            let decoded = match internal.rsplit_once('/') {
+                Some((schema, component)) => {
+                    format!("{schema}/{}", decode_decl_name(component))
+                }
+                None => decode_decl_name(internal),
+            };
+            conflicts.push(decoded);
+        }
+        conflicts.sort();
+        conflicts.dedup();
+        Ok(conflicts)
+    }
+
     /// List schema-file names present at a ref.
     pub fn list_schemas(
         &self,
@@ -263,17 +581,23 @@ impl Jj {
     ) -> JjResult<Vec<String>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
         let commit = Self::map_jj(
             self.store
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
         )?;
-        let tree = commit.tree();
+        self.list_schemas_in_tree(&commit.tree())
+    }
+
+    fn list_schemas_in_tree(
+        &self,
+        tree: &jj_lib::merged_tree::MergedTree,
+    ) -> JjResult<Vec<String>> {
         let mut schemas = std::collections::BTreeSet::new();
         for (path, value) in tree.entries() {
             Self::map_jj(value)?;
             let internal = path.as_internal_file_string();
-            if let Some((schema, _rest)) = internal.split_once('/') {
+            if let Some(schema) = internal.strip_suffix(&format!("/{META_NAME}")) {
                 schemas.insert(schema.to_string());
             }
         }
@@ -304,7 +628,7 @@ impl Jj {
     ) -> JjResult<DeclBlob> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
         let commit = Self::map_jj(
             self.store
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
@@ -395,13 +719,80 @@ impl Jj {
         author: &str,
         message: &str,
     ) -> JjResult<WriteResult> {
+        let writes = effects
+            .into_iter()
+            .map(|(schema_path, effect)| SchemaWrite::Patch {
+                schema_path,
+                effect,
+            })
+            .collect();
+        self.commit_schema_changes(
+            project,
+            repo,
+            bookmark,
+            base_ref,
+            writes,
+            author,
+            message,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Commit final patch/delete writes across several schema files while
+    /// stamping structured attributes on the publishing JJ operation. Change
+    /// application uses those attributes as a durable crash-recovery marker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_schema_changes(
+        &self,
+        project: &str,
+        repo: &str,
+        bookmark: &str,
+        base_ref: &RefSpec,
+        writes: Vec<SchemaWrite>,
+        author: &str,
+        message: &str,
+        operation_attributes: BTreeMap<String, String>,
+    ) -> JjResult<WriteResult> {
+        match self.commit_schema_changes_validated(
+            project,
+            repo,
+            bookmark,
+            base_ref,
+            writes,
+            author,
+            message,
+            operation_attributes,
+            |_| Ok::<(), std::convert::Infallible>(()),
+        ) {
+            Ok(write) => Ok(write),
+            Err(PublicationError::Jj(error)) => Err(error),
+            Err(PublicationError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Commit schema changes only if `validate` accepts the exact final merged
+    /// tree. The callback and operation publication run under one repository
+    /// publication guard, so no other SchemaHub writer can invalidate the
+    /// decision between validation and the operation-head update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_schema_changes_validated<E>(
+        &self,
+        project: &str,
+        repo: &str,
+        bookmark: &str,
+        base_ref: &RefSpec,
+        writes: Vec<SchemaWrite>,
+        author: &str,
+        message: &str,
+        operation_attributes: BTreeMap<String, String>,
+        validate: impl FnOnce(&PublicationSnapshot<'_>) -> Result<(), E>,
+    ) -> Result<WriteResult, PublicationError<E>> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
 
-        let base_id = self.try_resolve(&jj_repo, base_ref)?;
-        let current_tip = self
-            .resolve_ref(&jj_repo, &RefSpec::bookmark(bookmark))
-            .ok();
+        let base_id = self.try_resolve(&repo_key, &jj_repo, base_ref)?;
+        let current_tip = self.try_resolve(&repo_key, &jj_repo, &RefSpec::bookmark(bookmark))?;
 
         // 1. Build the writer's tree from `base` + the effects.
         let base_commit = match &base_id {
@@ -414,9 +805,17 @@ impl Jj {
             Some(c) => c.tree(),
             None => jj_repo.store().empty_merged_tree(),
         };
-        let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(base_tree);
-        for (schema_path, effect) in &effects {
-            self.apply_effect(&jj_repo, &mut builder, schema_path, effect)?;
+        let mut builder = jj_lib::merged_tree_builder::MergedTreeBuilder::new(base_tree.clone());
+        for write in &writes {
+            match write {
+                SchemaWrite::Patch {
+                    schema_path,
+                    effect,
+                } => self.apply_effect(&jj_repo, &mut builder, schema_path, effect)?,
+                SchemaWrite::Delete { schema_path } => {
+                    self.delete_schema_from_tree(&base_tree, &mut builder, schema_path)?
+                }
+            }
         }
         let writer_tree = Self::map_jj(self.store.block_on(builder.write_tree()))?;
 
@@ -426,6 +825,11 @@ impl Jj {
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
+        for (key, value) in operation_attributes {
+            if !key.is_empty() {
+                tx.set_attribute(key, value);
+            }
+        }
 
         let (final_tree, parents) = match &current_tip {
             Some(tip) if Some(tip) == base_id.as_ref() => (writer_tree, vec![tip.clone()]),
@@ -453,6 +857,19 @@ impl Jj {
         };
 
         let conflicted = self.conflicted_decls(&final_tree)?;
+        let mut known_schema_names: BTreeSet<_> =
+            self.list_schemas_in_tree(&base_tree)?.into_iter().collect();
+        known_schema_names.extend(self.list_schemas_in_tree(&final_tree)?);
+        {
+            let snapshot = PublicationSnapshot {
+                jj: self,
+                repo: &jj_repo,
+                final_tree: &final_tree,
+                known_schema_names,
+                bookmark_target_conflicted: false,
+            };
+            validate(&snapshot).map_err(PublicationError::Rejected)?;
+        }
 
         let commit = Self::map_jj(
             self.store.block_on(
@@ -468,11 +885,12 @@ impl Jj {
         // 3. Move bookmark + heads.
         self.set_bookmark_in_tx(&mut tx, bookmark, commit.id().clone());
         Self::map_jj(self.store.block_on(tx.repo_mut().add_head(&commit)))?;
-        self.commit_tx(tx, &format!("commit_write {bookmark}: {message}"))?;
+        let operation_id = self.commit_tx(tx, &format!("commit_write {bookmark}: {message}"))?;
 
         Ok(WriteResult {
             commit_id: commit.id().hex(),
             change_id: commit.change_id().reverse_hex(),
+            operation_id,
             conflicted_decls: conflicted,
         })
     }
@@ -495,6 +913,35 @@ impl Jj {
         }
         for name in &effect.removes {
             builder.set_or_remove(decl_path(schema_path, name)?, Merge::absent());
+        }
+        Ok(())
+    }
+
+    /// Remove every direct entry in a schema subtree, including `__meta__`.
+    /// The write plan contains at most one final write per schema, so scanning
+    /// the immutable writer base is sufficient and deterministic.
+    fn delete_schema_from_tree(
+        &self,
+        base_tree: &jj_lib::merged_tree::MergedTree,
+        builder: &mut jj_lib::merged_tree_builder::MergedTreeBuilder,
+        schema_path: &str,
+    ) -> JjResult<()> {
+        let prefix = format!("{schema_path}/");
+        let mut found = false;
+        for (path, value) in base_tree.entries() {
+            Self::map_jj(value)?;
+            let internal = path.as_internal_file_string();
+            let Some(rest) = internal.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.contains('/') {
+                continue;
+            }
+            found = true;
+            builder.set_or_remove(path, Merge::absent());
+        }
+        if !found {
+            return Err(JjError::SchemaNotFound(schema_path.to_string()));
         }
         Ok(())
     }
@@ -552,8 +999,13 @@ impl Jj {
             .set_local_bookmark_target(RefName::new(bookmark), RefTarget::normal(commit));
     }
 
-    fn commit_tx(&self, tx: jj_lib::transaction::Transaction, description: &str) -> JjResult<()> {
-        Self::map_jj(self.store.block_on(tx.commit(description.to_string()))).map(|_| ())
+    fn commit_tx(
+        &self,
+        tx: jj_lib::transaction::Transaction,
+        description: &str,
+    ) -> JjResult<String> {
+        let repo = Self::map_jj(self.store.block_on(tx.commit(description.to_string())))?;
+        Ok(repo.operation().id().hex())
     }
 
     /// Stamp the schemahub-resolved audit author onto a transaction's op-log
@@ -578,16 +1030,55 @@ impl Jj {
         from: &RefSpec,
         author: &str,
     ) -> JjResult<String> {
+        match self.create_bookmark_validated(project, repo, name, from, author, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(commit) => Ok(commit),
+            Err(PublicationError::Jj(error)) => Err(error),
+            Err(PublicationError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Create a bookmark only after policy accepts its immutable target tree.
+    pub fn create_bookmark_validated<E>(
+        &self,
+        project: &str,
+        repo: &str,
+        name: &str,
+        from: &RefSpec,
+        author: &str,
+        validate: impl FnOnce(&PublicationSnapshot<'_>) -> Result<(), E>,
+    ) -> Result<String, PublicationError<E>> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
             .view()
             .get_local_bookmark(RefName::new(name))
             .is_present()
         {
-            return Err(JjError::BookmarkExists(name.to_string()));
+            return Err(JjError::BookmarkExists(name.to_string()).into());
         }
-        let commit = self.resolve_ref(&jj_repo, from)?;
+        let commit = self.resolve_ref(&repo_key, &jj_repo, from)?;
+        let target = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit)),
+        )?;
+        let final_tree = target.tree();
+        let known_schema_names = self
+            .list_schemas_in_tree(&final_tree)?
+            .into_iter()
+            .collect();
+        {
+            let snapshot = PublicationSnapshot {
+                jj: self,
+                repo: &jj_repo,
+                final_tree: &final_tree,
+                known_schema_names,
+                bookmark_target_conflicted: false,
+            };
+            validate(&snapshot).map_err(PublicationError::Rejected)?;
+        }
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
         tx.repo_mut()
@@ -605,16 +1096,62 @@ impl Jj {
         to: &RefSpec,
         author: &str,
     ) -> JjResult<String> {
+        match self.move_bookmark_validated(project, repo, name, to, author, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(commit) => Ok(commit),
+            Err(PublicationError::Jj(error)) => Err(error),
+            Err(PublicationError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Move a bookmark only after policy accepts the exact target tree while
+    /// the repository publication guard still protects the ref update.
+    pub fn move_bookmark_validated<E>(
+        &self,
+        project: &str,
+        repo: &str,
+        name: &str,
+        to: &RefSpec,
+        author: &str,
+        validate: impl FnOnce(&PublicationSnapshot<'_>) -> Result<(), E>,
+    ) -> Result<String, PublicationError<E>> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
             .view()
             .get_local_bookmark(RefName::new(name))
             .is_absent()
         {
-            return Err(JjError::BookmarkNotFound(name.to_string()));
+            return Err(JjError::BookmarkNotFound(name.to_string()).into());
         }
-        let commit = self.resolve_ref(&jj_repo, to)?;
+        let current = self.resolve_ref(&repo_key, &jj_repo, &RefSpec::bookmark(name))?;
+        let commit = self.resolve_ref(&repo_key, &jj_repo, to)?;
+        let current = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&current)),
+        )?;
+        let target = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit)),
+        )?;
+        let final_tree = target.tree();
+        let mut known_schema_names: BTreeSet<_> = self
+            .list_schemas_in_tree(&current.tree())?
+            .into_iter()
+            .collect();
+        known_schema_names.extend(self.list_schemas_in_tree(&final_tree)?);
+        {
+            let snapshot = PublicationSnapshot {
+                jj: self,
+                repo: &jj_repo,
+                final_tree: &final_tree,
+                known_schema_names,
+                bookmark_target_conflicted: false,
+            };
+            validate(&snapshot).map_err(PublicationError::Rejected)?;
+        }
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
         tx.repo_mut()
@@ -632,6 +1169,7 @@ impl Jj {
         author: &str,
     ) -> JjResult<()> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo
             .view()
@@ -645,6 +1183,7 @@ impl Jj {
         tx.repo_mut()
             .set_local_bookmark_target(RefName::new(name), RefTarget::absent());
         self.commit_tx(tx, &format!("delete_bookmark {name}"))
+            .map(|_| ())
     }
 
     /// List bookmarks (name → target commit ids) at the current view.
@@ -677,8 +1216,12 @@ impl Jj {
         author: &str,
     ) -> JjResult<String> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let commit = self.resolve_ref(&jj_repo, at)?;
+        if !jj_repo.view().get_local_tag(RefName::new(name)).is_absent() {
+            return Err(JjError::TagExists(name.to_string()));
+        }
+        let commit = self.resolve_ref(&repo_key, &jj_repo, at)?;
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
         tx.repo_mut()
@@ -690,6 +1233,7 @@ impl Jj {
     /// Delete a tag.
     pub fn delete_tag(&self, project: &str, repo: &str, name: &str, author: &str) -> JjResult<()> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         if jj_repo.view().get_local_tag(RefName::new(name)).is_absent() {
             return Err(JjError::TagNotFound(name.to_string()));
@@ -699,6 +1243,7 @@ impl Jj {
         tx.repo_mut()
             .set_local_tag_target(RefName::new(name), RefTarget::absent());
         self.commit_tx(tx, &format!("delete_tag {name}"))
+            .map(|_| ())
     }
 
     /// List tags (name → commit id) at the current view.
@@ -735,22 +1280,7 @@ impl Jj {
             if op.id() == &root_op_id || !seen.insert(op.id().clone()) {
                 continue;
             }
-            let meta = op.metadata();
-            // Prefer the schemahub-stamped author attribute (the authenticated
-            // identity that drove the change) over jj's default
-            // `meta.username` (a stable but anonymous hostname/jj string).
-            let author = meta
-                .attributes
-                .get(AUTHOR_ATTRIBUTE)
-                .cloned()
-                .unwrap_or_else(|| meta.username.clone());
-            chain.push(OpRecord {
-                op_id: op.id().hex(),
-                parents: op.parent_ids().iter().map(|p| p.hex()).collect(),
-                description: meta.description.clone(),
-                author,
-                timestamp: meta.time.end.timestamp.0.to_string(),
-            });
+            chain.push(Self::operation_record(&op));
             for parent_id in op.parent_ids() {
                 if parent_id != &root_op_id {
                     let parent =
@@ -762,6 +1292,155 @@ impl Jj {
         // The chain is in newest→oldest discovery order; reverse to oldest→newest.
         chain.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         Ok(chain)
+    }
+
+    /// Return at most the newest `limit` operations, ordered oldest→newest.
+    ///
+    /// Normal SchemaHub publication produces a linear operation chain, so this
+    /// reads only the requested tail. If a concurrent JJ history introduces a
+    /// branch inside that tail, it falls back to the complete graph traversal
+    /// to preserve [`Self::list_operations`]'s ordering and deduplication
+    /// semantics.
+    pub fn list_operations_tail(
+        &self,
+        project: &str,
+        repo: &str,
+        limit: usize,
+    ) -> JjResult<Vec<OpRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let loader = jj_repo.loader();
+        let root_op_id = loader.op_store().root_operation_id().clone();
+        let mut cursor = jj_repo.operation().clone();
+        // `limit` can originate from an untrusted uint32 request. Avoid
+        // reserving caller-sized memory up front; the graph walk grows only as
+        // operations are actually discovered.
+        let mut newest_first = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        while cursor.id() != &root_op_id && newest_first.len() < limit {
+            if !seen.insert(cursor.id().clone()) {
+                return Err(JjError::Corrupt(format!(
+                    "operation graph contains a cycle at {}",
+                    cursor.id().hex()
+                )));
+            }
+            newest_first.push(Self::operation_record(&cursor));
+            if newest_first.len() == limit {
+                break;
+            }
+
+            let parents: Vec<_> = cursor
+                .parent_ids()
+                .iter()
+                .filter(|parent| *parent != &root_op_id)
+                .collect();
+            match parents.as_slice() {
+                [] => break,
+                [parent] => {
+                    cursor = Self::map_jj(self.store.block_on(loader.load_operation(parent)))?;
+                }
+                _ => {
+                    let mut all = self.list_operations(project, repo)?;
+                    if all.len() > limit {
+                        all.drain(..all.len() - limit);
+                    }
+                    return Ok(all);
+                }
+            }
+        }
+
+        newest_first.reverse();
+        Ok(newest_first)
+    }
+
+    fn operation_record(operation: &jj_lib::operation::Operation) -> OpRecord {
+        let metadata = operation.metadata();
+        // Prefer the schemahub-stamped author attribute (the authenticated
+        // identity that drove the change) over jj's default username.
+        let author = metadata
+            .attributes
+            .get(AUTHOR_ATTRIBUTE)
+            .cloned()
+            .unwrap_or_else(|| metadata.username.clone());
+        OpRecord {
+            op_id: operation.id().hex(),
+            parents: operation
+                .parent_ids()
+                .iter()
+                .map(|parent| parent.hex())
+                .collect(),
+            description: metadata.description.clone(),
+            author,
+            timestamp: metadata.time.end.timestamp.0.to_string(),
+            attributes: metadata.attributes.clone(),
+        }
+    }
+
+    /// Find the newest operation whose metadata contains every requested
+    /// key/value pair. Correlation attributes are intended to be unique; the
+    /// newest match is returned defensively if a repository contains legacy
+    /// duplicates.
+    pub fn find_operation_by_attributes(
+        &self,
+        project: &str,
+        repo: &str,
+        required: &BTreeMap<String, String>,
+    ) -> JjResult<Option<OpRecord>> {
+        let operations = self.list_operations(project, repo)?;
+        Ok(operations.into_iter().rev().find(|operation| {
+            required
+                .iter()
+                .all(|(key, value)| operation.attributes.get(key) == Some(value))
+        }))
+    }
+
+    /// Recover the commit receipt published by a correlated operation. The
+    /// bookmark is read from that operation's historical view, so recovery is
+    /// stable even if later operations have moved the live bookmark again.
+    pub fn find_correlated_write(
+        &self,
+        project: &str,
+        repo: &str,
+        bookmark: &str,
+        required: &BTreeMap<String, String>,
+    ) -> JjResult<Option<WriteResult>> {
+        let Some(record) = self.find_operation_by_attributes(project, repo, required)? else {
+            return Ok(None);
+        };
+        let operation_id = jj_lib::op_store::OperationId::try_from_hex(&record.op_id)
+            .ok_or_else(|| JjError::Corrupt(format!("invalid operation id {}", record.op_id)))?;
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let loader = jj_repo.loader();
+        let operation = Self::map_jj(self.store.block_on(loader.load_operation(&operation_id)))?;
+        let historical_repo = Self::map_jj(self.store.block_on(loader.load_at(&operation)))?;
+        let commit_id = historical_repo
+            .view()
+            .get_local_bookmark(RefName::new(bookmark))
+            .added_ids()
+            .next()
+            .cloned()
+            .ok_or_else(|| {
+                JjError::Corrupt(format!(
+                    "correlated operation {} has no target for bookmark {bookmark}",
+                    record.op_id
+                ))
+            })?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(historical_repo.store().get_commit_async(&commit_id)),
+        )?;
+        Ok(Some(WriteResult {
+            commit_id: commit.id().hex(),
+            change_id: commit.change_id().reverse_hex(),
+            operation_id: record.op_id,
+            conflicted_decls: self.conflicted_decls(&commit.tree())?,
+        }))
     }
 
     /// Undo the next-older change, walking content history back MONOTONICALLY
@@ -776,7 +1455,26 @@ impl Jj {
     /// `C_(n-u-1)`, or to the empty/initial state once the oldest write is undone.
     /// `NothingToUndo` once there is nothing older to roll back to.
     pub fn undo(&self, project: &str, repo: &str, author: &str) -> JjResult<String> {
+        match self.undo_validated(project, repo, author, |_, _| {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
+            Ok(operation) => Ok(operation),
+            Err(PublicationError::Jj(error)) => Err(error),
+            Err(PublicationError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Undo only after policy accepts every bookmark target in the historical
+    /// view that is about to become current.
+    pub fn undo_validated<E>(
+        &self,
+        project: &str,
+        repo: &str,
+        author: &str,
+        mut validate: impl FnMut(&str, &PublicationSnapshot<'_>) -> Result<(), E>,
+    ) -> Result<String, PublicationError<E>> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         let loader = jj_repo.loader();
         let root_op_id = loader.op_store().root_operation_id().clone();
@@ -813,7 +1511,7 @@ impl Jj {
 
         // No content to roll back at all.
         if content_ops.is_empty() {
-            return Err(JjError::NothingToUndo);
+            return Err(JjError::NothingToUndo.into());
         }
 
         // Target the change `leading_undos + 1` steps back from the newest write.
@@ -822,7 +1520,7 @@ impl Jj {
         // depth  > len: already at empty — nothing left to undo.
         let depth = leading_undos + 1;
         if depth > content_ops.len() {
-            return Err(JjError::NothingToUndo);
+            return Err(JjError::NothingToUndo.into());
         }
         // The op identifying the change being undone (the one whose effect we are
         // rolling past): the content op currently displayed, at index `leading_undos`.
@@ -860,6 +1558,42 @@ impl Jj {
             }
         };
 
+        for (name, target) in target_view.local_bookmarks() {
+            let target_ids: Vec<_> = target.added_ids().cloned().collect();
+            let Some(target_id) = target_ids.first() else {
+                continue;
+            };
+            let target_commit = Self::map_jj(
+                self.store
+                    .block_on(jj_repo.store().get_commit_async(target_id)),
+            )?;
+            let final_tree = target_commit.tree();
+            let mut known_schema_names: BTreeSet<_> = self
+                .list_schemas_in_tree(&final_tree)?
+                .into_iter()
+                .collect();
+            if target_ids.len() == 1 {
+                let current = jj_repo
+                    .view()
+                    .get_local_bookmark(RefName::new(name.as_str()));
+                for current_id in current.added_ids() {
+                    let current_commit = Self::map_jj(
+                        self.store
+                            .block_on(jj_repo.store().get_commit_async(current_id)),
+                    )?;
+                    known_schema_names.extend(self.list_schemas_in_tree(&current_commit.tree())?);
+                }
+            }
+            let snapshot = PublicationSnapshot {
+                jj: self,
+                repo: &jj_repo,
+                final_tree: &final_tree,
+                known_schema_names,
+                bookmark_target_conflicted: target_ids.len() != 1,
+            };
+            validate(name.as_str(), &snapshot).map_err(PublicationError::Rejected)?;
+        }
+
         // Record a new operation whose view equals the target state.
         let mut tx = jj_repo.start_transaction();
         tx.repo_mut().set_view(target_view.store_view().clone());
@@ -881,7 +1615,7 @@ impl Jj {
     ) -> JjResult<Vec<CommitRecord>> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let start = self.resolve_ref(&jj_repo, at_ref)?;
+        let start = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
         let root_id = jj_repo.store().root_commit_id().clone();
 
         let mut out = Vec::new();
@@ -914,6 +1648,60 @@ impl Jj {
         Ok(out)
     }
 
+    /// Whether one commit changed a schema relative to its first parent. The
+    /// commit id is repository-scoped before any globally deduplicated object
+    /// is loaded. Metadata-only changes count, as do file creation/deletion.
+    pub fn commit_touches_schema(
+        &self,
+        project: &str,
+        repo: &str,
+        commit_hex: &str,
+        schema_path: &str,
+    ) -> JjResult<bool> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(
+            &repo_key,
+            &jj_repo,
+            &RefSpec::commit(commit_hex.to_string()),
+        )?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
+        let current = self.schema_tree_state(&commit.tree(), schema_path)?;
+        let parent = match commit.parent_ids().first() {
+            Some(parent_id) if parent_id != jj_repo.store().root_commit_id() => {
+                let parent = Self::map_jj(
+                    self.store
+                        .block_on(jj_repo.store().get_commit_async(parent_id)),
+                )?;
+                self.schema_tree_state(&parent.tree(), schema_path)?
+            }
+            _ => BTreeMap::new(),
+        };
+        Ok(current != parent)
+    }
+
+    /// Capture the raw merged values below one schema subtree. Comparing
+    /// parsed [`SchemaObjects`] would omit unresolved declarations and could
+    /// incorrectly hide a conflict-to-conflict change from history filters.
+    fn schema_tree_state(
+        &self,
+        tree: &jj_lib::merged_tree::MergedTree,
+        schema_path: &str,
+    ) -> JjResult<BTreeMap<String, MergedTreeValue>> {
+        let prefix = format!("{schema_path}/");
+        let mut state = BTreeMap::new();
+        for (path, value) in tree.entries() {
+            let internal = path.as_internal_file_string();
+            if internal.starts_with(&prefix) {
+                state.insert(internal.to_string(), Self::map_jj(value)?);
+            }
+        }
+        Ok(state)
+    }
+
     // ── Conflicts ─────────────────────────────────────────────────────────────
 
     /// Read the competing sides of a conflicted declaration at a ref.
@@ -927,7 +1715,7 @@ impl Jj {
     ) -> JjResult<ConflictSides> {
         let repo_key = Self::repo_key(project, repo);
         let jj_repo = self.store.load_repo(&repo_key)?;
-        let commit_id = self.resolve_ref(&jj_repo, at_ref)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
         let commit = Self::map_jj(
             self.store
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
@@ -981,9 +1769,10 @@ impl Jj {
         message: &str,
     ) -> JjResult<WriteResult> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         let tip = self
-            .resolve_ref(&jj_repo, &RefSpec::bookmark(bookmark))
+            .resolve_ref(&repo_key, &jj_repo, &RefSpec::bookmark(bookmark))
             .map_err(|_| JjError::BookmarkNotFound(bookmark.to_string()))?;
         let tip_commit = Self::map_jj(self.store.block_on(jj_repo.store().get_commit_async(&tip)))?;
 
@@ -1007,11 +1796,12 @@ impl Jj {
         )?;
         self.set_bookmark_in_tx(&mut tx, bookmark, commit.id().clone());
         Self::map_jj(self.store.block_on(tx.repo_mut().add_head(&commit)))?;
-        self.commit_tx(tx, &format!("resolve_conflict {schema_path}/{decl}"))?;
+        let operation_id = self.commit_tx(tx, &format!("resolve_conflict {schema_path}/{decl}"))?;
 
         Ok(WriteResult {
             commit_id: commit.id().hex(),
             change_id: commit.change_id().reverse_hex(),
+            operation_id,
             conflicted_decls: vec![],
         })
     }
@@ -1030,13 +1820,68 @@ impl Jj {
         dst: &str,
         author: &str,
     ) -> JjResult<WriteResult> {
+        self.merge_with_attributes(
+            project,
+            repo,
+            src,
+            dst,
+            author,
+            &format!("merge {src} into {dst}"),
+            BTreeMap::new(),
+        )
+    }
+
+    /// Merge with an explicit commit message and structured publishing-operation
+    /// attributes. Durable workflows use the attributes as recovery markers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_with_attributes(
+        &self,
+        project: &str,
+        repo: &str,
+        src: &str,
+        dst: &str,
+        author: &str,
+        message: &str,
+        operation_attributes: BTreeMap<String, String>,
+    ) -> JjResult<WriteResult> {
+        match self.merge_with_attributes_validated(
+            project,
+            repo,
+            src,
+            dst,
+            author,
+            message,
+            operation_attributes,
+            |_| Ok::<(), std::convert::Infallible>(()),
+        ) {
+            Ok(write) => Ok(write),
+            Err(PublicationError::Jj(error)) => Err(error),
+            Err(PublicationError::Rejected(never)) => match never {},
+        }
+    }
+
+    /// Merge and atomically validate the exact merged tree before publishing
+    /// the destination bookmark operation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_with_attributes_validated<E>(
+        &self,
+        project: &str,
+        repo: &str,
+        src: &str,
+        dst: &str,
+        author: &str,
+        message: &str,
+        operation_attributes: BTreeMap<String, String>,
+        validate: impl FnOnce(&PublicationSnapshot<'_>) -> Result<(), E>,
+    ) -> Result<WriteResult, PublicationError<E>> {
         let repo_key = Self::repo_key(project, repo);
+        let _guard = self.publication_guard(&repo_key)?;
         let jj_repo = self.store.load_repo(&repo_key)?;
         let src_id = self
-            .resolve_ref(&jj_repo, &RefSpec::bookmark(src))
+            .resolve_ref(&repo_key, &jj_repo, &RefSpec::bookmark(src))
             .map_err(|_| JjError::BookmarkNotFound(src.to_string()))?;
         let dst_id = self
-            .resolve_ref(&jj_repo, &RefSpec::bookmark(dst))
+            .resolve_ref(&repo_key, &jj_repo, &RefSpec::bookmark(dst))
             .map_err(|_| JjError::BookmarkNotFound(dst.to_string()))?;
 
         let dst_commit = Self::map_jj(
@@ -1055,27 +1900,49 @@ impl Jj {
             &[dst_commit.clone(), src_commit.clone()],
         )))?;
         let conflicted = self.conflicted_decls(&merged_tree)?;
+        let mut known_schema_names: BTreeSet<_> = self
+            .list_schemas_in_tree(&dst_commit.tree())?
+            .into_iter()
+            .collect();
+        known_schema_names.extend(self.list_schemas_in_tree(&src_commit.tree())?);
+        known_schema_names.extend(self.list_schemas_in_tree(&merged_tree)?);
+        {
+            let snapshot = PublicationSnapshot {
+                jj: self,
+                repo: &jj_repo,
+                final_tree: &merged_tree,
+                known_schema_names,
+                bookmark_target_conflicted: false,
+            };
+            validate(&snapshot).map_err(PublicationError::Rejected)?;
+        }
 
         let signature = author_signature(author);
         let mut tx = jj_repo.start_transaction();
         Self::record_author(&mut tx, author);
+        for (key, value) in operation_attributes {
+            if !key.is_empty() {
+                tx.set_attribute(key, value);
+            }
+        }
         let commit = Self::map_jj(
             self.store.block_on(
                 tx.repo_mut()
                     .new_commit(vec![dst_id.clone(), src_id.clone()], merged_tree)
                     .set_author(signature.clone())
                     .set_committer(signature)
-                    .set_description(format!("merge {src} into {dst}"))
+                    .set_description(message)
                     .write(),
             ),
         )?;
         self.set_bookmark_in_tx(&mut tx, dst, commit.id().clone());
         Self::map_jj(self.store.block_on(tx.repo_mut().add_head(&commit)))?;
-        self.commit_tx(tx, &format!("merge {src} into {dst}"))?;
+        let operation_id = self.commit_tx(tx, message)?;
 
         Ok(WriteResult {
             commit_id: commit.id().hex(),
             change_id: commit.change_id().reverse_hex(),
+            operation_id,
             conflicted_decls: conflicted,
         })
     }
@@ -1083,18 +1950,27 @@ impl Jj {
     // ── GC ────────────────────────────────────────────────────────────────────
 
     /// Mark-and-sweep garbage collection over the [`ObjectDb`]: marks every
-    /// object reachable from the repos' bookmark/tag/head targets and the full
-    /// op-log (so undo keeps working), then sweeps unreachable
-    /// File/Tree/Commit/View objects. Returns the number of objects swept.
+    /// object reachable from every repository present in the shared store plus
+    /// the explicitly requested roots. The full op-log remains a root so undo
+    /// keeps working. Only then does it sweep unreachable File/Tree/Commit/View
+    /// objects. Returns the number of objects swept.
     pub fn gc(&self, repos: &[(String, String)]) -> JjResult<usize> {
-        use std::collections::HashSet;
+        use std::collections::{BTreeSet, HashSet};
 
+        let _guard = self.gc_guard()?;
         let mut reachable_commits: HashSet<String> = HashSet::new();
         let mut reachable_views: HashSet<String> = HashSet::new();
+        let mut repo_keys: BTreeSet<String> = self.store.db.list_repo_keys()?.into_iter().collect();
+        repo_keys.extend(
+            repos
+                .iter()
+                .map(|(project, repo)| Self::repo_key(project, repo)),
+        );
+        let mut any_repo = None;
 
-        for (project, repo) in repos {
-            let repo_key = Self::repo_key(project, repo);
+        for repo_key in repo_keys {
             let jj_repo = self.store.load_repo(&repo_key)?;
+            any_repo.get_or_insert_with(|| jj_repo.clone());
             let loader = jj_repo.loader();
             let root_op_id = loader.op_store().root_operation_id().clone();
 
@@ -1129,8 +2005,8 @@ impl Jj {
         // Walk commit ancestry → mark commits + their root trees + files.
         let mut reachable_trees: HashSet<String> = HashSet::new();
         let mut reachable_files: HashSet<String> = HashSet::new();
-        let any_repo = match repos.first() {
-            Some((p, r)) => self.store.load_repo(&Self::repo_key(p, r))?,
+        let any_repo = match any_repo {
+            Some(repo) => repo,
             None => return Ok(0),
         };
         let root_id = any_repo.store().root_commit_id().clone();

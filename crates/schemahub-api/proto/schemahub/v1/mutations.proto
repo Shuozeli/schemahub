@@ -37,6 +37,8 @@ message ProtobufMutation {
     ProtoAddRpc        add_rpc        = 32;
     ProtoRemoveRpc     remove_rpc     = 33;
     ProtoRenameRpc     rename_rpc     = 34;
+    ProtoRenameService rename_service = 35;
+    ProtoChangeRpcType change_rpc_type = 36;
 
     // Import mutations
     ProtoUpdateImport  update_import  = 40;
@@ -102,8 +104,8 @@ message ProtoAddMessage {
 
 message ProtoRemoveMessage {
   string message_name = 1;
-  // Rejected if any field in the same schema references this message type,
-  // unless --force is set.
+  // Rejected if any declaration in the final same-file schema state references
+  // this message type. Force bypasses compatibility policy, not integrity.
 }
 
 message ProtoRenameMessage {
@@ -176,15 +178,29 @@ message ProtoRenameRpc {
   string new_rpc_name = 3;
 }
 
+message ProtoRenameService {
+  string old_name = 1;
+  string new_name = 2;
+}
+
+message ProtoChangeRpcType {
+  string service_name      = 1;
+  string rpc_name          = 2;
+  string new_request_type  = 3;
+  string new_response_type = 4;
+}
+
 // ── Protobuf import mutations ─────────────────────────────────────────────────
 
 message ProtoUpdateImport {
   // Logical path of the imported schema: "project/repo/schema.proto"
   string import_path  = 1;
-  // Exactly one of the following must be set.
-  // If none are set, re-pins to the latest commit on the imported schema's default branch.
+  // At most one of the following may be set. If neither is set, the logical
+  // import remains unpinned (useful for ordinary same-repository source layouts).
   string to_commit    = 2;  // pin to a specific commit hash
   string to_tag       = 3;  // pin to a specific tag name
+  // Remove the import instead of adding or updating it. Pins must be empty.
+  bool   remove       = 4;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -199,6 +215,7 @@ message FlatBuffersMutation {
     FbsAddField      add_field      = 2;
     FbsDeprecateField deprecate_field = 3;
     FbsRenameField   rename_field   = 4;
+    FbsChangeFieldType change_field_type = 5;
     // Note: RemoveField and ReorderFields are always rejected for FlatBuffers.
 
     // Table mutations
@@ -209,11 +226,17 @@ message FlatBuffersMutation {
     // Enum mutations
     FbsAddEnum       add_enum       = 20;
     FbsAddEnumValue  add_enum_value = 21;
+    FbsRemoveEnum    remove_enum    = 22;
+    FbsRenameEnum    rename_enum    = 23;
+    FbsRemoveEnumValue remove_enum_value = 24;
+    FbsRenameEnumValue rename_enum_value = 25;
 
     // Union mutations
     FbsAddUnion            add_union             = 30;
     FbsAddUnionMember      add_union_member      = 31;
     FbsRemoveUnionMember   remove_union_member   = 32;
+    FbsRemoveUnion         remove_union           = 33;
+    FbsRenameUnion         rename_union           = 34;
 
     // Import mutations
     FbsUpdateImport  update_import  = 40;
@@ -248,6 +271,12 @@ message FbsRenameField {
   string table_name     = 1;
   string old_field_name = 2;
   string new_field_name = 3;
+}
+
+message FbsChangeFieldType {
+  string table_name = 1;
+  string field_name = 2;
+  string new_type   = 3;
 }
 
 // ── FlatBuffers table mutations ───────────────────────────────────────────────
@@ -285,6 +314,26 @@ message FbsAddEnumValue {
   string doc_comment = 4;
 }
 
+message FbsRemoveEnum {
+  string enum_name = 1;
+}
+
+message FbsRenameEnum {
+  string old_name = 1;
+  string new_name = 2;
+}
+
+message FbsRemoveEnumValue {
+  string enum_name  = 1;
+  string value_name = 2;
+}
+
+message FbsRenameEnumValue {
+  string enum_name      = 1;
+  string old_value_name = 2;
+  string new_value_name = 3;
+}
+
 // ── FlatBuffers union mutations ───────────────────────────────────────────────
 
 message FbsAddUnion {
@@ -303,12 +352,25 @@ message FbsRemoveUnionMember {
   string member_type = 2;  // table name to remove from the union
 }
 
+message FbsRemoveUnion {
+  string union_name = 1;
+}
+
+message FbsRenameUnion {
+  string old_name = 1;
+  string new_name = 2;
+}
+
 // ── FlatBuffers import mutations ──────────────────────────────────────────────
 
 message FbsUpdateImport {
   string import_path = 1;  // "project/repo/schema.fbs"
+  // At most one pin may be set. Tags are resolved to immutable commit IDs by
+  // the server before the mutation reaches the compiler.
   string to_commit   = 2;
   string to_tag      = 3;
+  // Removal requires both pin fields to be empty.
+  bool   remove      = 4;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -23,10 +23,16 @@ service ExplorationService {
   // Follow a field's type reference, potentially crossing import boundaries.
   rpc FollowType(FollowTypeRequest) returns (FollowTypeResponse);
 
-  // List all schemas imported by a schema, at their pinned resolved_commit.
+  // List normalized direct or transitive imports. Pinned edges retain their
+  // stored commit; live edges resolve to one immutable repository snapshot for
+  // this call. Unavailable external/builtin targets remain explicit edges.
   rpc ListDependencies(ListDependenciesRequest) returns (ListDependenciesResponse);
 
-  // Search for declarations by name across schemas and repos.
+  // Find direct imports to one schema across every repository visible to the
+  // caller. Each repository is read at one immutable default-bookmark snapshot.
+  rpc ListDependents(ListDependentsRequest) returns (ListDependentsResponse);
+
+  // Search for declarations by name across schemas in one repository.
   rpc Search(SearchRequest) returns (SearchResponse);
 }
 
@@ -40,6 +46,8 @@ message ListSchemasRequest {
 
 message ListSchemasResponse {
   repeated SchemaInfo schemas = 1;
+  // Exact immutable repository snapshot used for the listing.
+  string at_commit = 2;
 }
 
 // ── ListDeclarations ──────────────────────────────────────────────────────────
@@ -55,6 +63,8 @@ message ListDeclarationsRequest {
 
 message ListDeclarationsResponse {
   repeated DeclSummary declarations = 1;
+  // Exact immutable repository snapshot used for every summary.
+  string at_commit = 2;
 }
 
 // ── GetDeclaration ────────────────────────────────────────────────────────────
@@ -86,7 +96,7 @@ message GetSchemaSourceRequest {
 }
 
 message GetSchemaSourceResponse {
-  // Raw source bytes as originally uploaded (UTF-8 text for .proto/.fbs/.yaml).
+  // Canonical reconstructed UTF-8 source. Raw uploaded text is not stored.
   bytes  source     = 1;
   // The commit hash that was actually resolved.
   string at_commit  = 2;
@@ -112,6 +122,13 @@ message FollowTypeResponse {
   string resolved_commit      = 4;  // the pinned import commit that was followed
   DeclSummary summary         = 5;
   bytes       detail          = 6;
+  // Exact immutable snapshot of the declaration containing the field.
+  string      source_commit   = 7;
+  // True when resolution followed a stored immutable import pin. False for a
+  // local declaration or live import resolved at request time.
+  bool        pinned          = 8;
+  // Exact logical import path followed; empty for a same-schema declaration.
+  string      import_path     = 9;
 }
 
 // ── ListDependencies ──────────────────────────────────────────────────────────
@@ -128,6 +145,8 @@ message ListDependenciesRequest {
 
 message ListDependenciesResponse {
   repeated DependencyEntry dependencies = 1;
+  // Exact immutable importing-repository snapshot used for the traversal root.
+  string at_commit = 2;
 }
 
 message DependencyEntry {
@@ -137,14 +156,61 @@ message DependencyEntry {
   string imported_repo     = 4;
   string imported_schema   = 5;
   string imported_decl     = 6;
-  string resolved_commit   = 7;  // the pinned commit hash
+  string resolved_commit   = 7;  // stored pin; empty for a live import
+  bool   pinned            = 8;
+  string import_path       = 9;  // exact logical path stored by the compiler
+  string importing_project = 10;
+  string importing_repo    = 11;
+  string importing_commit  = 12; // exact snapshot containing this edge
+  string target_commit     = 13; // exact target snapshot when resolved
+  // False when a referenced external/builtin schema is absent, archived, or
+  // unreadable to the caller. Such an edge is returned but not traversed.
+  bool   resolved          = 14;
+}
+
+// ── ListDependents ────────────────────────────────────────────────────────────
+
+message ListDependentsRequest {
+  string project     = 1;
+  string repo        = 2;
+  string schema_path = 3;
+}
+
+message ListDependentsResponse {
+  // Direct import edges only. Callers coordinate downstream changes
+  // explicitly; SchemaHub does not rewrite another repository.
+  repeated DependentEntry dependents = 1;
+  // One immutable snapshot per visible, non-empty repository inspected. There
+  // is no atomic global snapshot across repositories.
+  repeated DependencyScanSnapshot snapshots = 2;
+  uint32 schemas_scanned = 3;
+}
+
+message DependentEntry {
+  string importing_project  = 1;
+  string importing_repo     = 2;
+  string importing_schema   = 3;
+  string importing_decl     = 4;  // empty when the format records imports at file level
+  string importing_bookmark = 5;
+  string importing_commit   = 6;
+  string import_path        = 7;  // exact logical path stored by the compiler
+  string imported_decl      = 8;
+  string resolved_commit    = 9;  // empty for a live/unpinned import
+  bool   pinned             = 10;
+}
+
+message DependencyScanSnapshot {
+  string project   = 1;
+  string repo      = 2;
+  string bookmark  = 3;
+  string commit_id = 4;
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
 message SearchRequest {
   string   query   = 1;  // declaration name prefix to search for
-  // Optional scope filters. If omitted, searches all projects/repos visible to caller.
+  // Required repository scope.
   string   project = 2;
   string   repo    = 3;
   DeclKind kind    = 4;  // filter by kind; UNSPECIFIED = all kinds
@@ -156,6 +222,8 @@ message SearchRequest {
 
 message SearchResponse {
   repeated SearchResult results = 1;
+  // Exact immutable repository snapshot searched.
+  string at_commit = 2;
 }
 
 message SearchResult {

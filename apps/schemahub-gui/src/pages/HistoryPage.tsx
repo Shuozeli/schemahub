@@ -1,14 +1,20 @@
-import { Paper, Stack, Table, Tabs, Text } from '@mantine/core';
+import { Alert, Paper, Stack, Table, Tabs, Text } from '@mantine/core';
 import { useParams, useSearchParams } from 'react-router-dom';
 
-import { useHistory } from '../api/queries';
+import { useHistory, useRepoDashboard, useRepository } from '../api/queries';
 import { ResourceHeader } from '../components/ResourceHeader';
 
 export function HistoryPage() {
-  const { project = 'acme', repo = 'commerce' } = useParams();
+  const { project = '', repo = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const refName = searchParams.get('ref') || 'main';
-  const { data, isLoading } = useHistory(project, repo, refName);
+  const { data: repository } = useRepository(project, repo);
+  const refName = searchParams.get('ref') || repository?.defaultBranch || '';
+  const { data, error, isLoading } = useHistory(project, repo, refName);
+  const { data: dashboard } = useRepoDashboard(project, repo, refName);
+
+  if (error) {
+    return <Alert color="red">{error.message}</Alert>;
+  }
 
   return (
     <Stack>
@@ -17,6 +23,10 @@ export function HistoryPage() {
         title="History"
         subtitle="Content commits and JJ-style operation audit log."
         refName={refName}
+        refs={[
+          ...(dashboard?.branches ?? []),
+          ...(dashboard?.tags ?? []).map((tag) => `tag:${tag}`),
+        ]}
         onRefChange={(value) => setSearchParams({ ref: value })}
       />
 
@@ -94,4 +104,3 @@ export function HistoryPage() {
     </Stack>
   );
 }
-

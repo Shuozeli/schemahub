@@ -1,5 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = "proto";
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    std::env::set_var("PROTOC", protoc);
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
@@ -17,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/schemahub/v1/project_service.proto",
                 "proto/schemahub/v1/admin_service.proto",
                 "proto/schemahub/v1/history_service.proto",
+                "proto/schemahub/v1/change_service.proto",
+                "proto/schemahub/v1/serving_service.proto",
             ],
             &[proto_dir],
         )?;

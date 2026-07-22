@@ -663,7 +663,7 @@ async fn rich_protobuf_fixture_preserves_business_schema_features_and_imports() 
     }
 
     // Assert: imports are tracked as dependencies.
-    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.imported_schema).collect();
+    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.import_path).collect();
     assert!(
         dep_paths.contains(&"google/protobuf/timestamp.proto".to_string()),
         "timestamp dependency missing: {dep_paths:?}"
@@ -728,8 +728,12 @@ async fn rich_flatbuffers_fixture_preserves_catalog_schema_features() {
     for needle in [
         "include \"common/money.fbs\"",
         "namespace commerce.catalog",
+        "attribute \"priority\"",
         "enum Availability",
         "struct GeoPoint",
+        "struct Transform",
+        "values: [float:16]",
+        "force_align: 16",
         "table Supplier",
         "table Product",
         "table Category",
@@ -739,6 +743,8 @@ async fn rich_flatbuffers_fixture_preserves_catalog_schema_features() {
         "category: Category",
         "tags: [string]",
         "related: [Product]",
+        "priority: 5",
+        "transform: Transform",
         "(required",
         "(deprecated",
         "(key",
@@ -760,12 +766,13 @@ async fn rich_flatbuffers_fixture_preserves_catalog_schema_features() {
     };
     assert_eq!(kind_of("Availability"), pb::DeclKind::FbsEnum as i32);
     assert_eq!(kind_of("GeoPoint"), pb::DeclKind::Struct as i32);
+    assert_eq!(kind_of("Transform"), pb::DeclKind::Struct as i32);
     assert_eq!(kind_of("Product"), pb::DeclKind::Table as i32);
     assert_eq!(kind_of("CatalogEntity"), pb::DeclKind::Union as i32);
     assert_eq!(kind_of("CatalogService"), pb::DeclKind::Service as i32);
 
     // Assert: includes are tracked as dependencies.
-    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.imported_schema).collect();
+    let dep_paths: Vec<String> = deps.into_iter().map(|d| d.import_path).collect();
     assert!(
         dep_paths.contains(&"common/money.fbs".to_string()),
         "include dependency missing: {dep_paths:?}"

@@ -209,6 +209,201 @@ fn parse_rejects_swagger_2() {
     assert!(result.is_err(), "must reject non-3.x documents");
 }
 
+#[test]
+fn parse_rejects_unknown_json_schema_type() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: "Unknown type", version: "1" }
+paths: {}
+components:
+  schemas:
+    Event:
+      type: tuple
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    let error = result.expect_err("unknown schema type must not be silently discarded");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown JsonSchemaType variant: \"tuple\""),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_rejects_non_string_component_name() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: "Numeric component", version: "1" }
+paths: {}
+components:
+  schemas:
+    7:
+      type: string
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    let error = result.expect_err("numeric component name must not become an empty key");
+    assert!(
+        error
+            .to_string()
+            .contains("components.schemas key must be a string"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_rejects_unknown_parameter_location() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: "Unknown location", version: "1" }
+paths:
+  /events:
+    get:
+      parameters:
+        - name: tenant
+          in: database
+      responses:
+        204:
+          description: No content
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    let error = result.expect_err("unknown parameter location must not default to query");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown ParameterLocation variant: \"database\""),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_rejects_non_object_path_item() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: "Malformed path", version: "1" }
+paths:
+  /events: []
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    let error = result.expect_err("malformed path must not become an empty declaration");
+    assert!(
+        error
+            .to_string()
+            .contains("path \"/events\" must be an object"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_rejects_standalone_path_item_ref_outside_selected_ast() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: Unsupported alias, version: "1.0.0" }
+paths:
+  /users:
+    $ref: 'common.yaml#/paths/~1users'
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_rejects_standalone_component_schema_ref_outside_selected_ast() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: Unsupported alias, version: "1.0.0" }
+paths: {}
+components:
+  schemas:
+    User:
+      $ref: 'common.yaml#/components/schemas/User'
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_rejects_standalone_component_request_body_ref_outside_selected_ast() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: Unsupported alias, version: "1.0.0" }
+paths: {}
+components:
+  requestBodies:
+    CreateUser:
+      $ref: 'common.yaml#/components/requestBodies/CreateUser'
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_accepts_unquoted_numeric_response_status() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: "Numeric response", version: "1" }
+paths:
+  /events:
+    get:
+      responses:
+        200:
+          description: Success
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(
+        result.is_ok(),
+        "numeric YAML response key should parse: {result:?}"
+    );
+}
+
 // ── P0: round-trip ──────────────────────────────────────────────────────────
 
 #[test]
@@ -350,19 +545,201 @@ fn decl_detail_renders_named_declaration() {
 }
 
 #[test]
-fn imports_on_metadata_is_empty() {
+fn imports_are_empty_without_external_refs() {
     // Arrange
     let compiler = OpenApiCompiler::new();
     let parsed = compiler.parse(FULL).unwrap();
 
     // Act
-    let imports = compiler.imports(&parsed.meta).unwrap();
+    let imports = compiler.imports(&to_objects(parsed)).unwrap();
 
-    // Assert: external $ref imports are v2-modeled; none at document level.
+    // Assert
     assert!(
         imports.is_empty(),
-        "expected no document-level imports: {imports:?}"
+        "expected no external imports: {imports:?}"
     );
+}
+
+#[test]
+fn external_component_refs_round_trip_and_form_deduplicated_imports() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info:
+  title: External refs
+  version: "1.0.0"
+paths:
+  /orders:
+    parameters:
+      - $ref: 'shared/common.yaml#/components/parameters/Tenant'
+    post:
+      requestBody:
+        $ref: 'shared/common.yaml#/components/requestBodies/CreateOrder'
+      responses:
+        '200':
+          $ref: 'shared/common.yaml#/components/responses/OrderCreated'
+        '400':
+          description: Invalid order
+          content:
+            application/json:
+              schema:
+                $ref: 'acme/models/errors.yaml#/components/schemas/Error'
+components:
+  schemas:
+    Order:
+      allOf:
+        - $ref: 'shared/common.yaml#/components/schemas/Base~1Order'
+        - $ref: 'shared/common.yaml#/components/schemas/Base~1Order'
+"#;
+
+    // Act
+    let objects = to_objects(compiler.parse(source).unwrap());
+    let imports = compiler.imports(&objects).unwrap();
+    let printed = compiler.print(&objects).unwrap();
+    let reparsed = to_objects(compiler.parse(&printed).unwrap());
+
+    // Assert
+    let coordinates: Vec<_> = imports
+        .iter()
+        .map(|import| {
+            (
+                import.path.as_str(),
+                import.resolved_commit.as_str(),
+                import.decl_name.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        coordinates,
+        vec![
+            ("acme/models/errors.yaml", "", "schema:Error"),
+            ("shared/common.yaml", "", "param:Tenant"),
+            ("shared/common.yaml", "", "requestBody:CreateOrder"),
+            ("shared/common.yaml", "", "response:OrderCreated"),
+            ("shared/common.yaml", "", "schema:Base/Order"),
+        ]
+    );
+    assert!(printed.contains("$ref: 'shared/common.yaml#/components/schemas/Base~1Order'"));
+    assert_eq!(compiler.imports(&reparsed).unwrap(), imports);
+}
+
+#[test]
+fn type_refs_preserve_external_component_coordinate() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: External refs, version: "1.0.0" }
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: 'provider/contracts.yaml#/components/schemas/Order'
+"#;
+    let objects = to_objects(compiler.parse(source).unwrap());
+    let path = objects.decls.get("path:/orders").unwrap();
+
+    // Act
+    let refs = compiler.type_refs(path).unwrap();
+
+    // Assert
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "schema:Order");
+    let import = refs[0].import.as_ref().expect("external import coordinate");
+    assert_eq!(import.path, "provider/contracts.yaml");
+    assert_eq!(import.decl_name, "schema:Order");
+    assert!(import.resolved_commit.is_empty());
+}
+
+#[test]
+fn field_type_ref_preserves_external_component_coordinate() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: External refs, version: "1.0.0" }
+paths: {}
+components:
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        order:
+          $ref: 'provider/contracts.yaml#/components/schemas/Order'
+"#;
+    let objects = to_objects(compiler.parse(source).unwrap());
+    let envelope = objects.decls.get("schema:Envelope").unwrap();
+
+    // Act
+    let reference = compiler
+        .field_type_ref(envelope, "order")
+        .unwrap()
+        .expect("named external type");
+
+    // Assert
+    assert_eq!(reference.name, "schema:Order");
+    let import = reference.import.expect("external import coordinate");
+    assert_eq!(import.path, "provider/contracts.yaml");
+    assert_eq!(import.decl_name, "schema:Order");
+}
+
+#[test]
+fn parser_rejects_network_external_ref_instead_of_misrouting_it() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: External refs, version: "1.0.0" }
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: 'https://example.com/contracts.yaml#/components/schemas/Order'
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(result.is_err());
+}
+
+#[test]
+fn parser_rejects_ref_siblings_instead_of_dropping_constraints() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let source = r#"
+openapi: "3.1.0"
+info: { title: Ref siblings, version: "1.0.0" }
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: 'contracts.yaml#/components/schemas/Order'
+                maxProperties: 4
+"#;
+
+    // Act
+    let result = compiler.parse(source);
+
+    // Assert
+    assert!(result.is_err());
 }
 
 #[test]
@@ -399,6 +776,42 @@ fn type_refs_resolves_response_ref() {
         names.contains(&"response:NotFound"),
         "expected response:NotFound: {names:?}"
     );
+}
+
+#[test]
+fn field_type_ref_selects_the_requested_component_property() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let objects = to_objects(
+        compiler
+            .parse(
+                r#"
+openapi: "3.1.0"
+info: { title: "Types", version: "1" }
+paths: {}
+components:
+  schemas:
+    Address:
+      type: object
+    User:
+      type: object
+      properties:
+        address:
+          $ref: '#/components/schemas/Address'
+"#,
+            )
+            .expect("parse OpenAPI"),
+    );
+
+    // Act
+    let reference = compiler
+        .field_type_ref(objects.decls.get("schema:User").unwrap(), "address")
+        .expect("read property type")
+        .expect("address has a named type");
+
+    // Assert
+    assert_eq!(reference.name, "schema:Address");
+    assert!(reference.import.is_none());
 }
 
 // ── P1: diff ──────────────────────────────────────────────────────────────────
@@ -849,6 +1262,50 @@ fn mutation_add_component_schema_upserts() {
 
     // Assert
     assert_eq!(effect.upserts[0].0, "schema:Order");
+}
+
+#[test]
+fn mutation_remove_component_schema_rejects_local_references() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let objects = to_objects(compiler.parse(FULL).expect("parse full document"));
+    let op = OpenApiOp::RemoveComponentSchema {
+        schema_name: "User".into(),
+    };
+
+    // Act
+    let result = compiler.apply_mutation(&objects, &make_mutation(&op));
+
+    // Assert
+    let error = result.expect_err("referenced component removal must fail");
+    assert!(
+        error.to_string().contains("referenced by path:/users"),
+        "{error}"
+    );
+}
+
+#[test]
+fn transaction_checks_component_references_on_final_document() {
+    // Arrange
+    let compiler = OpenApiCompiler::new();
+    let objects = to_objects(compiler.parse(FULL).expect("parse full document"));
+    let ops = [
+        make_mutation(&OpenApiOp::RemoveComponentSchema {
+            schema_name: "User".into(),
+        }),
+        make_mutation(&OpenApiOp::PushDocument {
+            source: MINIMAL.into(),
+        }),
+    ];
+
+    // Act
+    let effect = compiler
+        .apply_mutations(&objects, &ops)
+        .expect("final document has no dangling reference");
+
+    // Assert
+    assert!(effect.removes.contains(&"schema:User".to_string()));
+    assert!(effect.upserts.iter().any(|(name, _)| name == "path:/users"));
 }
 
 #[test]

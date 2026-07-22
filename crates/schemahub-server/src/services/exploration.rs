@@ -1,25 +1,22 @@
 //! `ExplorationService` — the read API (design.md §9). Maps each RPC onto the
 //! corresponding `Core` exploration method.
 //!
-//! Note: the request's `at` VersionRef is resolved to a full `RefSpec` via
-//! `wire::version_ref_to_refspec` (the same helper `RefService.Diff` uses), so
-//! branch, tag, and commit refs are all pinned to the correct historical
-//! snapshot. An unset `at` defaults to the "main" bookmark.
+//! Each request's `at` VersionRef preserves an explicit branch, tag, or commit.
+//! An omitted ref uses the repository's configured default bookmark, and Core
+//! resolves it once to an immutable, repository-owned snapshot before reading.
 
 use std::sync::Arc;
 
 use schemahub_core::Core;
-use schemahub_types::SchemaPath;
+use schemahub_types::{Action, SchemaPath};
 use tonic::{Request, Response, Status};
 
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::exploration_service_server::ExplorationService;
 
 use crate::error::to_status;
-use crate::services::token_from;
+use crate::services::{refspec_or_repository_default, token_from};
 use crate::wire;
-
-const DEFAULT_BOOKMARK: &str = "main";
 
 pub struct ExplorationHandler {
     core: Arc<Core>,
@@ -39,10 +36,17 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::ListSchemasResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
-        let names = self
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let (names, at_commit) = self
             .core
-            .list_schemas(&r.project, &r.repo, &at, token.as_deref())
+            .list_schemas_resolved(&r.project, &r.repo, &at, token.as_deref())
             .map_err(to_status)?;
         let schemas = names
             .into_iter()
@@ -53,11 +57,14 @@ impl ExplorationService for ExplorationHandler {
                 pb::SchemaInfo {
                     name,
                     format: format as i32,
-                    head_blob: String::new(),
+                    ..Default::default()
                 }
             })
             .collect();
-        Ok(Response::new(pb::ListSchemasResponse { schemas }))
+        Ok(Response::new(pb::ListSchemasResponse {
+            schemas,
+            at_commit,
+        }))
     }
 
     async fn list_declarations(
@@ -66,14 +73,24 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::ListDeclarationsResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        let summaries = self
+        let (summaries, at_commit) = self
             .core
-            .list_declarations(&schema, &at, token.as_deref())
+            .list_declarations_resolved(&schema, &at, token.as_deref())
             .map_err(to_status)?;
         let declarations = summaries.iter().map(wire::decl_summary_to_pb).collect();
-        Ok(Response::new(pb::ListDeclarationsResponse { declarations }))
+        Ok(Response::new(pb::ListDeclarationsResponse {
+            declarations,
+            at_commit,
+        }))
     }
 
     async fn get_declaration(
@@ -82,25 +99,23 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::GetDeclarationResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        // Summary (list + filter by name) and detail.
-        let summaries = self
+        let (summary, detail, at_commit) = self
             .core
-            .list_declarations(&schema, &at, token.as_deref())
-            .map_err(to_status)?;
-        let summary = summaries
-            .iter()
-            .find(|s| s.name == r.declaration_name)
-            .map(wire::decl_summary_to_pb);
-        let detail = self
-            .core
-            .get_declaration(&schema, &at, &r.declaration_name, token.as_deref())
+            .get_declaration_resolved(&schema, &at, &r.declaration_name, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::GetDeclarationResponse {
-            summary,
+            summary: Some(wire::decl_summary_to_pb(&summary)),
             detail: detail.0.to_vec(),
-            at_commit: String::new(),
+            at_commit,
         }))
     }
 
@@ -110,15 +125,22 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::GetSchemaSourceResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        let source = self
+        let (at_commit, source) = self
             .core
-            .get_schema_source(&schema, &at, token.as_deref())
+            .get_schema_source_resolved(&schema, &at, token.as_deref())
             .map_err(to_status)?;
         Ok(Response::new(pb::GetSchemaSourceResponse {
             source: source.into_bytes(),
-            at_commit: String::new(),
+            at_commit,
         }))
     }
 
@@ -128,30 +150,35 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::FollowTypeResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        let (refs, imports) = self
+        let followed = self
             .core
-            .follow_type(&schema, &at, &r.declaration_name, token.as_deref())
+            .follow_field_type(
+                &schema,
+                &at,
+                &r.declaration_name,
+                &r.field_name,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        // Resolve the named field's type against imports where possible. The
-        // core returns the declaration's type refs + the file imports; we report
-        // the first import that matches a referenced type, else echo the request.
-        let referenced: Vec<String> = refs.into_iter().map(|t| t.name).collect();
-        let matched = imports
-            .iter()
-            .find(|imp| referenced.iter().any(|n| n.ends_with(&imp.decl_name)));
-        let (resolved_schema_path, resolved_commit) = match matched {
-            Some(imp) => (imp.path.clone(), imp.resolved_commit.clone()),
-            None => (r.schema_path.clone(), String::new()),
-        };
         Ok(Response::new(pb::FollowTypeResponse {
-            resolved_project: r.project,
-            resolved_repo: r.repo,
-            resolved_schema_path,
-            resolved_commit,
-            summary: None,
-            detail: Vec::new(),
+            resolved_project: followed.target_schema.project,
+            resolved_repo: followed.target_schema.repo,
+            resolved_schema_path: followed.target_schema.schema_name,
+            resolved_commit: followed.target_commit,
+            summary: Some(wire::decl_summary_to_pb(&followed.summary)),
+            detail: followed.detail.0.to_vec(),
+            source_commit: followed.source_commit,
+            pinned: followed.pinned,
+            import_path: followed.import_path,
         }))
     }
 
@@ -161,25 +188,100 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::ListDependenciesResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
         let schema = SchemaPath::new(&r.project, &r.repo, &r.schema_path);
-        let imports = self
+        let (edges, at_commit) = self
             .core
-            .list_dependencies(&schema, &at, r.transitive, token.as_deref())
+            .list_dependencies_detailed(&schema, &at, r.transitive, token.as_deref())
             .map_err(to_status)?;
-        let dependencies = imports
+        let dependencies = edges
             .into_iter()
-            .map(|imp| pb::DependencyEntry {
-                importing_schema: r.schema_path.clone(),
+            .map(|edge| pb::DependencyEntry {
+                importing_schema: edge.importing_schema.schema_name,
                 importing_decl: String::new(),
-                imported_project: String::new(),
-                imported_repo: String::new(),
-                imported_schema: imp.path,
-                imported_decl: imp.decl_name,
-                resolved_commit: imp.resolved_commit,
+                imported_project: edge.imported_schema.project,
+                imported_repo: edge.imported_schema.repo,
+                imported_schema: edge.imported_schema.schema_name,
+                imported_decl: edge.import.decl_name,
+                resolved_commit: edge.import.resolved_commit.clone(),
+                pinned: !edge.import.resolved_commit.is_empty(),
+                import_path: edge.import.path,
+                importing_project: edge.importing_schema.project,
+                importing_repo: edge.importing_schema.repo,
+                importing_commit: edge.importing_commit,
+                target_commit: edge.target_commit,
+                resolved: edge.resolved,
             })
             .collect();
-        Ok(Response::new(pb::ListDependenciesResponse { dependencies }))
+        Ok(Response::new(pb::ListDependenciesResponse {
+            dependencies,
+            at_commit,
+        }))
+    }
+
+    async fn list_dependents(
+        &self,
+        request: Request<pb::ListDependentsRequest>,
+    ) -> Result<Response<pb::ListDependentsResponse>, Status> {
+        let token = token_from(&request)?;
+        let r = request.into_inner();
+        let target = SchemaPath::new(r.project, r.repo, r.schema_path);
+        let core = self.core.clone();
+        let scan =
+            tokio::task::spawn_blocking(move || core.list_dependents(&target, token.as_deref()))
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        event = "schemahub.dependencies.scan_worker_failed",
+                        error = %error,
+                    );
+                    Status::internal("reverse-dependency scan worker failed")
+                })?
+                .map_err(to_status)?;
+        let dependents = scan
+            .dependents
+            .into_iter()
+            .map(|dependent| {
+                let pinned = !dependent.import.resolved_commit.is_empty();
+                pb::DependentEntry {
+                    importing_project: dependent.importing_schema.project,
+                    importing_repo: dependent.importing_schema.repo,
+                    importing_schema: dependent.importing_schema.schema_name,
+                    importing_decl: String::new(),
+                    importing_bookmark: dependent.importing_bookmark,
+                    importing_commit: dependent.importing_commit,
+                    import_path: dependent.import.path,
+                    imported_decl: dependent.import.decl_name,
+                    resolved_commit: dependent.import.resolved_commit,
+                    pinned,
+                }
+            })
+            .collect();
+        let snapshots = scan
+            .snapshots
+            .into_iter()
+            .map(|snapshot| pb::DependencyScanSnapshot {
+                project: snapshot.project,
+                repo: snapshot.repo,
+                bookmark: snapshot.bookmark,
+                commit_id: snapshot.commit_id,
+            })
+            .collect();
+        let schemas_scanned = u32::try_from(scan.schemas_scanned).map_err(|_| {
+            Status::internal("reverse-dependency schema count exceeds the wire range")
+        })?;
+        Ok(Response::new(pb::ListDependentsResponse {
+            dependents,
+            snapshots,
+            schemas_scanned,
+        }))
     }
 
     async fn search(
@@ -188,7 +290,7 @@ impl ExplorationService for ExplorationHandler {
     ) -> Result<Response<pb::SearchResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        // Search is repo-scoped in the core; require project+repo and use "main".
+        // Search is repo-scoped in the core and requires an explicit repository.
         if r.project.is_empty() || r.repo.is_empty() {
             return Err(Status::invalid_argument(
                 "search requires project and repo (cross-repo search is v2)",
@@ -196,10 +298,17 @@ impl ExplorationService for ExplorationHandler {
         }
         // Honor the optional `at` ref (branch / tag / commit). When omitted,
         // search at the repo's default bookmark — the previous behavior.
-        let at = wire::version_ref_to_refspec(&r.at, DEFAULT_BOOKMARK);
-        let hits = self
+        let at = refspec_or_repository_default(
+            &self.core,
+            &r.project,
+            &r.repo,
+            &r.at,
+            Action::Read,
+            token.as_deref(),
+        )?;
+        let (hits, at_commit) = self
             .core
-            .search_detailed(&r.project, &r.repo, &at, &r.query, token.as_deref())
+            .search_detailed_resolved(&r.project, &r.repo, &at, &r.query, token.as_deref())
             .map_err(to_status)?;
         let results = hits
             .into_iter()
@@ -210,7 +319,7 @@ impl ExplorationService for ExplorationHandler {
                 declaration: Some(wire::decl_summary_to_pb(&h.summary)),
             })
             .collect();
-        Ok(Response::new(pb::SearchResponse { results }))
+        Ok(Response::new(pb::SearchResponse { results, at_commit }))
     }
 }
 

@@ -1,11 +1,13 @@
 //! Unit tests for the jj-style JJ model (AAA style).
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use schemahub_types::{DeclBlob, MetaBlob, MutationEffect};
 
 use crate::object_db::{ObjectDb, ObjectKind};
-use crate::{Jj, MemoryObjectDb, RefSpec};
+use crate::{Jj, JjError, MemoryObjectDb, RefSpec, SchemaWrite};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -51,7 +53,185 @@ fn seed_two_decls(jj: &Jj) -> String {
     .commit_id
 }
 
+fn seed_foreign_commit(jj: &Jj) -> String {
+    jj.commit_write(
+        "other",
+        "repo",
+        "main",
+        "other.proto",
+        &RefSpec::bookmark("main"),
+        upsert("Other", "message Other {}"),
+        "bob",
+        "other repo commit",
+    )
+    .expect("commit other repo")
+    .commit_id
+}
+
 // ── Object round-trip ────────────────────────────────────────────────────────
+
+#[test]
+fn resolve_ref_or_root_returns_stable_base_for_fresh_and_existing_bookmarks() {
+    // Arrange
+    let jj = mem_jj();
+
+    // Act
+    let fresh = jj
+        .resolve_ref_or_root("proj", "repo", &RefSpec::bookmark("main"))
+        .expect("resolve fresh root");
+    let committed = seed_two_decls(&jj);
+    let existing = jj
+        .resolve_ref_or_root("proj", "repo", &RefSpec::bookmark("main"))
+        .expect("resolve bookmark");
+
+    // Assert
+    assert!(!fresh.is_empty());
+    assert_eq!(existing, committed);
+    assert_ne!(fresh, existing);
+}
+
+#[test]
+fn validate_revision_rejects_commit_from_another_repository() {
+    // Arrange
+    let jj = mem_jj();
+    let own_commit = seed_two_decls(&jj);
+    let other_commit = jj
+        .commit_write(
+            "other",
+            "repo",
+            "main",
+            "other.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Other", "message other"),
+            "bob",
+            "other repo commit",
+        )
+        .expect("commit other repo")
+        .commit_id;
+
+    // Act
+    let own = jj.validate_revision("proj", "repo", &own_commit);
+    let foreign = jj.validate_revision("proj", "repo", &other_commit);
+
+    // Assert
+    assert!(own.is_ok());
+    assert!(matches!(foreign, Err(crate::JjError::BadRef(_))));
+}
+
+#[test]
+fn raw_ref_resolution_rejects_commit_from_another_repository() {
+    // Arrange
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    let foreign = seed_foreign_commit(&jj);
+
+    // Act
+    let result = jj.resolve_ref_id("proj", "repo", &RefSpec::commit(foreign));
+
+    // Assert
+    assert!(matches!(result, Err(JjError::BadRef(_))));
+}
+
+#[test]
+fn raw_foreign_commit_cannot_be_published_as_a_bookmark() {
+    // Arrange
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    let foreign = seed_foreign_commit(&jj);
+
+    // Act
+    let result = jj.create_bookmark(
+        "proj",
+        "repo",
+        "smuggled",
+        &RefSpec::commit(foreign),
+        "alice",
+    );
+
+    // Assert
+    assert!(matches!(result, Err(JjError::BadRef(_))));
+    assert!(jj
+        .list_bookmarks("proj", "repo")
+        .expect("list bookmarks")
+        .into_iter()
+        .all(|(name, _)| name != "smuggled"));
+}
+
+#[test]
+fn raw_foreign_commit_cannot_be_published_as_a_tag() {
+    // Arrange
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    let foreign = seed_foreign_commit(&jj);
+
+    // Act
+    let result = jj.create_tag(
+        "proj",
+        "repo",
+        "smuggled",
+        &RefSpec::commit(foreign),
+        "alice",
+    );
+
+    // Assert
+    assert!(matches!(result, Err(JjError::BadRef(_))));
+    assert!(jj
+        .list_tags("proj", "repo")
+        .expect("list tags")
+        .into_iter()
+        .all(|(name, _)| name != "smuggled"));
+}
+
+#[test]
+fn correlated_schema_delete_removes_meta_and_is_discoverable_in_op_log() {
+    // Arrange
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    let attributes = BTreeMap::from([
+        (
+            "schemahub.change_record".to_string(),
+            "change-1".to_string(),
+        ),
+        (
+            "schemahub.apply_attempt".to_string(),
+            "attempt-1".to_string(),
+        ),
+    ]);
+
+    // Act
+    let write = jj
+        .commit_schema_changes(
+            "proj",
+            "repo",
+            "main",
+            &RefSpec::commit(base),
+            vec![SchemaWrite::Delete {
+                schema_path: "user.proto".to_string(),
+            }],
+            "alice",
+            "delete user schema",
+            attributes.clone(),
+        )
+        .expect("delete schema");
+    let deleted = jj.load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"));
+    let operation = jj
+        .find_operation_by_attributes("proj", "repo", &attributes)
+        .expect("search op log")
+        .expect("correlated operation");
+    let recovered = jj
+        .find_correlated_write("proj", "repo", "main", &attributes)
+        .expect("recover correlated write")
+        .expect("correlated write receipt");
+
+    // Assert
+    assert!(matches!(deleted, Err(crate::JjError::SchemaNotFound(_))));
+    assert_eq!(operation.op_id, write.operation_id);
+    assert_eq!(recovered, write);
+    assert_eq!(
+        operation.attributes.get("schemahub.change_record"),
+        Some(&"change-1".to_string())
+    );
+}
 
 #[test]
 fn object_roundtrip_returns_identical_bytes() {
@@ -83,6 +263,28 @@ fn put_object_is_content_addressed_and_dedups() {
     assert_eq!(db.list_objects(ObjectKind::File).unwrap().len(), 1);
 }
 
+#[test]
+fn create_ref_never_overwrites_a_concurrent_value() {
+    // Arrange
+    let db = MemoryObjectDb::new();
+
+    // Act
+    let first = db
+        .create_ref("proj/repo", "op_heads", b"root")
+        .expect("create ref");
+    let second = db
+        .create_ref("proj/repo", "op_heads", b"new-root")
+        .expect("repeat create");
+
+    // Assert
+    assert!(first);
+    assert!(!second);
+    assert_eq!(
+        db.get_ref("proj/repo", "op_heads").expect("read ref"),
+        Some(b"root".to_vec())
+    );
+}
+
 // ── Per-declaration commit + dedup ───────────────────────────────────────────
 
 #[test]
@@ -102,6 +304,45 @@ fn load_schema_reassembles_committed_declarations() {
     assert_eq!(
         schema.decls.get("UserRequest").unwrap().as_bytes(),
         b"msg req v1"
+    );
+}
+
+#[test]
+fn list_schemas_preserves_nested_schema_paths() {
+    // Arrange
+    let jj = mem_jj();
+    jj.commit_write_multi(
+        "proj",
+        "repo",
+        "main",
+        &RefSpec::bookmark("main"),
+        vec![
+            (
+                "common/types.proto".to_string(),
+                upsert("Common", "message common"),
+            ),
+            (
+                "orders/order.proto".to_string(),
+                upsert("Order", "message order"),
+            ),
+        ],
+        "alice",
+        "seed nested schemas",
+    )
+    .expect("commit nested schemas");
+
+    // Act
+    let schemas = jj
+        .list_schemas("proj", "repo", &RefSpec::bookmark("main"))
+        .expect("list nested schemas");
+
+    // Assert
+    assert_eq!(
+        schemas,
+        [
+            "common/types.proto".to_string(),
+            "orders/order.proto".to_string()
+        ]
     );
 }
 
@@ -240,6 +481,39 @@ fn each_write_appends_one_operation() {
     assert_eq!(ops.len(), 2);
     assert!(ops[0].description.contains("seed"));
     assert!(ops[1].description.contains("edit"));
+}
+
+#[test]
+fn bounded_operation_log_returns_only_the_latest_operations_in_order() {
+    // Arrange
+    let jj = mem_jj();
+    seed_two_decls(&jj);
+    for (author, message, body) in [
+        ("alice", "edit one", "msg req v2"),
+        ("agent:reviewer", "edit two", "msg req v3"),
+        ("bob", "edit three", "msg req v4"),
+    ] {
+        jj.commit_write(
+            "proj",
+            "repo",
+            "main",
+            "user.proto",
+            &RefSpec::bookmark("main"),
+            upsert("UserRequest", body),
+            author,
+            message,
+        )
+        .unwrap();
+    }
+    let expected = jj.list_operations("proj", "repo").unwrap().split_off(2);
+
+    // Act
+    let recent = jj.list_operations_tail("proj", "repo", 2).unwrap();
+
+    // Assert
+    assert_eq!(recent, expected);
+    assert!(recent[0].description.contains("edit two"));
+    assert!(recent[1].description.contains("edit three"));
 }
 
 #[test]
@@ -556,6 +830,91 @@ fn concurrent_edits_to_different_decls_merge_cleanly() {
 }
 
 #[test]
+fn shared_backend_serializes_validation_through_operation_publication() {
+    // Arrange: two independent Jj instances share one backend and stale base.
+    // Writer A pauses inside final-tree validation while holding the repository
+    // publication guard; writer B must not load/publish the same op head yet.
+    let db: Arc<dyn ObjectDb> = Arc::new(MemoryObjectDb::new());
+    let seed = Jj::new(db.clone());
+    let base = seed_two_decls(&seed);
+    let first = Arc::new(Jj::new(db.clone()));
+    let second = Arc::new(Jj::new(db));
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let first_base = base.clone();
+    let first_writer = {
+        let first = first.clone();
+        std::thread::spawn(move || {
+            first.commit_schema_changes_validated(
+                "proj",
+                "repo",
+                "main",
+                &RefSpec::commit(first_base),
+                vec![SchemaWrite::Patch {
+                    schema_path: "user.proto".to_string(),
+                    effect: upsert("UserRequest", "msg req from A"),
+                }],
+                "alice",
+                "writer A",
+                BTreeMap::new(),
+                |_| {
+                    entered_tx.send(()).map_err(|error| error.to_string())?;
+                    release_rx.recv().map_err(|error| error.to_string())
+                },
+            )
+        })
+    };
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer A entered validation");
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let second_writer = {
+        let second = second.clone();
+        std::thread::spawn(move || {
+            let result = second.commit_write(
+                "proj",
+                "repo",
+                "main",
+                "user.proto",
+                &RefSpec::commit(base),
+                upsert("UserStatus", "enum status from B"),
+                "bob",
+                "writer B",
+            );
+            finished_tx.send(result).expect("report writer B result");
+        })
+    };
+
+    // Act
+    let before_release = finished_rx.recv_timeout(Duration::from_millis(100));
+    release_tx.send(()).expect("release writer A");
+    let first_result = first_writer.join().expect("join writer A");
+    let second_result = finished_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer B finishes after release");
+    second_writer.join().expect("join writer B");
+
+    // Assert
+    assert!(before_release.is_err());
+    first_result.expect("writer A publishes");
+    assert!(second_result
+        .expect("writer B publishes")
+        .conflicted_decls
+        .is_empty());
+    let schema = second
+        .load_schema("proj", "repo", "user.proto", &RefSpec::bookmark("main"))
+        .expect("read serialized result");
+    assert_eq!(
+        schema.decls.get("UserRequest").expect("request").as_bytes(),
+        b"msg req from A"
+    );
+    assert_eq!(
+        schema.decls.get("UserStatus").expect("status").as_bytes(),
+        b"enum status from B"
+    );
+}
+
+#[test]
 fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
     // Arrange: shared base.
     let jj = mem_jj();
@@ -703,6 +1062,50 @@ fn create_and_list_tag() {
     assert_eq!(tags, vec![("v1.0.0".to_string(), base)]);
 }
 
+#[test]
+fn duplicate_tag_name_is_rejected_without_retargeting() {
+    // Arrange
+    let jj = mem_jj();
+    let initial = seed_two_decls(&jj);
+    jj.create_tag(
+        "proj",
+        "repo",
+        "release",
+        &RefSpec::commit(initial.clone()),
+        "alice",
+    )
+    .expect("create initial tag");
+    let advanced = jj
+        .commit_write(
+            "proj",
+            "repo",
+            "main",
+            "user.proto",
+            &RefSpec::bookmark("main"),
+            upsert("UserRequest", "advanced"),
+            "alice",
+            "advance main",
+        )
+        .expect("advance main")
+        .commit_id;
+
+    // Act
+    let result = jj.create_tag(
+        "proj",
+        "repo",
+        "release",
+        &RefSpec::commit(advanced),
+        "alice",
+    );
+
+    // Assert
+    assert!(matches!(result, Err(JjError::TagExists(name)) if name == "release"));
+    assert_eq!(
+        jj.list_tags("proj", "repo").unwrap(),
+        vec![("release".to_string(), initial)]
+    );
+}
+
 // ── Merge ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -844,6 +1247,221 @@ fn gc_sweeps_unreachable_objects_and_keeps_reachable_ones() {
     assert_eq!(req, reachable);
 }
 
+#[test]
+fn repo_scoped_gc_preserves_live_objects_from_every_repo_in_the_shared_store() {
+    // Arrange
+    let db = Arc::new(MemoryObjectDb::new());
+    let jj = Jj::new(db.clone());
+    jj.commit_write(
+        "alpha",
+        "schemas",
+        "main",
+        "alpha.proto",
+        &RefSpec::bookmark("main"),
+        upsert("Alpha", "alpha-live"),
+        "alice",
+        "seed alpha",
+    )
+    .unwrap();
+    jj.commit_write(
+        "beta",
+        "schemas",
+        "main",
+        "beta.proto",
+        &RefSpec::bookmark("main"),
+        upsert("Beta", "beta-live"),
+        "bob",
+        "seed beta",
+    )
+    .unwrap();
+    let beta_before = jj
+        .get_declaration(
+            "beta",
+            "schemas",
+            "beta.proto",
+            "Beta",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap();
+    let orphan = db
+        .put_object(ObjectKind::File, b"unreachable across every repo")
+        .unwrap();
+
+    // Act
+    let swept = jj
+        .gc(&[("alpha".to_string(), "schemas".to_string())])
+        .unwrap();
+
+    // Assert
+    assert!(swept >= 1);
+    assert!(!db.has_object(ObjectKind::File, &orphan).unwrap());
+    assert_eq!(
+        jj.get_declaration(
+            "beta",
+            "schemas",
+            "beta.proto",
+            "Beta",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap(),
+        beta_before
+    );
+}
+
+#[test]
+fn redb_gc_restart_drill_preserves_cross_repo_history_and_undo() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("schemahub.redb");
+    let expected_alpha_v1 = {
+        let db = Arc::new(crate::RedbObjectDb::open(&database_path).unwrap());
+        let jj = Jj::new(db.clone());
+        jj.commit_write(
+            "alpha",
+            "schemas",
+            "main",
+            "alpha.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Alpha", "alpha-v1"),
+            "alice",
+            "seed alpha",
+        )
+        .unwrap();
+        let alpha_v1 = jj
+            .get_declaration(
+                "alpha",
+                "schemas",
+                "alpha.proto",
+                "Alpha",
+                &RefSpec::bookmark("main"),
+            )
+            .unwrap();
+        jj.commit_write(
+            "alpha",
+            "schemas",
+            "main",
+            "alpha.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Alpha", "alpha-v2"),
+            "alice",
+            "update alpha",
+        )
+        .unwrap();
+        jj.commit_write(
+            "beta",
+            "schemas",
+            "main",
+            "beta.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Beta", "beta-live"),
+            "bob",
+            "seed beta",
+        )
+        .unwrap();
+        db.put_object(ObjectKind::File, b"orphan before recovery drill")
+            .unwrap();
+
+        // Act: collect, close the process-owned database, reopen, then use the
+        // retained operation log to recover the prior alpha revision.
+        assert!(
+            jj.gc(&[("alpha".to_string(), "schemas".to_string())])
+                .unwrap()
+                >= 1
+        );
+        alpha_v1
+    };
+    let restarted_db = Arc::new(crate::RedbObjectDb::open(&database_path).unwrap());
+    let restarted = Jj::new(restarted_db);
+    let beta_after_restart = restarted
+        .get_declaration(
+            "beta",
+            "schemas",
+            "beta.proto",
+            "Beta",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap();
+    restarted.undo("alpha", "schemas", "operator").unwrap();
+    let alpha_after_undo = restarted
+        .get_declaration(
+            "alpha",
+            "schemas",
+            "alpha.proto",
+            "Alpha",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap();
+
+    // Assert
+    assert_eq!(beta_after_restart, DeclBlob::new(b"beta-live".to_vec()));
+    assert_eq!(alpha_after_undo, expected_alpha_v1);
+}
+
+#[test]
+fn redb_offline_backup_restore_drill_recovers_the_snapshotted_revision() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("schemahub.redb");
+    let backup_path = directory.path().join("schemahub.backup.redb");
+    let restore_path = directory.path().join("schemahub.restore.redb");
+    let expected = {
+        let db = Arc::new(crate::RedbObjectDb::open(&source_path).unwrap());
+        let jj = Jj::new(db);
+        jj.commit_write(
+            "acme",
+            "schemas",
+            "main",
+            "event.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Event", "snapshot-v1"),
+            "operator",
+            "seed backup fixture",
+        )
+        .unwrap();
+        jj.get_declaration(
+            "acme",
+            "schemas",
+            "event.proto",
+            "Event",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap()
+    };
+
+    // Act
+    std::fs::copy(&source_path, &backup_path).unwrap();
+    {
+        let db = Arc::new(crate::RedbObjectDb::open(&source_path).unwrap());
+        let jj = Jj::new(db);
+        jj.commit_write(
+            "acme",
+            "schemas",
+            "main",
+            "event.proto",
+            &RefSpec::bookmark("main"),
+            upsert("Event", "post-backup-v2"),
+            "operator",
+            "mutate after backup",
+        )
+        .unwrap();
+    }
+    std::fs::copy(&backup_path, &restore_path).unwrap();
+    let restored_db = Arc::new(crate::RedbObjectDb::open(&restore_path).unwrap());
+    let restored = Jj::new(restored_db);
+    let actual = restored
+        .get_declaration(
+            "acme",
+            "schemas",
+            "event.proto",
+            "Event",
+            &RefSpec::bookmark("main"),
+        )
+        .unwrap();
+
+    // Assert
+    assert_eq!(actual, expected);
+}
+
 // ── redb parity smoke test ───────────────────────────────────────────────────
 
 #[test]
@@ -978,6 +1596,55 @@ fn commit_log_respects_the_limit() {
 
     // Assert
     assert_eq!(log.len(), 1);
+}
+
+#[test]
+fn schema_history_filter_detects_a_change_between_conflicted_trees() {
+    // Arrange: create a two-sided conflict, then add a third competing edit
+    // from the same clean base. Both resulting trees omit the conflicted
+    // declaration from normal schema loads, but their raw merged values differ.
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.commit_write(
+        "proj",
+        "repo",
+        "main",
+        "user.proto",
+        &RefSpec::commit(base.clone()),
+        upsert("UserRequest", "msg req from A"),
+        "alice",
+        "A",
+    )
+    .expect("first edit");
+    jj.commit_write(
+        "proj",
+        "repo",
+        "main",
+        "user.proto",
+        &RefSpec::commit(base.clone()),
+        upsert("UserRequest", "msg req from B"),
+        "bob",
+        "B",
+    )
+    .expect("second edit creates conflict");
+    let third = jj
+        .commit_write(
+            "proj",
+            "repo",
+            "main",
+            "user.proto",
+            &RefSpec::commit(base),
+            upsert("UserRequest", "msg req from C"),
+            "carol",
+            "C",
+        )
+        .expect("third edit extends conflict");
+
+    // Act
+    let touched = jj.commit_touches_schema("proj", "repo", &third.commit_id, "user.proto");
+
+    // Assert
+    assert!(touched.expect("inspect raw schema subtree"));
 }
 
 // ── Bookmark / tag deletion ──────────────────────────────────────────────────

@@ -1,6 +1,8 @@
-//! File-backed `RoleStore` + `ProjectStore` implementations — the default
-//! deployment surface for v1 (design.md §6: "Default role store: a
-//! `roles/<project>/<identity>` table, bootstrapped from `schemahub.toml`").
+//! Legacy JSON `RoleStore` + `ProjectStore` implementations.
+//!
+//! Production writes use the ObjectDb-backed stores. These implementations are
+//! retained for compatibility tests and for the server's one-time import from
+//! pre-0.5 installations.
 //!
 //! Persistence shape (one file per store, both under `<data_dir>`):
 //!
@@ -20,9 +22,7 @@
 //!
 //! Mutations rewrite the whole file atomically (tempfile in the same directory
 //! plus `rename`); both stores guard their in-memory state with a single
-//! `Mutex`. Writes are tiny (one map per project) and the registry is
-//! read-mostly, so the simple "load on startup, rewrite on change" model is
-//! fine for v1.
+//! `Mutex`.
 
 use std::collections::HashMap;
 use std::io;
@@ -31,7 +31,13 @@ use std::sync::Mutex;
 
 use schemahub_types::{Identity, Role};
 
-use crate::auth_store::{ProjectMeta, ProjectStore, RoleStore};
+use crate::auth_store::{
+    AccessStoreError, AccessStoreResult, ProjectMeta, ProjectStore, RoleStore,
+};
+
+fn access_error(error: io::Error) -> AccessStoreError {
+    AccessStoreError::Backend(error.to_string())
+}
 
 // ── FileRoleStore ────────────────────────────────────────────────────────────
 
@@ -70,21 +76,23 @@ impl FileRoleStore {
 }
 
 impl RoleStore for FileRoleStore {
-    fn get(&self, project: &str, identity: &Identity) -> Option<Role> {
-        let id = identity.id()?;
+    fn get(&self, project: &str, identity: &Identity) -> AccessStoreResult<Option<Role>> {
+        let Some(id) = identity.id() else {
+            return Ok(None);
+        };
         let s = self.state.lock().unwrap();
-        s.get(project).and_then(|m| m.get(id)).copied()
+        Ok(s.get(project).and_then(|m| m.get(id)).copied())
     }
 
-    fn set(&self, project: &str, identity_id: &str, role: Role) -> io::Result<()> {
+    fn set(&self, project: &str, identity_id: &str, role: Role) -> AccessStoreResult<()> {
         let mut s = self.state.lock().unwrap();
         s.entry(project.to_string())
             .or_default()
             .insert(identity_id.to_string(), role);
-        Self::persist_locked(&self.path, &s)
+        Self::persist_locked(&self.path, &s).map_err(access_error)
     }
 
-    fn remove(&self, project: &str, identity_id: &str) -> io::Result<()> {
+    fn remove(&self, project: &str, identity_id: &str) -> AccessStoreResult<()> {
         let mut s = self.state.lock().unwrap();
         if let Some(m) = s.get_mut(project) {
             m.remove(identity_id);
@@ -92,14 +100,14 @@ impl RoleStore for FileRoleStore {
                 s.remove(project);
             }
         }
-        Self::persist_locked(&self.path, &s)
+        Self::persist_locked(&self.path, &s).map_err(access_error)
     }
 
-    fn list_project(&self, project: &str) -> Vec<(String, Role)> {
+    fn list_project(&self, project: &str) -> AccessStoreResult<Vec<(String, Role)>> {
         let s = self.state.lock().unwrap();
-        s.get(project)
+        Ok(s.get(project)
             .map(|m| m.iter().map(|(id, r)| (id.clone(), *r)).collect())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 }
 
@@ -141,21 +149,64 @@ impl FileProjectStore {
 }
 
 impl ProjectStore for FileProjectStore {
-    fn get(&self, project: &str) -> Option<ProjectMeta> {
-        self.state.lock().unwrap().get(project).cloned()
+    fn get(&self, project: &str) -> AccessStoreResult<Option<ProjectMeta>> {
+        Ok(self.state.lock().unwrap().get(project).cloned())
     }
 
-    fn set(&self, meta: ProjectMeta) -> io::Result<()> {
+    fn create_with_owner(
+        &self,
+        _meta: ProjectMeta,
+        _owner_id: &str,
+    ) -> AccessStoreResult<ProjectMeta> {
+        Err(AccessStoreError::Backend(
+            "FileProjectStore cannot atomically create a project and owner; use ObjectDbProjectStore"
+                .to_string(),
+        ))
+    }
+
+    fn set(&self, mut meta: ProjectMeta) -> AccessStoreResult<()> {
         let mut s = self.state.lock().unwrap();
+        if meta.etag.is_empty() {
+            meta.etag = "v1".to_string();
+        }
         s.insert(meta.name.clone(), meta);
-        Self::persist_locked(&self.path, &s)
+        Self::persist_locked(&self.path, &s).map_err(access_error)
     }
 
-    fn list(&self) -> Vec<ProjectMeta> {
+    fn replace(
+        &self,
+        expected_etag: &str,
+        mut meta: ProjectMeta,
+    ) -> AccessStoreResult<ProjectMeta> {
+        let mut state = self.state.lock().unwrap();
+        let current = state
+            .get(&meta.name)
+            .ok_or_else(|| AccessStoreError::NotFound(meta.name.clone()))?;
+        if current.etag != expected_etag {
+            return Err(AccessStoreError::EtagMismatch {
+                name: meta.name,
+                expected: expected_etag.to_string(),
+                current: current.etag.clone(),
+            });
+        }
+        let version = current
+            .etag
+            .strip_prefix('v')
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                AccessStoreError::Backend(format!("invalid stored project etag: {}", current.etag))
+            })?;
+        meta.etag = format!("v{}", version + 1);
+        state.insert(meta.name.clone(), meta.clone());
+        Self::persist_locked(&self.path, &state).map_err(access_error)?;
+        Ok(meta)
+    }
+
+    fn list(&self) -> AccessStoreResult<Vec<ProjectMeta>> {
         let s = self.state.lock().unwrap();
         let mut list: Vec<ProjectMeta> = s.values().cloned().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
-        list
+        Ok(list)
     }
 }
 
@@ -201,8 +252,8 @@ mod tests {
 
         // Act
         let s = FileRoleStore::open(&path).unwrap();
-        let alice = s.get("acme", &Identity::user("alice"));
-        let bob = s.get("acme", &Identity::user("bob"));
+        let alice = s.get("acme", &Identity::user("alice")).unwrap();
+        let bob = s.get("acme", &Identity::user("bob")).unwrap();
 
         // Assert
         assert_eq!(alice, Some(Role::Owner));
@@ -220,8 +271,8 @@ mod tests {
         s.remove("acme", "alice").unwrap();
 
         // Assert
-        assert_eq!(s.get("acme", &Identity::user("alice")), None);
-        assert!(s.list_project("acme").is_empty());
+        assert_eq!(s.get("acme", &Identity::user("alice")).unwrap(), None);
+        assert!(s.list_project("acme").unwrap().is_empty());
     }
 
     #[test]
@@ -231,17 +282,13 @@ mod tests {
         let path = dir.path().join("projects.json");
         {
             let s = FileProjectStore::open(&path).unwrap();
-            s.set(ProjectMeta {
-                name: "acme".into(),
-                visibility: Visibility::Public,
-                creator: "alice".into(),
-            })
-            .unwrap();
+            s.set(ProjectMeta::new("acme", Visibility::Public, "alice", 1_000))
+                .unwrap();
         }
 
         // Act
         let s = FileProjectStore::open(&path).unwrap();
-        let meta = s.get("acme").unwrap();
+        let meta = s.get("acme").unwrap().unwrap();
 
         // Assert
         assert_eq!(meta.visibility, Visibility::Public);

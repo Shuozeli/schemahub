@@ -14,7 +14,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Code2, Download } from 'lucide-react';
 
 import { schemaHubClient } from '../api';
-import type { SchemaFormat } from '../api/types';
+import type { ArtifactDownload, ArtifactKind, SchemaFormat } from '../api/types';
 import { CodeViewer } from './CodeViewer';
 
 type CodegenPreviewProps = {
@@ -40,6 +40,7 @@ export function CodegenPreviewPanel({
 }: CodegenPreviewProps) {
   const [language, setLanguage] = useState<'rust' | 'typescript'>('rust');
   const [rustPluggableBuffer, setRustPluggableBuffer] = useState(false);
+  const [lastArtifact, setLastArtifact] = useState<ArtifactDownload>();
   const pluggableEnabled = format === 'flatbuffers' && language === 'rust';
 
   const preview = useMutation({
@@ -52,6 +53,22 @@ export function CodegenPreviewPanel({
         language,
         rustPluggableBuffer: pluggableEnabled && rustPluggableBuffer,
       }),
+  });
+  const artifact = useMutation({
+    mutationFn: (kind: ArtifactKind) =>
+      schemaHubClient.downloadArtifact({
+        project,
+        repo,
+        schemaPath,
+        ref: refName,
+        kind,
+        language: kind === 'generated-code' ? language : undefined,
+        rustPluggableBuffer: pluggableEnabled && rustPluggableBuffer,
+      }),
+    onSuccess: (download, kind) => {
+      setLastArtifact(download);
+      saveBlob(download.content, artifactFilename(schemaPath, kind, language));
+    },
   });
 
   const viewerLanguage = useMemo(
@@ -95,8 +112,30 @@ export function CodegenPreviewPanel({
             >
               Preview
             </Button>
-            <Button variant="light" leftSection={<Download size={16} />}>
+            <Button
+              variant="light"
+              leftSection={<Download size={16} />}
+              loading={artifact.isPending && artifact.variables === 'source'}
+              onClick={() => artifact.mutate('source')}
+            >
+              Source
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<Download size={16} />}
+              loading={artifact.isPending && artifact.variables === 'descriptors'}
+              onClick={() => artifact.mutate('descriptors')}
+            >
               Descriptor
+            </Button>
+            <Button
+              variant="light"
+              leftSection={<Download size={16} />}
+              loading={artifact.isPending && artifact.variables === 'generated-code'}
+              disabled={format === 'openapi'}
+              onClick={() => artifact.mutate('generated-code')}
+            >
+              Generated
             </Button>
           </Group>
         </Group>
@@ -105,6 +144,21 @@ export function CodegenPreviewPanel({
       {format === 'openapi' ? (
         <Alert color="yellow" title="Codegen unsupported">
           OpenAPI codegen is not implemented in SchemaHub v1. Descriptor preview remains available.
+        </Alert>
+      ) : null}
+
+      {artifact.error ? (
+        <Alert color="red" title="Artifact download failed">
+          {artifact.error.message}
+        </Alert>
+      ) : null}
+
+      {lastArtifact ? (
+        <Alert color="green" title="Immutable artifact downloaded">
+          Resolved <span className="mono">{lastArtifact.revision.resolvedFrom}</span> to commit{' '}
+          <span className="mono">{lastArtifact.revision.commitId}</span>. Artifact{' '}
+          <span className="mono">{lastArtifact.artifactDigest}</span>; closure{' '}
+          <span className="mono">{lastArtifact.closureDigest}</span>.
         </Alert>
       ) : null}
 
@@ -122,4 +176,25 @@ export function CodegenPreviewPanel({
       )}
     </Stack>
   );
+}
+
+function artifactFilename(
+  schemaPath: string,
+  kind: ArtifactKind,
+  language: 'rust' | 'typescript',
+) {
+  const sourceName = schemaPath.split('/').pop() || 'schema';
+  if (kind === 'source') return sourceName;
+  const stem = sourceName.replace(/\.[^.]+$/, '');
+  if (kind === 'descriptors') return `${stem}.schemahub.desc`;
+  return `${stem}.schemahub.${language === 'typescript' ? 'ts' : 'rs'}`;
+}
+
+function saveBlob(content: Blob, filename: string) {
+  const url = URL.createObjectURL(content);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }

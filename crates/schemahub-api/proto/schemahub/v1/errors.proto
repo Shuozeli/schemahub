@@ -9,7 +9,8 @@ import "schemahub/v1/enums.proto";
 // Embedded in gRPC status details[] so callers can inspect failures
 // programmatically rather than parsing error message strings.
 
-// Returned when base_revision does not match the current branch HEAD.
+// Legacy wire detail from the former branch-head CAS model. v2 validates that
+// base_revision belongs to the repository but accepts retained stale bases.
 // gRPC status: FAILED_PRECONDITION
 message ConflictDetail {
   string current_head  = 1;  // what the branch is actually at

@@ -182,7 +182,7 @@ pub struct SchemaRef {
 pub struct ExternalImport {
     /// Logical path: "project/repo/schema-file-name".
     pub path: String,
-    /// Pinned commit hash at the time the import was added/updated.
+    /// Pinned commit hash, or empty for a live source-text `$ref`.
     pub resolved_commit: String,
     /// The declaration name within the imported schema.
     pub decl_name: String,

@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use schemahub_api::schemahub_v1::{
     exploration_service_client::ExplorationServiceClient,
     schema_service_client::SchemaServiceClient, CreateSchemaRequest, GetSchemaSourceRequest,
-    SchemaFormat, VersionRef,
+    ListDependentsRequest, ListDependentsResponse, SchemaFormat, VersionRef,
 };
 use std::path::PathBuf;
 use tonic::transport::Channel;
@@ -58,6 +58,14 @@ pub enum SchemaAction {
         schema_path: String,
         #[arg(long, default_value = "main")]
         branch: String,
+    },
+    /// Find direct downstream imports across repositories visible to the caller
+    Dependents {
+        /// project/repo/schema_name
+        schema_path: String,
+        /// Emit stable machine-readable output for agents and automation
+        #[arg(long)]
+        json: bool,
     },
     /// Delete a schema from a branch
     Delete {
@@ -189,6 +197,51 @@ pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Res
                 .context("schema source is not valid UTF-8")?;
             print!("{source}");
         }
+        SchemaAction::Dependents { schema_path, json } => {
+            let (project, repo, schema_name) = parse_schema_path_3(&schema_path)?;
+            let mut client = ExplorationServiceClient::new(channel);
+            let response = client
+                .list_dependents(bearer(
+                    ListDependentsRequest {
+                        project,
+                        repo,
+                        schema_path: schema_name,
+                    },
+                    token,
+                )?)
+                .await
+                .context("ListDependents RPC")?
+                .into_inner();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&dependents_json(&schema_path, &response))?
+                );
+            } else if response.dependents.is_empty() {
+                println!(
+                    "No visible direct dependents ({} schemas across {} snapshots scanned).",
+                    response.schemas_scanned,
+                    response.snapshots.len()
+                );
+            } else {
+                for dependent in response.dependents {
+                    let pin = if dependent.pinned {
+                        format!("pinned {}", dependent.resolved_commit)
+                    } else {
+                        "live/unpinned".to_string()
+                    };
+                    println!(
+                        "{}/{}/{} @{} ({}, snapshot {})",
+                        dependent.importing_project,
+                        dependent.importing_repo,
+                        dependent.importing_schema,
+                        dependent.importing_bookmark,
+                        pin,
+                        dependent.importing_commit,
+                    );
+                }
+            }
+        }
         SchemaAction::Delete {
             schema_path,
             branch,
@@ -218,6 +271,45 @@ pub async fn run(args: SchemaArgs, channel: Channel, token: &str) -> anyhow::Res
     Ok(())
 }
 
+fn dependents_json(target: &str, response: &ListDependentsResponse) -> serde_json::Value {
+    let dependents: Vec<_> = response
+        .dependents
+        .iter()
+        .map(|dependent| {
+            serde_json::json!({
+                "importingProject": dependent.importing_project,
+                "importingRepo": dependent.importing_repo,
+                "importingSchema": dependent.importing_schema,
+                "importingDecl": dependent.importing_decl,
+                "importingBookmark": dependent.importing_bookmark,
+                "importingCommit": dependent.importing_commit,
+                "importPath": dependent.import_path,
+                "importedDecl": dependent.imported_decl,
+                "resolvedCommit": dependent.resolved_commit,
+                "pinned": dependent.pinned,
+            })
+        })
+        .collect();
+    let snapshots: Vec<_> = response
+        .snapshots
+        .iter()
+        .map(|snapshot| {
+            serde_json::json!({
+                "project": snapshot.project,
+                "repo": snapshot.repo,
+                "bookmark": snapshot.bookmark,
+                "commitId": snapshot.commit_id,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "target": target,
+        "schemasScanned": response.schemas_scanned,
+        "snapshots": snapshots,
+        "dependents": dependents,
+    })
+}
+
 /// Parse "project/repo/schema_name" into three parts.
 pub fn parse_schema_path_3(s: &str) -> anyhow::Result<(String, String, String)> {
     let parts: Vec<&str> = s.splitn(3, '/').collect();
@@ -229,4 +321,45 @@ pub fn parse_schema_path_3(s: &str) -> anyhow::Result<(String, String, String)> 
         parts[1].to_string(),
         parts[2].to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependent_json_preserves_snapshot_and_pin_metadata() {
+        // Arrange
+        let response = ListDependentsResponse {
+            dependents: vec![schemahub_api::schemahub_v1::DependentEntry {
+                importing_project: "billing".to_string(),
+                importing_repo: "consumer".to_string(),
+                importing_schema: "invoice.proto".to_string(),
+                importing_decl: String::new(),
+                importing_bookmark: "main".to_string(),
+                importing_commit: "consumer-commit".to_string(),
+                import_path: "acme/provider/types.proto".to_string(),
+                imported_decl: "Shared".to_string(),
+                resolved_commit: "provider-commit".to_string(),
+                pinned: true,
+            }],
+            snapshots: vec![schemahub_api::schemahub_v1::DependencyScanSnapshot {
+                project: "billing".to_string(),
+                repo: "consumer".to_string(),
+                bookmark: "main".to_string(),
+                commit_id: "consumer-commit".to_string(),
+            }],
+            schemas_scanned: 1,
+        };
+
+        // Act
+        let output = dependents_json("acme/provider/types.proto", &response);
+
+        // Assert
+        assert_eq!(output["target"], "acme/provider/types.proto");
+        assert_eq!(output["schemasScanned"], 1);
+        assert_eq!(output["dependents"][0]["pinned"], true);
+        assert_eq!(output["dependents"][0]["resolvedCommit"], "provider-commit");
+        assert_eq!(output["snapshots"][0]["commitId"], "consumer-commit");
+    }
 }
