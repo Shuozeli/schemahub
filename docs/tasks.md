@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:44:17Z -->
+<!-- agent-updated: 2026-07-22T00:18:57Z -->
 # SchemaHub Tasks
 
 This is the resumable execution checklist for `docs/roadmap.md`. It tracks
@@ -174,6 +174,9 @@ deliverables, not a complete issue backlog.
   variables matching `Cargo.lock`: Protobuf
   `a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac` and FlatBuffers
   `7dc2c76c08f452b9a208230057c0cb6327e65f24` (2026-07-21).
+- [x] Move the pinned Rust cache action to v2.9.1 commit
+  `e18b497796c12c097a38f9edb9d0641fb99eee32`, whose action runtime is Node
+  24, before publishing a candidate (2026-07-22).
 - [x] Persist first-materialized artifact bytes under a versioned canonical
   request identity before response; prove first-writer convergence, corruption
   rejection, and descriptor/generated retrieval after redb restart with an
@@ -183,11 +186,18 @@ deliverables, not a complete issue backlog.
   rotation, stale-key fail-closed readiness, and human/agent/service audit
   claims; verify the JWT subject through project-owner creation over gRPC
   (2026-07-21).
-- [ ] Publish a SchemaHub 0.9 release candidate.
+- [ ] Publish a SchemaHub 0.9 release candidate. The 2026-07-22 GitHub audit
+  found no configured staging environment, deployment, repository secret, or
+  existing package, so the exact-digest real-provider staging gate still needs
+  a deployment target and intended issuer configuration.
 - [ ] Complete the 1.0 acceptance workflow and publish SchemaHub 1.0.
 
 ## Latest Verification Evidence
 
+- [x] SchemaHub pull-request Actions run `29878830277` and post-merge `main`
+  run `29879390452` passed all five clean-checkout jobs: strict Rust quality,
+  the full 586-test release suite plus generated OpenAPI, PostgreSQL 17, GUI,
+  and the production container smoke/drain contract (2026-07-22).
 - [x] FlatBuffers pull-request and post-merge `main` GitHub Actions passed the
   Rust test, formatting, and strict-Clippy matrix at immutable compiler commit
   `7dc2c76c08f452b9a208230057c0cb6327e65f24` (2026-07-21).
