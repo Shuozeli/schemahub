@@ -209,11 +209,11 @@ export function WorkflowLab() {
             </a>
             <a
               className="button button-secondary"
-              href="https://github.com/Shuozeli/schemahub/pull/4"
+              href="https://github.com/Shuozeli/schemahub/tree/agent/schemahub-usage-codelab/codelabs/real-world"
               rel="noreferrer"
               target="_blank"
             >
-              Read the codelab in PR #4
+              Run the codelab suite
             </a>
           </div>
         </div>
@@ -274,15 +274,15 @@ export function WorkflowLab() {
             <h2>Use reality to find the bugs.</h2>
           </div>
           <p>
-            This lab is growing into a portfolio of real server exercises. Each
-            scenario keeps deterministic fixtures, captured evidence, and a bug
-            ledger—so a green card means more than a polished mock.
+            The interactive lesson is paired with four executable domain labs.
+            Each starts a release server, compiles served bindings, preserves
+            evidence, and exercises a recognizable producer or operator workflow.
           </p>
         </div>
 
         <div className="portfolio-status">
-          <span><i /> 1 scenario running</span>
-          <span>4 scenarios queued</span>
+          <span><i /> 5 scenarios passing</span>
+          <span>4 executable domain codelabs</span>
           <span>Real CLI · real compiler · reproducible evidence</span>
         </div>
 
@@ -290,7 +290,7 @@ export function WorkflowLab() {
           <article className="scenario-card scenario-live">
             <div className="scenario-card-top">
               <span>01</span>
-              <strong>Running</strong>
+              <strong>Passing</strong>
             </div>
             <h3>Human + agent approval</h3>
             <p>
@@ -302,50 +302,74 @@ export function WorkflowLab() {
           <article className="scenario-card">
             <div className="scenario-card-top">
               <span>02</span>
-              <strong>Next</strong>
+              <strong>Passing</strong>
             </div>
             <h3>Commerce contract rollout</h3>
             <p>
               Protobuf additive evolution, breaking-change rejection, generated
               bindings, and digest-pinned order data.
             </p>
-            <small>Protobuf · producer + consumer</small>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-commerce-protobuf.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
           </article>
           <article className="scenario-card">
             <div className="scenario-card-top">
               <span>03</span>
-              <strong>Queued</strong>
+              <strong>Passing</strong>
             </div>
             <h3>Mobile telemetry evolution</h3>
             <p>
               FlatBuffers defaults, field deprecation, old/new readers, and
               byte-stable generated artifacts.
             </p>
-            <small>FlatBuffers · compatibility</small>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-mobile-telemetry-flatbuffers.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
           </article>
           <article className="scenario-card">
             <div className="scenario-card-top">
               <span>04</span>
-              <strong>Queued</strong>
+              <strong>Passing</strong>
             </div>
             <h3>Concurrent editors</h3>
             <p>
               Human and agent races, stale ETags, conflicts, retry identity, and
               restart recovery.
             </p>
-            <small>Concurrency · recovery</small>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-concurrent-human-agent.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
           </article>
           <article className="scenario-card">
             <div className="scenario-card-top">
               <span>05</span>
-              <strong>Queued</strong>
+              <strong>Passing</strong>
             </div>
             <h3>Data-pipeline handoff</h3>
             <p>
               Producer/consumer coordination, immutable serving, revision
               sidecars, digest verification, and rollback.
             </p>
-            <small>Storage · operations</small>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-data-pipeline-handoff.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
           </article>
         </div>
       </section>

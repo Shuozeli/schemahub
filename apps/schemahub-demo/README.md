@@ -1,11 +1,11 @@
-<!-- agent-updated: 2026-07-23T03:45:01Z -->
+<!-- agent-updated: 2026-07-23T14:57:16Z -->
 # SchemaHub Workflow Lab
 
 This Next.js site is the interactive companion to the SchemaHub human–agent
 workflow codelab. It simulates the real CLI contract while explaining the
 boundary between versioned schema storage and application-data storage.
 
-The current site covers the first scenario in the real-world validation
+The guided workflow covers the first scenario in the real-world validation
 portfolio:
 
 1. A delegated agent records and validates schema-change intent.
@@ -14,9 +14,14 @@ portfolio:
 4. A data consumer resolves an immutable revision, fetches an artifact, and
    persists its revision and digest beside application data.
 
-The demo never sends production data and does not replace the real-server
-codelab. See `../../docs/real-world-validation.md` for the complete scenario,
-evidence, severity, and GA-readiness contract.
+The scenario index also links four executable real-server codelabs: Protobuf
+commerce rollout, FlatBuffers telemetry evolution, concurrent human/agent
+editing, and a two-repository producer/consumer handoff with rollback.
+
+The demo never sends production data and does not replace those runners. See
+`../../docs/real-world-validation.md` for the complete evidence, severity, and
+GA-readiness contract, or run them all with
+`../../codelabs/real-world/run-all.sh`.
 
 ## Develop
 
@@ -48,8 +53,9 @@ SCHEMAHUB_DEMO_URL="http://$TAILSCALE_HOST:4178" pnpm test:browser
 
 The Worker smoke starts the static Sites bundle in the real local workerd
 runtime and rejects boot/runtime errors. The browser smoke connects to the
-shared Playwright Chrome CDP endpoint, walks the lifecycle, switches to
-FlatBuffers, checks the mobile layout, and writes screenshots under `/tmp`.
+shared Playwright Chrome CDP endpoint, checks all four runnable-codelab links,
+walks the lifecycle, switches to FlatBuffers, checks the mobile layout, and
+writes screenshots under `/tmp`.
 
 ## Deploy
 

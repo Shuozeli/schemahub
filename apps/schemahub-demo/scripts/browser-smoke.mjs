@@ -50,7 +50,11 @@ try {
     await page.locator('[data-testid="scenario-portfolio"] article').count(),
     5,
   );
-  await page.getByText("1 scenario running", { exact: true }).waitFor();
+  await page.getByText("5 scenarios passing", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByRole("link", { name: "Open runnable codelab" }).count(),
+    4,
+  );
   await page.getByRole("button", { name: "Run this step" }).click();
   await page.getByText("schemahub.change.draft", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Continue to step 2" }).click();

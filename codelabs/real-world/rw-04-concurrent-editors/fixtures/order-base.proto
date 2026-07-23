@@ -1,0 +1,6 @@
+syntax = "proto3";
+package collaboration.orders.v1;
+
+message OrderRecord {
+  string id = 1;
+}

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T03:23:20Z -->
+<!-- agent-updated: 2026-07-23T14:57:16Z -->
 # schemahub
 
 A collaborative schema-change and serving platform. Humans and software agents
@@ -67,9 +67,14 @@ Start with
 [the human-and-agent workflow codelab](docs/codelab-human-agent-schema-workflow.md)
 to run the primary agent proposal, human review, Apply, and immutable artifact
 serving path end to end. Its interactive companion lives in
-[`apps/schemahub-demo`](apps/schemahub-demo); it also indexes the queued
-Protobuf commerce, FlatBuffers telemetry, concurrent-editor, and data-pipeline
-validation scenarios.
+[`apps/schemahub-demo`](apps/schemahub-demo). Four executable domain codelabs
+then exercise a
+[Protobuf commerce rollout](docs/codelab-commerce-protobuf.md),
+[FlatBuffers mobile telemetry evolution](docs/codelab-mobile-telemetry-flatbuffers.md),
+[concurrent human/agent editing](docs/codelab-concurrent-human-agent.md), and a
+[producer/consumer data-pipeline handoff](docs/codelab-data-pipeline-handoff.md).
+Run all four real-server scenarios with
+`./codelabs/real-world/run-all.sh`.
 
 ---
 

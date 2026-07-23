@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T03:23:20Z -->
+<!-- agent-updated: 2026-07-23T14:57:16Z -->
 # Documentation Manifest
 
 | File | Covers | Update When |
@@ -25,6 +25,10 @@
 | `gui.md` | Implemented GUI architecture, routes, generated HTTP contract, boundary policy, setup, and limitations | GUI implementation, dependencies, BFF routes/policy, OpenAPI discovery, or setup changes |
 | `real-world-validation.md` | Scenario portfolio, execution/evidence contract, bug ledger, and GA feedback loop | A scenario changes state or scope, evidence is captured, a finding is added/resolved, or the readiness rule changes |
 | `codelab-human-agent-schema-workflow.md` | Primary delegated-agent proposal, human review, Apply, immutable artifact, and data-schema-coordinate tutorial | ChangeRecord lifecycle, actor/reviewer roles, CLI JSON, repository policy, serving commands, or artifact identity changes |
+| `codelab-commerce-protobuf.md` | Protobuf order rollout, bidirectional generated-reader verification, breaking rejection, and data sidecar tutorial | Protobuf compatibility, ChangeRecord review, Apply retry, serving, generated bindings, or sidecar practices change |
+| `codelab-mobile-telemetry-flatbuffers.md` | FlatBuffers defaults, deprecation, old/new readers, breaking slot removal, and restart-byte tutorial | FlatBuffers compatibility/codegen, deprecation semantics, serving persistence, or known finding state changes |
+| `codelab-concurrent-human-agent.md` | Stale ETags, same-base human/agent conflict, Apply replay, explicit resolution, and restart tutorial | ChangeRecord concurrency, JJ conflicts, resolution, idempotency, or actor durability changes |
+| `codelab-data-pipeline-handoff.md` | Protobuf/FlatBuffers producer sidecars, historical replay, per-repository rollback, and retained revision tutorial | Serving coordinates, artifact verification, history/undo, data handoff, or cross-repository boundary changes |
 | `codelab-cli-grpc.md` | End-to-end CLI/gRPC tutorial | CLI commands, RPC workflow, generated output, or setup changes |
 | `codelab-operations.md` | Health, logs, metrics, OpenAPI discovery, migrations, backup/restore, upgrade/rollback, and GC drills | Deployment behavior, probes, generated contract, telemetry, persistence, migration, or recovery policy changes |
 | `codelab-deploy.md` | Tailscale-safe release-container deployment, HTTP/OpenAPI/auth policy, and change-to-artifact acceptance rehearsal | Image/runtime behavior, deployment commands, HTTP/OpenAPI/auth setup, or release acceptance changes |

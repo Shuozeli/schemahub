@@ -120,6 +120,11 @@ jobs:
           shared-key: release-tests
       - name: Run the full release workspace suite
         run: cargo test --release --workspace --locked
+      - name: Run real-world schema usage codelabs
+        env:
+          SCHEMAHUB_CODELAB_BIND_IP: 0.0.0.0
+          SCHEMAHUB_CODELAB_CLIENT_HOST: 127.0.0.1
+        run: ./codelabs/real-world/run-all.sh
       - name: Validate generated HTTP OpenAPI output
         shell: bash
         run: |

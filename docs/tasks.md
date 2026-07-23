@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T03:23:20Z -->
+<!-- agent-updated: 2026-07-23T14:57:16Z -->
 # SchemaHub Tasks
 
 This is the resumable execution checklist for `docs/roadmap.md`. It tracks
@@ -97,14 +97,18 @@ deliverables, not a complete issue backlog.
 - [x] Execute the delegated-agent/human-review scenario against the real server
   and compiler path, including rejected pre-approval Apply, immutable
   descriptors/generated Rust, restart, and digest identity (2026-07-22).
-- [ ] Exercise a Protobuf commerce rollout with additive and breaking edits,
-  generated producer/consumer bindings, and data-side revision/digest pins.
-- [ ] Exercise FlatBuffers mobile telemetry evolution with defaults,
-  deprecation, old/new readers, and byte-stable generated artifacts.
-- [ ] Exercise concurrent human/agent editing with stale bases and ETags,
-  conflict resolution, idempotent retries, and process restart recovery.
-- [ ] Exercise a producer/consumer data-pipeline handoff with immutable
-  serving, digest verification, rollback, and retained historical decoding.
+- [x] Exercise a Protobuf commerce rollout with additive and breaking edits,
+  generated producer/consumer bindings, and data-side revision/digest pins
+  (2026-07-23).
+- [x] Exercise FlatBuffers mobile telemetry evolution with defaults,
+  deprecation, old/new readers, and byte-stable generated artifacts
+  (2026-07-23).
+- [x] Exercise concurrent human/agent editing with stale bases and ETags,
+  conflict resolution, idempotent retries, and process restart recovery
+  (2026-07-23).
+- [x] Exercise a producer/consumer data-pipeline handoff with immutable
+  serving, digest verification, rollback, and retained historical decoding
+  (2026-07-23).
 - [ ] Resolve every release-blocking finding, rerun all scenarios from clean
   fixtures, and publish the evidence-backed GA readiness report.
 
@@ -218,6 +222,11 @@ deliverables, not a complete issue backlog.
 
 ## Latest Verification Evidence
 
+- [x] Four isolated release-mode/Tailscale codelabs passed against real redb
+  servers: Protobuf old/new decode plus breaking rejection; FlatBuffers
+  defaults/deprecation plus restart identity; human/agent conflict resolution
+  plus Apply replay; and two-repository sidecar replay plus explicit rollback
+  (2026-07-23).
 - [x] The human/agent usage codelab was executed against a release server bound
   to Tailscale with static RBAC and redb: unreviewed Apply failed closed,
   human approval enabled one agent Apply, descriptor/generated Rust digests

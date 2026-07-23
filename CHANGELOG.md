@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T03:23:20Z -->
+<!-- agent-updated: 2026-07-23T14:57:16Z -->
 # Changelog
 
 All notable user-facing changes are recorded here. SchemaHub has not yet
@@ -57,6 +57,11 @@ published the 0.9 release candidate; current entries remain under Unreleased.
   ChangeRecord-to-artifact lifecycle, explains data-side revision/digest
   pinning, states the 1.0 boundaries, and indexes a real-world validation
   portfolio for finding reproducible product defects.
+- Four executable real-world codelabs with isolated release-mode servers,
+  deterministic fixtures, generated Rust producers/consumers, negative policy
+  cases, restart/rollback checks, normalized evidence, and one-command CI
+  coverage for commerce, mobile telemetry, concurrent editing, and
+  batch/stream handoff workflows.
 
 ### Changed
 

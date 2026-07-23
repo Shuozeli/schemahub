@@ -1,0 +1,8 @@
+namespace pipeline;
+
+table PipelineEvent {
+  event_id: string;
+  order_id: string;
+}
+
+root_type PipelineEvent;

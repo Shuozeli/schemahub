@@ -1,0 +1,9 @@
+namespace telemetry;
+
+table MobileEvent {
+  event_id: string;
+  captured_at_unix_ms: long;
+  legacy_session_id: string;
+}
+
+root_type MobileEvent;
