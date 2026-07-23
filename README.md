@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-22T15:54:03Z -->
+<!-- agent-updated: 2026-07-23T03:23:20Z -->
 # schemahub
 
 A collaborative schema-change and serving platform. Humans and software agents
@@ -42,7 +42,9 @@ wire contract, `docs/http-api.md` for the generated browser API contract,
 `docs/format-capabilities.md` for the executable format contract,
 `docs/crate-structure.md` for the workspace layout, `docs/openapi-ast.md` for
 the OpenAPI schema-format AST, `docs/ui-design.md` for the web-console product
-design, and `docs/gui.md` for the implemented React GUI architecture and usage.
+design, `docs/gui.md` for the implemented React GUI architecture and usage,
+and `docs/real-world-validation.md` for the scenario-driven hardening
+portfolio and bug-evidence contract.
 
 ## Product direction
 
@@ -64,7 +66,10 @@ decision.
 Start with
 [the human-and-agent workflow codelab](docs/codelab-human-agent-schema-workflow.md)
 to run the primary agent proposal, human review, Apply, and immutable artifact
-serving path end to end.
+serving path end to end. Its interactive companion lives in
+[`apps/schemahub-demo`](apps/schemahub-demo); it also indexes the queued
+Protobuf commerce, FlatBuffers telemetry, concurrent-editor, and data-pipeline
+validation scenarios.
 
 ---
 

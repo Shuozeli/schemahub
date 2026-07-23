@@ -245,6 +245,36 @@ jobs:
       - name: Build the production GUI
         run: pnpm run build
 
+  workflow-demo:
+    name: Workflow demo typecheck and Sites build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/schemahub-demo
+    steps:
+      - name: Check out SchemaHub
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.2.2
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/schemahub-demo/pnpm-lock.yaml
+      - name: Install locked demo dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck the workflow demo
+        run: pnpm run typecheck
+      - name: Build the static Sites bundle
+        run: pnpm run build:sites
+      - name: Smoke the Sites bundle in workerd
+        run: pnpm run test:worker
+
   container:
     name: Runtime container smoke and graceful stop
     runs-on: ubuntu-24.04

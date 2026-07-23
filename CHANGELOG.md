@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:31:27Z -->
+<!-- agent-updated: 2026-07-23T03:23:20Z -->
 # Changelog
 
 All notable user-facing changes are recorded here. SchemaHub has not yet
@@ -52,6 +52,11 @@ published the 0.9 release candidate; current entries remain under Unreleased.
   round-trip, relative-path normalization, forward/reverse discovery, exact
   property following, immutable closure serving, deletion guards, and public
   gRPC snapshot acceptance after a provider advances.
+- A runnable human-and-agent workflow codelab plus an interactive
+  Protobuf/FlatBuffers companion site. The site walks the guarded
+  ChangeRecord-to-artifact lifecycle, explains data-side revision/digest
+  pinning, states the 1.0 boundaries, and indexes a real-world validation
+  portfolio for finding reproducible product defects.
 
 ### Changed
 

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-22T15:59:19Z -->
+<!-- agent-updated: 2026-07-23T03:23:20Z -->
 # SchemaHub Tasks
 
 This is the resumable execution checklist for `docs/roadmap.md`. It tracks
@@ -81,11 +81,32 @@ deliverables, not a complete issue backlog.
 - [x] Add a runnable codelab for delegated-agent proposal, human review,
   idempotent Apply, immutable artifact verification, and persisting schema
   coordinates with application data (2026-07-22).
+- [x] Build a responsive interactive companion that walks the real CLI
+  lifecycle for Protobuf and FlatBuffers, exposes 1.0 boundaries, and passes
+  production, OpenNext, and desktop/mobile browser smoke checks (2026-07-23).
 - [x] Replace the GUI's hard-coded workspace with real resource navigation and repository-owned defaults (2026-07-21).
 - [x] Add authenticated change drafting, validation, review, Apply, and actor/delegation display to the GUI (2026-07-21).
 - [x] Add GUI conflict rendering/resolution and immutable source/descriptor/generated artifact download with digests (2026-07-21).
 - [x] Add machine-readable change/artifact/capability output, JSON errors, and stable agent/CI exit codes (2026-07-21).
 - [x] Add repository search over schemas, declarations, immutable revisions, and ChangeRecords (2026-07-21).
+
+## Real-World Validation Portfolio
+
+- [x] Define the execution, evidence, finding-severity, and completion contract
+  for scenario-driven GA hardening (2026-07-23).
+- [x] Execute the delegated-agent/human-review scenario against the real server
+  and compiler path, including rejected pre-approval Apply, immutable
+  descriptors/generated Rust, restart, and digest identity (2026-07-22).
+- [ ] Exercise a Protobuf commerce rollout with additive and breaking edits,
+  generated producer/consumer bindings, and data-side revision/digest pins.
+- [ ] Exercise FlatBuffers mobile telemetry evolution with defaults,
+  deprecation, old/new readers, and byte-stable generated artifacts.
+- [ ] Exercise concurrent human/agent editing with stale bases and ETags,
+  conflict resolution, idempotent retries, and process restart recovery.
+- [ ] Exercise a producer/consumer data-pipeline handoff with immutable
+  serving, digest verification, rollback, and retained historical decoding.
+- [ ] Resolve every release-blocking finding, rerun all scenarios from clean
+  fixtures, and publish the evidence-backed GA readiness report.
 
 ## D6: Production and Release
 
