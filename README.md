@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:31:27Z -->
+<!-- agent-updated: 2026-07-22T15:54:03Z -->
 # schemahub
 
 A collaborative schema-change and serving platform. Humans and software agents
@@ -60,6 +60,11 @@ SchemaHub governs and serves schemas; it does not store application data. See
 `docs/resources-and-policy.md` for durable project/repository controls,
 and `docs/ADR/0001-change-records-and-serving-plane.md` for the architectural
 decision.
+
+Start with
+[the human-and-agent workflow codelab](docs/codelab-human-agent-schema-workflow.md)
+to run the primary agent proposal, human review, Apply, and immutable artifact
+serving path end to end.
 
 ---
 

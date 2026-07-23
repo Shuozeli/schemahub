@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-22T00:18:57Z -->
+<!-- agent-updated: 2026-07-22T15:59:19Z -->
 # SchemaHub Tasks
 
 This is the resumable execution checklist for `docs/roadmap.md`. It tracks
@@ -78,6 +78,9 @@ deliverables, not a complete issue backlog.
 
 ## D5: Human and Agent Surfaces
 
+- [x] Add a runnable codelab for delegated-agent proposal, human review,
+  idempotent Apply, immutable artifact verification, and persisting schema
+  coordinates with application data (2026-07-22).
 - [x] Replace the GUI's hard-coded workspace with real resource navigation and repository-owned defaults (2026-07-21).
 - [x] Add authenticated change drafting, validation, review, Apply, and actor/delegation display to the GUI (2026-07-21).
 - [x] Add GUI conflict rendering/resolution and immutable source/descriptor/generated artifact download with digests (2026-07-21).
@@ -194,6 +197,10 @@ deliverables, not a complete issue backlog.
 
 ## Latest Verification Evidence
 
+- [x] The human/agent usage codelab was executed against a release server bound
+  to Tailscale with static RBAC and redb: unreviewed Apply failed closed,
+  human approval enabled one agent Apply, descriptor/generated Rust digests
+  verified, and actor/review/artifact identity survived restart (2026-07-22).
 - [x] SchemaHub pull-request Actions run `29878830277` and post-merge `main`
   run `29879390452` passed all five clean-checkout jobs: strict Rust quality,
   the full 586-test release suite plus generated OpenAPI, PostgreSQL 17, GUI,

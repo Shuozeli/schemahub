@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T20:56:39Z -->
+<!-- agent-updated: 2026-07-22T15:54:03Z -->
 # Documentation Manifest
 
 | File | Covers | Update When |
@@ -23,6 +23,7 @@
 | `openapi-ast.md` | OpenAPI AST, blob encoding, parsing, printing, and operations | OpenAPI schema representation or compiler behavior changes |
 | `ui-design.md` | Web-console product, component, and generated BFF-contract design | Navigation, workflows, screens, BFF contract, or component architecture change |
 | `gui.md` | Implemented GUI architecture, routes, generated HTTP contract, boundary policy, setup, and limitations | GUI implementation, dependencies, BFF routes/policy, OpenAPI discovery, or setup changes |
+| `codelab-human-agent-schema-workflow.md` | Primary delegated-agent proposal, human review, Apply, immutable artifact, and data-schema-coordinate tutorial | ChangeRecord lifecycle, actor/reviewer roles, CLI JSON, repository policy, serving commands, or artifact identity changes |
 | `codelab-cli-grpc.md` | End-to-end CLI/gRPC tutorial | CLI commands, RPC workflow, generated output, or setup changes |
 | `codelab-operations.md` | Health, logs, metrics, OpenAPI discovery, migrations, backup/restore, upgrade/rollback, and GC drills | Deployment behavior, probes, generated contract, telemetry, persistence, migration, or recovery policy changes |
 | `codelab-deploy.md` | Tailscale-safe release-container deployment, HTTP/OpenAPI/auth policy, and change-to-artifact acceptance rehearsal | Image/runtime behavior, deployment commands, HTTP/OpenAPI/auth setup, or release acceptance changes |
