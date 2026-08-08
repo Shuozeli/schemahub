@@ -37,7 +37,14 @@ export function RepoDashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { data: repository } = useRepository(project, repo);
   const refName = searchParams.get('ref') || repository?.defaultBranch || '';
-  const { data, error, isLoading } = useRepoDashboard(project, repo, refName);
+  const {
+    data,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+  } = useRepoDashboard(project, repo, refName);
 
   if (error) {
     return <Alert color="red">{error.message}</Alert>;
@@ -56,6 +63,9 @@ export function RepoDashboardPage() {
         refName={refName}
         refs={[...data.branches, ...data.tags.map((tag) => `tag:${tag}`)]}
         onRefChange={(value) => setSearchParams({ ref: value })}
+        hasMoreRefs={hasNextPage}
+        loadingMoreRefs={isFetchingNextPage}
+        onLoadMoreRefs={() => void fetchNextPage()}
       />
 
       <Group justify="flex-end">
@@ -78,9 +88,13 @@ export function RepoDashboardPage() {
       </Group>
 
       <div className="metricStrip">
-        <MetricCell label="Schemas" value={data.schemas.length} icon={<Boxes size={16} />} />
-        <MetricCell label="Branches" value={data.branches.length} icon={<GitBranch size={16} />} />
-        <MetricCell label="Tags" value={data.tags.length} icon={<GitCommit size={16} />} />
+        <MetricCell label="Schemas loaded" value={data.schemas.length} icon={<Boxes size={16} />} />
+        <MetricCell
+          label="Branches loaded"
+          value={data.branches.length}
+          icon={<GitBranch size={16} />}
+        />
+        <MetricCell label="Tags loaded" value={data.tags.length} icon={<GitCommit size={16} />} />
         <MetricCell
           label="Open conflicts"
           value={data.openConflicts}

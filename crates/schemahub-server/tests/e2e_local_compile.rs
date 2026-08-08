@@ -432,6 +432,91 @@ prost = "0.13"
 }
 
 #[tokio::test]
+async fn cross_package_protobuf_closure_codegen_compiles_in_local_cargo_project() {
+    // Arrange: three files in three distinct packages form an import chain
+    // (order.v1 -> user.v1 -> common.v1) where every cross-file reference is
+    // written as a fully-qualified name from a different package. This exercises
+    // closure symbol resolution across package boundaries and the downstream
+    // generator's cross-module type paths, which single-package closure tests do
+    // not cover.
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    for (path, fixture, idempotency_key) in [
+        (
+            "common/types.proto",
+            "cloudbuild_common.proto",
+            "cross-package-protobuf-common",
+        ),
+        (
+            "user/profile.proto",
+            "cloudbuild_user.proto",
+            "cross-package-protobuf-user",
+        ),
+        (
+            "order/purchase.proto",
+            "cloudbuild_order.proto",
+            "cross-package-protobuf-order",
+        ),
+    ] {
+        let source = integration_fixture(fixture);
+        create_schema(
+            &mut c.schema,
+            "acme",
+            "core",
+            "main",
+            path,
+            pb::SchemaFormat::Protobuf,
+            &source,
+            idempotency_key,
+        )
+        .await;
+    }
+
+    // Act.
+    let preview = c
+        .codegen
+        .preview_codegen(preview_request(
+            "acme",
+            "core",
+            "order/purchase.proto",
+            pb::Language::Rust,
+        ))
+        .await
+        .expect("preview cross-package protobuf closure rust codegen")
+        .into_inner();
+
+    // Assert: every package in the chain contributes generated types, and the
+    // fully-qualified cross-package references compile as downstream Rust code.
+    let code = String::from_utf8(preview.content.clone()).expect("generated rust is utf-8");
+    for symbol in [
+        "struct Money",
+        "struct AuditInfo",
+        "struct UserProfile",
+        "struct PurchaseOrder",
+    ] {
+        assert!(
+            code.contains(symbol),
+            "generated cross-package protobuf closure lost `{symbol}`:\n{code}"
+        );
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_compile_crate(
+        tmp.path(),
+        r#"[package]
+name = "schemahub-cross-package-protobuf-local-compile"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+prost = "0.13"
+"#,
+        &preview.content,
+    );
+    cargo_check(tmp.path());
+}
+
+#[tokio::test]
 async fn flatbuffers_preview_codegen_compiles_in_local_cargo_project() {
     // Arrange.
     let url = start_server().await;

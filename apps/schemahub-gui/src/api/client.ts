@@ -3,6 +3,7 @@ import type {
   ArtifactDownloadRequest,
   ChangeAction,
   ChangeActionRequest,
+  ChangePage,
   ChangeRecord,
   ConflictDetail,
   ConflictList,
@@ -12,8 +13,9 @@ import type {
   CreateChangeRequest,
   DiffResult,
   OperationEntry,
-  ProjectSummary,
-  RepoDashboard,
+  ProjectPage,
+  RepoDashboardPage,
+  RepoPage,
   RepoSummary,
   ResolveConflictRequest,
   ResolveConflictResult,
@@ -21,12 +23,25 @@ import type {
   SearchResponse,
   ServerConfig,
   SessionInfo,
+  UpdateChangeEditsRequest,
 } from './types';
 
 export interface SchemaHubClient {
-  listProjects(): Promise<ProjectSummary[]>;
-  listRepos(project: string): Promise<RepoSummary[]>;
-  getRepoDashboard(project: string, repo: string, ref: string): Promise<RepoDashboard>;
+  listProjects(pageToken?: string, pageSize?: number): Promise<ProjectPage>;
+  listRepos(
+    project: string,
+    pageToken?: string,
+    pageSize?: number,
+    namePrefix?: string,
+  ): Promise<RepoPage>;
+  getRepo(project: string, repo: string): Promise<RepoSummary | undefined>;
+  getRepoDashboard(
+    project: string,
+    repo: string,
+    ref: string,
+    pageToken?: string,
+    pageSize?: number,
+  ): Promise<RepoDashboardPage>;
   getSchemaDetail(
     project: string,
     repo: string,
@@ -50,12 +65,24 @@ export interface SchemaHubClient {
   ): Promise<OperationEntry[]>;
   getServerConfig(): Promise<ServerConfig>;
   getSession(): Promise<SessionInfo>;
-  listChanges(project: string, repo: string): Promise<ChangeRecord[]>;
+  listChanges(
+    project: string,
+    repo: string,
+    pageToken?: string,
+    pageSize?: number,
+    status?: string,
+  ): Promise<ChangePage>;
   getChange(project: string, repo: string, changeId: string): Promise<ChangeRecord>;
   createChange(
     project: string,
     repo: string,
     request: CreateChangeRequest,
+  ): Promise<ChangeRecord>;
+  updateChangeEdits(
+    project: string,
+    repo: string,
+    changeId: string,
+    request: UpdateChangeEditsRequest,
   ): Promise<ChangeRecord>;
   changeAction(
     project: string,

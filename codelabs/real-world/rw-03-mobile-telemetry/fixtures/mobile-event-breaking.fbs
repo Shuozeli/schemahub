@@ -1,0 +1,9 @@
+namespace telemetry;
+
+table MobileEvent {
+  event_id: string;
+  captured_at_unix_ms: long;
+  sampling_rate: float = 1.0;
+}
+
+root_type MobileEvent;

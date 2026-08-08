@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:31:27Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Code Quality Findings
 
 Audit of `v2-rearchitecture` @ `516639f`. Baseline before fixes: `cargo build
@@ -70,6 +70,132 @@ Resolved in the current worktree:
   `7dc2c76c08f452b9a208230057c0cb6327e65f24`. Normal and release builds reject
   cross-repository path dependencies, resolving the prior P1 release-boundary
   violation.
+- The warning-clean FlatBuffers follow-up is published at
+  `59756d23993538b722f68675c35129c3cebb7aa1` and replaces that initial
+  coordinate in SchemaHub. Its main Actions run `30481753669` passed release
+  tests, formatting, and strict Clippy, closing the generated-warning finding
+  without reintroducing a path or mutable compiler dependency.
+
+## 2026-07-29 locked dependency security audit
+
+- `RV-SUPPLY-001` found a vulnerable `crossbeam-epoch` lock, an unsound
+  `anyhow` lock, and jsonwebtoken's vulnerable RustCrypto RSA path without a CI
+  RustSec gate. The graph now uses AWS-LC, contains no `rsa` crate, locks the
+  patched versions, proves RS256 JWK verification, and runs pinned
+  `cargo-audit` through a tested zero-vulnerability and exact-warning gate.
+- `RV-SUPPLY-002` found vulnerable GUI/demo build and runtime resolutions
+  without frozen-graph audits. Patched Vite, esbuild, PostCSS, Next.js, and
+  Sharp versions are locked, and both pnpm graphs are audited at Low severity.
+  The sole React Router exception is restricted to unused unstable RSC APIs.
+- `RV-SUPPLY-003` found that cargo-audit 0.22.2's published lock, which CI used
+  for the security gate itself, contains two vulnerabilities and two denied
+  unsoundness advisories. CI now verifies the exact crates.io source archive,
+  overlays a reviewed patched lock, installs that graph with `--locked`, and
+  self-audits it before scanning SchemaHub.
+- `RV-HARNESS-007` found that the fake auditor did not model the real binary's
+  required `audit` subcommand. The override contract now invokes both fake and
+  real binaries through the same interface, and both paths pass.
+- `RV-SUPPLY-004` found that cargo-auditable's build-tool lock was not part of
+  the release audit boundary. Its current graph is clean; CI now pins and
+  verifies both source and lock identities, rejects every RustSec warning, and
+  the platform matrix forces an isolated install before exact-binary use.
+- `RV-SUPPLY-005` found mutable base tags in all three production Docker
+  stages. Node, Rust, and distroless now use exact multi-architecture manifest
+  digests, and CI rejects any tag-only external stage or non-commit-pinned
+  external action.
+- `RV-SUPPLY-006` found the Dockerfile frontend, overridable pnpm coordinate,
+  moving Node workflow selector, and PostgreSQL/curl acceptance helper tags
+  outside that initial boundary. They now use exact/non-overridable versions or
+  multi-architecture manifests, and the same CI contract rejects drift.
+- `RV-SEC-001` found that runtime GUI validation allowed symlinks beneath
+  `gui_dir`, so a linked asset or favicon could escape the static-file root.
+  Startup now walks the complete tree, accepts only regular files/directories,
+  and rejects both a symlinked `assets` root and nested link.
+- `RV-HTTP-001` found that every successful `/assets/*` response received
+  immutable caching, contradicting the content-hash-only contract. The
+  middleware now recognizes Vite's eight-character URL-safe filename hash and
+  assigns `no-cache` to a successful unhashed asset.
+- `RV-HTTP-002` found that the same-origin console stores bearer credentials
+  but shipped without CSP, framing denial, or privileged-feature restrictions.
+  Successful GUI responses now use a self-only policy that blocks inline
+  scripts, forms, frames, objects, media, and third-party runtimes, denies
+  framing plus camera/geolocation/microphone access, and retains only the
+  inline styles required by the locked Mantine UI. Router, exact-image, and
+  real Pwright render checks pass.
+- `RV-RELEASE-003` found that `utoipa` extension hash-map iteration changed
+  semantically identical OpenAPI key order across fresh processes, while native
+  archives also inherited traversal order, timestamps, ownership, and gzip
+  metadata. HTTP discovery and `--print-openapi` now share one recursively
+  key-sorted byte sequence. Packaging emits a sorted ustar payload with
+  normalized UID/GID, modes, UTC timestamps, and no-name gzip output; focused
+  tests compare eight fresh server processes and archives assembled after
+  deliberately changing every input mtime. Strict all-target/all-feature
+  workspace Clippy, the 609-test default release workspace, and the separate
+  25-test PostgreSQL release slice pass.
+- `scripts/test-dependency-audit-policy.sh` fails when the crypto backend,
+  auditor/build-tool identities, patched application/tool lock versions,
+  one-item advisory exception, client-only routing architecture, isolated
+  release invocation, container/action supply chain, or any CI audit step
+  drifts.
+
+## 2026-07-30 long-lived catalog pagination audit
+
+- `RV-CATALOG-001` found that each advertised `ListProjects` page loaded and
+  sorted every project before authorization filtering, while each `ListRepos`
+  page scanned the complete global repository collection before project
+  filtering. Page size therefore did not bound storage, decoding, or memory.
+- Project and repository resources now maintain active/all name catalogs in
+  the same ObjectDb transaction as creation or archive-state changes. The
+  repository catalogs are physically partitioned by project.
+- Pre-index resources receive a validated one-time atomic backfill behind
+  durable completion markers. Once complete, readers never silently fall back
+  to global scans.
+- Public pages preserve their existing stable name order, prefix/archive
+  filters, and v1 opaque token contract. Project authorization scans are
+  bounded and may return an empty page with a continuation. Index/target
+  corruption, scope mismatch, malformed cursors, and catalog collisions fail
+  closed; release tests cover rollback, restart, backfill, archive transitions,
+  hidden-resource continuation, and unrelated corrupt primary records.
+- `RV-MEMBER-001` found that `ListMembers` had no pagination fields and the
+  production role store decoded the complete global role collection for one
+  project. It now uses bounded project/hex-identity primary-key ranges and
+  project-bound tokens without a migration.
+- Tombstone-only pages can advance without returning inactive members. Scoped
+  corruption fails closed, another project's corrupt record is not decoded,
+  the CLI aggregates all tokens into text or stable JSON, and GUI project
+  summaries perform a direct caller-role lookup.
+- `RV-REF-001` found that `ListBranches` and `ListTags` had no pagination
+  fields and returned a fully materialized matching ref namespace, while
+  `GetBranch` enumerated all bookmarks for one name. Both list RPCs now expose
+  ref-kind/project/repository/prefix-bound tokens and lazily materialize at
+  most `page_size + 1` entries from the repository-local ordered JJ view.
+  Branch/tag CLI commands follow all pages; GetBranch uses a direct map lookup.
+- `RV-BFF-CATALOG-001` found that the GUI BFF discarded those Core catalog
+  bounds by returning complete project/repository arrays, and that each project
+  summary made another full repository request solely for a count. Both routes
+  now return 50-item pages (maximum 200) with kind/project/prefix-bound opaque
+  tokens. The React client retains pages incrementally, repository deep links
+  use a bounded exact-prefix lookup, and HTTP/OpenAPI, resolver-unit, full
+  browser-smoke, and neutral-Pwright continuation checks pass.
+- `RV-BFF-AGGREGATE-001` found that the repository dashboard still returned
+  complete schema/branch/tag arrays and re-resolved its mutable bookmark for
+  each schema summary, while the browser ChangeRecord list rebuilt one complete
+  array despite the Core index. The dashboard now carries one
+  repository/ref-bound composite continuation and the first page's immutable
+  commit, lazily pages schema names without loading declaration blobs, and
+  computes exact conflict totals without collecting every conflict path. The
+  selected schema objects and complete repository-local name inventory are
+  batch-loaded in one immutable tree traversal; Core compiler-validates each
+  declaration and counts unique declared direct imports without repeating a
+  full-tree scan for every dashboard row. The
+  browser proposal route adapts Core's repository/status page directly.
+  React views expose explicit continuations; HTTP/OpenAPI, immutable-snapshot,
+  remote-browser, and neutral-Pwright acceptance pass.
+- `RW-GUI-002` found that the live-browser acceptance looked up the visual
+  identity label instead of the component's `Identity:`-prefixed ARIA name and
+  left remote CDP connections attached after success. Exact accessible-name
+  assertions now cover both agent and human sessions, and unconditional
+  teardown closes local and remote browser connections.
 
 Priorities:
 
@@ -662,6 +788,61 @@ Resolved in the API-boundary increment:
 - ADR 0002 designates `schemahub.v1` as the public API and excludes unversioned
   `/api/*` GUI BFF routes from that compatibility promise. Runtime headers and
   per-path OpenAPI metadata make the classification machine-readable.
+
+Resolved in the control-plane audit increment:
+
+- Project, membership, and repository mutations no longer leave only mutable
+  current state. They append immutable typed before/after events with
+  server-derived actors and injected event time/identity.
+- `ObjectDb::transact_records` couples the resource mutation and event create
+  in one transaction on memory, redb, and PostgreSQL. A stale precondition,
+  duplicate target, event collision, or backend failure writes neither side.
+- Events use project-partitioned collections, newest-first stable ordering,
+  Owner-only cursor pagination, and typed gRPC/CLI JSON surfaces. Regression
+  tests cover backend commit/rollback, snapshots, attribution, access denial,
+  and page continuation.
+- The last-Owner invariant is no longer a read/write race. Runtime project,
+  member, and repository mutations hold a project-keyed ObjectDb publication
+  guard from authorization through invariant validation and state/audit commit;
+  PostgreSQL maps that boundary to its distributed advisory lock. A
+  deterministic two-Owner removal race proves exactly one mutation succeeds
+  and one Owner remains.
+- `ListControlPlaneAuditEvents` no longer loads and sorts the complete project
+  history for every page. An immutable reverse-time index is created in the
+  same resource/event transaction, and each backend exposes a bounded stable
+  range query. Project-bound cursors and typed event/index validation reject
+  malformed or mismatched records and missing event targets instead of
+  returning a partial page.
+
+Resolved in the bounded ChangeRecord pagination increment:
+
+- `ListChanges` no longer loads, decodes, repository-filters, status-filters,
+  and sorts the complete global ChangeRecord collection before truncating each
+  page. Repository-scoped creation-order and per-status indexes map its
+  existing opaque cursor to one bounded `ObjectDb` range read.
+- Record creation atomically creates its all/status entries. A lifecycle status
+  transition atomically compare-swaps the record, removes the old status entry,
+  and creates the new one; a collision or stale precondition writes nothing.
+- The first new-version ledger operation validates and backfills pre-index
+  records once behind a durable marker. Page reads validate target existence,
+  scope, status, primary name, and index key and fail closed on corruption.
+- Focused AAA coverage proves bounded continuation, status movement, legacy
+  backfill, transaction rollback on create/transition collisions, redb reopen,
+  cursor scope rejection, missing-target rejection, and absence of a global
+  decode scan after migration.
+
+- Final verification passed all 699 release-workspace tests, strict
+  all-target/all-feature Clippy, all 28 PostgreSQL integration tests, all seven
+  fresh-fixture real-world codelabs, the GUI build/bundle/CDP resolver gates,
+  the mock continuation smoke, and the remote live-browser
+  agent/human/Apply/restart acceptance. A neutral-Pwright run independently
+  proved that the second dashboard schema remained absent until real CDP input
+  requested the composite continuation.
+  The dirty-worktree GA report records zero open findings at
+  `sha256:20b4575efdf4a95411d6213e573949da80bbd7dc7da536076c971cf1b12761b4`
+  and packages reproducibly at
+  `sha256:93c203bfaff0491f72fe12dd8964729309d33b7d1ad9015eb1763490afc83aba`,
+  and remains correctly unauthorized for publication.
 
 ---
 

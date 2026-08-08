@@ -61,7 +61,7 @@ fn documented_router() -> OpenApiRouter<AppState> {
         .routes(routes!(list_projects))
         .routes(routes!(list_repos))
         .routes(routes!(list_changes, create_change))
-        .routes(routes!(get_change))
+        .routes(routes!(get_change, update_change_edits))
         .routes(routes!(change_action))
         .routes(routes!(repo_dashboard))
         .routes(routes!(search_resources))

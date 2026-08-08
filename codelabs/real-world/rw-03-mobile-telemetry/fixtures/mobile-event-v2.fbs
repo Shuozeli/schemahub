@@ -1,0 +1,10 @@
+namespace telemetry;
+
+table MobileEvent {
+  event_id: string;
+  captured_at_unix_ms: long;
+  legacy_session_id: string (deprecated);
+  sampling_rate: float = 1.0;
+}
+
+root_type MobileEvent;

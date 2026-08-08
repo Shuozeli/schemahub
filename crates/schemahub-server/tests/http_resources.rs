@@ -7,7 +7,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD,
-    ORIGIN,
+    CACHE_CONTROL, CONTENT_TYPE, ORIGIN,
 };
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::Router;
@@ -53,12 +53,40 @@ fn resource_fixture_with_policy(policy: http::HttpPolicy) -> (Arc<Core>, Router)
             members: HashMap::from([("schema-agent".to_string(), "writer".to_string())]),
         },
     );
+    config.projects.insert(
+        "beta".to_string(),
+        ProjectSection {
+            visibility: Some("private".to_string()),
+            owners: vec!["alice".to_string()],
+            members: HashMap::new(),
+        },
+    );
     config.repos.insert(
         "acme/commerce".to_string(),
         RepoSection {
             default_bookmark: Some("trunk".to_string()),
             compatibility: Some("backward".to_string()),
             protected_bookmarks: Some(vec!["trunk".to_string(), "release/*".to_string()]),
+            review: None,
+            serving: None,
+        },
+    );
+    config.repos.insert(
+        "acme/events".to_string(),
+        RepoSection {
+            default_bookmark: Some("main".to_string()),
+            compatibility: Some("full".to_string()),
+            protected_bookmarks: Some(vec!["main".to_string()]),
+            review: None,
+            serving: None,
+        },
+    );
+    config.repos.insert(
+        "beta/edge".to_string(),
+        RepoSection {
+            default_bookmark: Some("main".to_string()),
+            compatibility: Some("full".to_string()),
+            protected_bookmarks: Some(vec!["main".to_string()]),
             review: None,
             serving: None,
         },
@@ -78,6 +106,17 @@ fn resource_fixture_with_policy(policy: http::HttpPolicy) -> (Arc<Core>, Router)
 
 fn resource_app() -> Router {
     resource_fixture().1
+}
+
+fn protobuf_effect(source: &str) -> MutationEffect {
+    let parsed = ProtobufCompiler::new()
+        .parse(source)
+        .expect("parse protobuf fixture");
+    MutationEffect {
+        meta: Some(parsed.meta),
+        upserts: parsed.decls,
+        removes: Vec::new(),
+    }
 }
 
 fn probe_app(accepting_traffic: bool) -> Router {
@@ -108,6 +147,32 @@ fn probe_app_with_http_config(config: HttpConfig) -> Router {
         http::Readiness::new(true),
         policy,
     )
+}
+
+fn probe_app_with_gui() -> (tempfile::TempDir, Router) {
+    let gui_dir = tempfile::tempdir().expect("GUI tempdir");
+    std::fs::create_dir(gui_dir.path().join("assets")).expect("create GUI assets");
+    std::fs::write(
+        gui_dir.path().join("index.html"),
+        "<!doctype html><title>SchemaHub Console</title><div id=\"root\"></div>",
+    )
+    .expect("write GUI index");
+    std::fs::write(
+        gui_dir.path().join("assets").join("app-deadbeef.js"),
+        "document.title = 'SchemaHub Console';",
+    )
+    .expect("write GUI asset");
+    std::fs::write(
+        gui_dir.path().join("assets").join("runtime.js"),
+        "window.__schemahub_runtime = true;",
+    )
+    .expect("write unhashed GUI asset");
+    std::fs::write(gui_dir.path().join("favicon.svg"), "<svg></svg>").expect("write GUI favicon");
+    let app = probe_app_with_http_config(HttpConfig {
+        gui_dir: Some(gui_dir.path().to_path_buf()),
+        ..HttpConfig::default()
+    });
+    (gui_dir, app)
 }
 
 async fn get_probe_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -218,7 +283,7 @@ async fn generated_openapi_covers_the_runtime_http_contract() {
     let unique_operation_ids: std::collections::BTreeSet<_> =
         operation_ids.iter().copied().collect();
     assert_eq!(paths.len(), 22);
-    assert_eq!(operation_ids.len(), 23);
+    assert_eq!(operation_ids.len(), 24);
     assert_eq!(unique_operation_ids.len(), operation_ids.len());
     for (path, item) in paths {
         let (expected_surface, expected_compatibility) = if path.starts_with("/api/") {
@@ -236,9 +301,42 @@ async fn generated_openapi_covers_the_runtime_http_contract() {
         );
     }
     assert!(document["paths"]["/api/projects/{project}/repos/{repo}/changes"]["post"].is_object());
+    assert!(
+        document["paths"]["/api/projects/{project}/repos/{repo}/changes/{change_id}"]["patch"]
+            .is_object()
+    );
     assert!(document["paths"]
         ["/api/projects/{project}/repos/{repo}/revisions/{commit}/artifacts/{schema_path}"]["get"]
         .is_object());
+    assert_eq!(
+        document["paths"]["/api/projects"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ProjectPageDto"
+    );
+    assert_eq!(
+        document["paths"]["/api/projects"]["get"]["parameters"][0]["name"],
+        "pageSize"
+    );
+    assert_eq!(
+        document["paths"]["/api/projects/{project}/repos"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/RepoPageDto"
+    );
+    assert_eq!(
+        document["paths"]["/api/projects/{project}/repos/{repo}/changes"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ChangePageDto"
+    );
+    assert_eq!(
+        document["paths"]["/api/projects/{project}/repos/{repo}/dashboard"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/RepoDashboardPageDto"
+    );
+    assert_eq!(
+        document["paths"]["/api/projects/{project}/repos/{repo}/dashboard"]["get"]["parameters"][2]
+            ["name"],
+        "ref"
+    );
     assert_eq!(
         document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
         "bearer"
@@ -248,6 +346,32 @@ async fn generated_openapi_covers_the_runtime_http_contract() {
             ["items"]["type"],
         "string"
     );
+}
+
+#[tokio::test]
+async fn generated_openapi_uses_the_canonical_release_bytes() {
+    // Arrange
+    let app = probe_app(true);
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/openapi.json")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[CACHE_CONTROL], "public, max-age=3600");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("OpenAPI body");
+    assert_eq!(body.as_ref(), http::openapi_json_bytes());
 }
 
 #[tokio::test]
@@ -395,6 +519,160 @@ async fn default_http_policy_emits_no_cross_origin_headers() {
 }
 
 #[tokio::test]
+async fn bundled_gui_serves_the_same_origin_console_entry() {
+    // Arrange
+    let (_gui_dir, app) = probe_app_with_gui();
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["referrer-policy"], "same-origin");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    );
+    assert_eq!(
+        response.headers()["permissions-policy"],
+        "camera=(), geolocation=(), microphone=()"
+    );
+    assert_eq!(response.headers()["x-frame-options"], "DENY");
+    assert!(!response
+        .headers()
+        .contains_key(http::HTTP_API_SURFACE_HEADER));
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("GUI body");
+    assert!(String::from_utf8_lossy(&body).contains("SchemaHub Console"));
+}
+
+#[tokio::test]
+async fn bundled_gui_serves_a_deep_operator_route_as_the_spa_entry() {
+    // Arrange
+    let (_gui_dir, app) = probe_app_with_gui();
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/projects/acme/repos/commerce/changes/change-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("GUI body");
+    assert!(String::from_utf8_lossy(&body).contains("SchemaHub Console"));
+}
+
+#[tokio::test]
+async fn bundled_gui_serves_hashed_assets_with_immutable_caching() {
+    // Arrange
+    let (_gui_dir, app) = probe_app_with_gui();
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/app-deadbeef.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    );
+    assert!(response.headers()[CONTENT_TYPE]
+        .to_str()
+        .expect("asset content type")
+        .contains("javascript"));
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("asset body");
+    assert_eq!(body, "document.title = 'SchemaHub Console';");
+}
+
+#[tokio::test]
+async fn bundled_gui_does_not_cache_an_unhashed_asset_as_immutable() {
+    // Arrange
+    let (_gui_dir, app) = probe_app_with_gui();
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/runtime.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("asset body");
+    assert_eq!(body, "window.__schemahub_runtime = true;");
+}
+
+#[tokio::test]
+async fn bundled_gui_does_not_turn_an_unknown_bff_route_into_html() {
+    // Arrange
+    let (_gui_dir, app) = probe_app_with_gui();
+
+    // Act
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/not-a-real-resource")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("HTTP response");
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[http::HTTP_API_SURFACE_HEADER],
+        http::HTTP_API_SURFACE_GUI_BFF
+    );
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("missing-route body");
+    assert!(!String::from_utf8_lossy(&body).contains("SchemaHub Console"));
+}
+
+#[tokio::test]
 async fn trusted_http_origin_receives_explicit_cross_origin_headers() {
     // Arrange
     let app = probe_app_with_http_config(HttpConfig {
@@ -444,7 +722,7 @@ async fn trusted_http_origin_preflight_allows_the_bff_contract() {
                 .method(Method::OPTIONS)
                 .uri("/api/projects")
                 .header(ORIGIN, "https://gui.example.test")
-                .header(ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
                 .header(
                     ACCESS_CONTROL_REQUEST_HEADERS,
                     "authorization,content-type,if-none-match,x-request-id",
@@ -461,10 +739,12 @@ async fn trusted_http_origin_preflight_allows_the_bff_contract() {
         response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN],
         "https://gui.example.test"
     );
-    assert!(response.headers()[ACCESS_CONTROL_ALLOW_METHODS]
+    let methods = response.headers()[ACCESS_CONTROL_ALLOW_METHODS]
         .to_str()
-        .expect("allowed methods")
-        .contains("GET"));
+        .expect("allowed methods");
+    assert!(methods.contains("GET"));
+    assert!(methods.contains("POST"));
+    assert!(methods.contains("PATCH"));
     let allowed = response.headers()[ACCESS_CONTROL_ALLOW_HEADERS]
         .to_str()
         .expect("allowed headers");
@@ -588,7 +868,7 @@ async fn metrics_expose_request_latency_status_and_readiness_counters() {
 }
 
 #[tokio::test]
-async fn project_navigation_reports_persisted_repo_count_and_caller_role() {
+async fn project_navigation_reports_a_bounded_projection_and_caller_role() {
     // Arrange
     let app = resource_app();
 
@@ -597,9 +877,10 @@ async fn project_navigation_reports_persisted_repo_count_and_caller_role() {
 
     // Assert
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(projects[0]["name"], "acme");
-    assert_eq!(projects[0]["repos"], 1);
-    assert_eq!(projects[0]["role"], "Owner");
+    assert_eq!(projects["projects"][0]["name"], "acme");
+    assert_eq!(projects["projects"][0]["role"], "Owner");
+    assert!(projects["projects"][0].get("repos").is_none());
+    assert_eq!(projects["nextPageToken"], "");
 }
 
 #[tokio::test]
@@ -612,11 +893,141 @@ async fn repository_navigation_reports_persisted_runtime_policy() {
 
     // Assert
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(repositories[0]["project"], "acme");
-    assert_eq!(repositories[0]["repo"], "commerce");
-    assert_eq!(repositories[0]["defaultBranch"], "trunk");
-    assert_eq!(repositories[0]["compatibility"], "backward");
-    assert_eq!(repositories[0]["protectedBranches"][1], "release/*");
+    assert_eq!(repositories["repositories"][0]["project"], "acme");
+    assert_eq!(repositories["repositories"][0]["repo"], "commerce");
+    assert_eq!(repositories["repositories"][0]["defaultBranch"], "trunk");
+    assert_eq!(repositories["repositories"][0]["compatibility"], "backward");
+    assert_eq!(
+        repositories["repositories"][0]["protectedBranches"][1],
+        "release/*"
+    );
+    assert_eq!(repositories["nextPageToken"], "");
+}
+
+#[tokio::test]
+async fn project_catalog_continuation_returns_the_next_bounded_page() {
+    // Arrange
+    let app = resource_app();
+    let (first_status, first_page) = get_json(app.clone(), "/api/projects?pageSize=1").await;
+    let page_token = first_page["nextPageToken"].as_str().expect("project token");
+
+    // Act
+    let (second_status, second_page) = get_json(
+        app,
+        &format!("/api/projects?pageSize=1&pageToken={page_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(first_page["projects"][0]["name"], "acme");
+    assert!(!page_token.is_empty());
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second_page["projects"][0]["name"], "beta");
+    assert_eq!(second_page["nextPageToken"], "");
+}
+
+#[tokio::test]
+async fn repository_catalog_continuation_returns_the_next_bounded_page() {
+    // Arrange
+    let app = resource_app();
+    let (first_status, first_page) =
+        get_json(app.clone(), "/api/projects/acme/repos?pageSize=1").await;
+    let page_token = first_page["nextPageToken"]
+        .as_str()
+        .expect("repository token");
+
+    // Act
+    let (second_status, second_page) = get_json(
+        app,
+        &format!("/api/projects/acme/repos?pageSize=1&pageToken={page_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(first_page["repositories"][0]["repo"], "commerce");
+    assert!(!page_token.is_empty());
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second_page["repositories"][0]["repo"], "events");
+    assert_eq!(second_page["nextPageToken"], "");
+}
+
+#[tokio::test]
+async fn repository_catalog_rejects_a_project_catalog_token() {
+    // Arrange
+    let app = resource_app();
+    let (_, project_page) = get_json(app.clone(), "/api/projects?pageSize=1").await;
+    let project_token = project_page["nextPageToken"]
+        .as_str()
+        .expect("project token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!("/api/projects/acme/repos?pageSize=1&pageToken={project_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repository_catalog_rejects_a_token_from_another_project() {
+    // Arrange
+    let app = resource_app();
+    let (_, repository_page) = get_json(app.clone(), "/api/projects/acme/repos?pageSize=1").await;
+    let repository_token = repository_page["nextPageToken"]
+        .as_str()
+        .expect("repository token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!("/api/projects/beta/repos?pageSize=1&pageToken={repository_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repository_catalog_rejects_a_token_from_another_prefix() {
+    // Arrange
+    let app = resource_app();
+    let (_, repository_page) = get_json(app.clone(), "/api/projects/acme/repos?pageSize=1").await;
+    let repository_token = repository_page["nextPageToken"]
+        .as_str()
+        .expect("repository token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos?pageSize=1&namePrefix=events&pageToken={repository_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repository_catalog_filters_a_bounded_page_by_name_prefix() {
+    // Arrange
+    let app = resource_app();
+
+    // Act
+    let (status, page) =
+        get_json(app, "/api/projects/acme/repos?pageSize=1&namePrefix=events").await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["repositories"][0]["repo"], "events");
+    assert_eq!(page["nextPageToken"], "");
 }
 
 #[tokio::test]
@@ -632,6 +1043,254 @@ async fn repository_dashboard_uses_the_runtime_default_for_an_empty_repo() {
     assert_eq!(dashboard["repo"]["defaultBranch"], "trunk");
     assert_eq!(dashboard["schemas"], json!([]));
     assert_eq!(dashboard["openConflicts"], 0);
+    assert_eq!(dashboard["resolvedCommit"], "");
+    assert_eq!(dashboard["nextPageToken"], "");
+}
+
+#[tokio::test]
+async fn repository_dashboard_continuation_pages_schema_branch_and_tag_names_without_restarts() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    let base = core
+        .jj()
+        .commit_write_multi(
+            "acme",
+            "commerce",
+            "trunk",
+            &RefSpec::bookmark("trunk"),
+            vec![
+                (
+                    "orders.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message Order { string id = 1; }"),
+                ),
+                (
+                    "common.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message Common { string id = 1; }"),
+                ),
+            ],
+            "alice",
+            "seed dashboard schemas",
+        )
+        .expect("seed schemas")
+        .commit_id;
+    for branch in ["feature/b", "feature/a"] {
+        core.jj()
+            .create_bookmark(
+                "acme",
+                "commerce",
+                branch,
+                &RefSpec::commit(base.clone()),
+                "alice",
+            )
+            .expect("create branch");
+    }
+    for tag in ["v2", "v1"] {
+        core.jj()
+            .create_tag(
+                "acme",
+                "commerce",
+                tag,
+                &RefSpec::commit(base.clone()),
+                "alice",
+            )
+            .expect("create tag");
+    }
+
+    // Act
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1",
+    )
+    .await;
+    let first_token = first["nextPageToken"]
+        .as_str()
+        .expect("first dashboard token");
+    let (_, second) = get_json(
+        app.clone(),
+        &format!(
+            "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1&pageToken={first_token}"
+        ),
+    )
+    .await;
+    let second_token = second["nextPageToken"]
+        .as_str()
+        .expect("second dashboard token");
+    let (third_status, third) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1&pageToken={second_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(first["schemas"][0]["path"], "common.proto");
+    assert_eq!(first["branches"], json!(["feature/a"]));
+    assert_eq!(first["tags"], json!(["v1"]));
+    assert!(!first_token.is_empty());
+    assert_eq!(second["schemas"][0]["path"], "orders.proto");
+    assert_eq!(second["branches"], json!(["feature/b"]));
+    assert_eq!(second["tags"], json!(["v2"]));
+    assert!(!second_token.is_empty());
+    assert_eq!(third_status, StatusCode::OK);
+    assert_eq!(third["schemas"], json!([]));
+    assert_eq!(third["branches"], json!(["trunk"]));
+    assert_eq!(third["tags"], json!([]));
+    assert_eq!(third["nextPageToken"], "");
+}
+
+#[tokio::test]
+async fn repository_dashboard_continuation_keeps_the_first_pages_immutable_schema_snapshot() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    core.jj()
+        .commit_write_multi(
+            "acme",
+            "commerce",
+            "trunk",
+            &RefSpec::bookmark("trunk"),
+            vec![
+                (
+                    "a.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message A {}"),
+                ),
+                (
+                    "b.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message B {}"),
+                ),
+            ],
+            "alice",
+            "seed snapshot",
+        )
+        .expect("seed snapshot");
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("dashboard token");
+    let resolved_commit = first["resolvedCommit"]
+        .as_str()
+        .expect("resolved dashboard commit");
+    core.jj()
+        .commit_write(
+            "acme",
+            "commerce",
+            "trunk",
+            "new.proto",
+            &RefSpec::bookmark("trunk"),
+            protobuf_effect("syntax = \"proto3\"; message New {}"),
+            "alice",
+            "advance mutable ref",
+        )
+        .expect("advance trunk");
+
+    // Act
+    let (status, second) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=10&pageToken={page_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["resolvedCommit"], resolved_commit);
+    assert_eq!(second["schemas"].as_array().map(Vec::len), Some(1));
+    assert_eq!(second["schemas"][0]["path"], "b.proto");
+    assert!(second["schemas"]
+        .as_array()
+        .is_some_and(|schemas| schemas.iter().all(|schema| schema["path"] != "new.proto")));
+}
+
+#[tokio::test]
+async fn repository_dashboard_rejects_a_continuation_under_another_repository() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    core.jj()
+        .commit_write_multi(
+            "acme",
+            "commerce",
+            "trunk",
+            &RefSpec::bookmark("trunk"),
+            vec![
+                (
+                    "a.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message A {}"),
+                ),
+                (
+                    "b.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message B {}"),
+                ),
+            ],
+            "alice",
+            "seed dashboard token",
+        )
+        .expect("seed token source");
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("dashboard token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos/events/dashboard?ref=main&pageSize=1&pageToken={page_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn repository_dashboard_rejects_a_continuation_under_another_ref_expression() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    core.jj()
+        .commit_write_multi(
+            "acme",
+            "commerce",
+            "trunk",
+            &RefSpec::bookmark("trunk"),
+            vec![
+                (
+                    "a.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message A {}"),
+                ),
+                (
+                    "b.proto".to_string(),
+                    protobuf_effect("syntax = \"proto3\"; message B {}"),
+                ),
+            ],
+            "alice",
+            "seed ref-bound token",
+        )
+        .expect("seed token source");
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/dashboard?ref=trunk&pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("dashboard token");
+    let resolved_commit = first["resolvedCommit"].as_str().expect("resolved commit");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos/commerce/dashboard?ref=@{resolved_commit}&pageSize=1&pageToken={page_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -708,6 +1367,168 @@ async fn server_config_reports_the_composed_authentication_mode() {
 }
 
 #[tokio::test]
+async fn browser_change_continuation_returns_the_next_indexed_record_page() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    for change_id in ["change-c", "change-a", "change-b"] {
+        core.create_change_record(
+            CreateChange {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                change_id: Some(change_id.to_string()),
+                target_bookmark: "trunk".to_string(),
+                base_revision: None,
+                title: format!("Proposal {change_id}"),
+                description: String::new(),
+                external_references: Vec::new(),
+                edits: Vec::new(),
+            },
+            Some("agent-token"),
+        )
+        .expect("create change");
+    }
+    let expected = core
+        .list_change_records("acme", "commerce", Some("owner-token"))
+        .expect("list expected records");
+
+    // Act
+    let (first_status, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/changes?pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("change token");
+    let (second_status, second) = get_json(
+        app,
+        &format!("/api/projects/acme/repos/commerce/changes?pageSize=1&pageToken={page_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(first["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first["changes"][0]["name"], expected[0].name);
+    assert!(!page_token.is_empty());
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(second["changes"][0]["name"], expected[1].name);
+}
+
+#[tokio::test]
+async fn browser_change_list_rejects_a_token_under_another_repository() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    for change_id in ["first", "second"] {
+        core.create_change_record(
+            CreateChange {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                change_id: Some(change_id.to_string()),
+                target_bookmark: "trunk".to_string(),
+                base_revision: None,
+                title: change_id.to_string(),
+                description: String::new(),
+                external_references: Vec::new(),
+                edits: Vec::new(),
+            },
+            Some("agent-token"),
+        )
+        .expect("create change");
+    }
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/changes?pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("change token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!("/api/projects/acme/repos/events/changes?pageSize=1&pageToken={page_token}"),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn browser_change_list_rejects_a_token_with_another_status_filter() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    for change_id in ["first", "second"] {
+        core.create_change_record(
+            CreateChange {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                change_id: Some(change_id.to_string()),
+                target_bookmark: "trunk".to_string(),
+                base_revision: None,
+                title: change_id.to_string(),
+                description: String::new(),
+                external_references: Vec::new(),
+                edits: Vec::new(),
+            },
+            Some("agent-token"),
+        )
+        .expect("create change");
+    }
+    let (_, first) = get_json(
+        app.clone(),
+        "/api/projects/acme/repos/commerce/changes?pageSize=1",
+    )
+    .await;
+    let page_token = first["nextPageToken"].as_str().expect("change token");
+
+    // Act
+    let (status, _) = get_json(
+        app,
+        &format!(
+            "/api/projects/acme/repos/commerce/changes?pageSize=1&status=draft&pageToken={page_token}"
+        ),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn browser_change_list_filters_one_bounded_page_by_lifecycle_status() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    core.create_change_record(
+        CreateChange {
+            project: "acme".to_string(),
+            repo: "commerce".to_string(),
+            change_id: Some("draft-only".to_string()),
+            target_bookmark: "trunk".to_string(),
+            base_revision: None,
+            title: "Draft proposal".to_string(),
+            description: String::new(),
+            external_references: Vec::new(),
+            edits: Vec::new(),
+        },
+        Some("agent-token"),
+    )
+    .expect("create draft");
+
+    // Act
+    let (status, page) = get_json(
+        app,
+        "/api/projects/acme/repos/commerce/changes?pageSize=1&status=draft",
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(page["changes"][0]["status"], "draft");
+    assert_eq!(page["nextPageToken"], "");
+}
+
+#[tokio::test]
 async fn browser_note_creation_and_listing_preserve_agent_attribution() {
     // Arrange
     let app = resource_app();
@@ -751,11 +1572,202 @@ async fn browser_note_creation_and_listing_preserve_agent_attribution() {
     assert_eq!(created["createdBy"]["kind"], "agent");
     assert_eq!(created["createdBy"]["delegatedBy"], "alice");
     assert_eq!(list_status, StatusCode::OK);
-    assert_eq!(changes.as_array().map(Vec::len), Some(1));
-    assert_eq!(changes[0]["etag"], "v1");
+    assert_eq!(changes["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(changes["changes"][0]["etag"], "v1");
+    assert_eq!(changes["nextPageToken"], "");
     assert_eq!(search_status, StatusCode::OK);
     assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(search["results"][0]["changeId"], "observed-drift");
+}
+
+#[tokio::test]
+async fn browser_can_create_an_executable_source_edit() {
+    // Arrange
+    let app = resource_app();
+
+    // Act
+    let (status, created) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/acme/repos/commerce/changes",
+        "agent-token",
+        json!({
+            "changeId": "browser-executable",
+            "title": "Create order storage schema",
+            "description": "Authored directly in the browser console.",
+            "edits": [{
+                "kind": "replace_source",
+                "schemaPath": "schemas/order.proto",
+                "formatId": "protobuf",
+                "source": "syntax = \"proto3\"; message Order { string id = 1; }"
+            }]
+        }),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["targetBookmark"], "trunk");
+    assert_eq!(created["createdBy"]["identity"], "schema-agent");
+    assert_eq!(created["edits"][0]["kind"], "replace_source");
+    assert_eq!(created["edits"][0]["schemaPath"], "schemas/order.proto");
+    assert_eq!(created["edits"][0]["formatId"], "protobuf");
+    assert_eq!(
+        created["edits"][0]["source"],
+        "syntax = \"proto3\"; message Order { string id = 1; }"
+    );
+}
+
+#[tokio::test]
+async fn browser_can_create_an_executable_schema_deletion() {
+    // Arrange
+    let app = resource_app();
+
+    // Act
+    let (status, created) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/acme/repos/commerce/changes",
+        "agent-token",
+        json!({
+            "changeId": "browser-deletion",
+            "title": "Remove retired order schema",
+            "edits": [{
+                "kind": "delete_schema",
+                "schemaPath": "schemas/legacy-order.proto",
+                "formatId": "protobuf"
+            }]
+        }),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["edits"][0]["kind"], "delete_schema");
+    assert_eq!(
+        created["edits"][0]["schemaPath"],
+        "schemas/legacy-order.proto"
+    );
+    assert_eq!(created["edits"][0]["formatId"], "protobuf");
+    assert!(created["edits"][0]["source"].is_null());
+}
+
+#[tokio::test]
+async fn browser_change_list_omits_large_source_payloads() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    core.create_change_record(
+        CreateChange {
+            project: "acme".to_string(),
+            repo: "commerce".to_string(),
+            change_id: Some("list-summary".to_string()),
+            target_bookmark: "trunk".to_string(),
+            base_revision: None,
+            title: "Create order storage schema".to_string(),
+            description: String::new(),
+            external_references: Vec::new(),
+            edits: vec![ChangeEdit::ReplaceSource {
+                schema: SchemaPath::new("acme", "commerce", "schemas/order.proto"),
+                format_id: "protobuf".to_string(),
+                source: "syntax = \"proto3\"; message Order { string id = 1; }".to_string(),
+            }],
+        },
+        Some("agent-token"),
+    )
+    .expect("create executable draft");
+
+    // Act
+    let (status, changes) = get_json(app, "/api/projects/acme/repos/commerce/changes").await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changes["changes"][0]["edits"][0]["kind"], "replace_source");
+    assert!(changes["changes"][0]["edits"][0]["source"].is_null());
+}
+
+#[tokio::test]
+async fn browser_can_attach_executable_edits_to_an_existing_note() {
+    // Arrange
+    let (core, app) = resource_fixture();
+    let draft = core
+        .create_change_record(
+            CreateChange {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                change_id: Some("browser-attach".to_string()),
+                target_bookmark: "trunk".to_string(),
+                base_revision: None,
+                title: "Observed order drift".to_string(),
+                description: "Intent was recorded before the source was ready.".to_string(),
+                external_references: Vec::new(),
+                edits: Vec::new(),
+            },
+            Some("agent-token"),
+        )
+        .expect("create note-only draft");
+
+    // Act
+    let (status, updated) = request_json(
+        app,
+        Method::PATCH,
+        "/api/projects/acme/repos/commerce/changes/browser-attach",
+        "agent-token",
+        json!({
+            "etag": draft.etag,
+            "edits": [{
+                "kind": "replace_source",
+                "schemaPath": "schemas/order.proto",
+                "formatId": "protobuf",
+                "source": "syntax = \"proto3\"; message Order { string id = 1; string note = 2; }"
+            }]
+        }),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["etag"], "v2");
+    assert_eq!(updated["edits"].as_array().map(Vec::len), Some(1));
+    assert_eq!(updated["edits"][0]["kind"], "replace_source");
+    assert!(updated["validation"].is_null());
+    assert_eq!(
+        updated["edits"][0]["source"],
+        "syntax = \"proto3\"; message Order { string id = 1; string note = 2; }"
+    );
+}
+
+#[tokio::test]
+async fn browser_edit_authoring_rejects_a_schema_format_mismatch_without_creating_state() {
+    // Arrange
+    let (core, app) = resource_fixture();
+
+    // Act
+    let (status, error) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/acme/repos/commerce/changes",
+        "agent-token",
+        json!({
+            "changeId": "mismatched-edit",
+            "title": "Invalid format",
+            "edits": [{
+                "kind": "delete_schema",
+                "schemaPath": "schemas/order.proto",
+                "formatId": "flatbuffers"
+            }]
+        }),
+    )
+    .await;
+
+    // Assert
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("does not match")));
+    assert!(core
+        .list_change_records("acme", "commerce", Some("agent-token"))
+        .expect("list changes")
+        .is_empty());
 }
 
 #[tokio::test]

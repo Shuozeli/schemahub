@@ -12,8 +12,8 @@ use schemahub_types::{Action, Identity, IdentityKind};
 
 use crate::change_record::validation::{PreparedChange, PreparedSchemaChange, ValidationOutcome};
 use crate::change_record::{
-    ApplyAcquisition, ApplyResult, ChangeLedger, ChangeLedgerError, ChangeRecord,
-    ChangeReviewDecision, ChangeUpdate, CreateChange,
+    ApplyAcquisition, ApplyResult, ChangeLedger, ChangeLedgerError, ChangeRecord, ChangeRecordPage,
+    ChangeRecordPageCursor, ChangeRecordStatus, ChangeReviewDecision, ChangeUpdate, CreateChange,
 };
 use crate::{Core, CoreResult};
 
@@ -62,6 +62,23 @@ impl Core {
         ChangeLedger::validate_scope(project, repo)?;
         self.authorize_repo_action(token, Action::Read, project, repo)?;
         Ok(self.change_ledger.list(project, repo)?)
+    }
+
+    /// Read one bounded page of change records in stable creation order.
+    pub fn list_change_records_page(
+        &self,
+        project: &str,
+        repo: &str,
+        status_filter: Option<ChangeRecordStatus>,
+        start_after: Option<&ChangeRecordPageCursor>,
+        limit: usize,
+        token: Option<&str>,
+    ) -> CoreResult<ChangeRecordPage> {
+        ChangeLedger::validate_scope(project, repo)?;
+        self.authorize_repo_action(token, Action::Read, project, repo)?;
+        Ok(self
+            .change_ledger
+            .list_page(project, repo, status_filter, start_after, limit)?)
     }
 
     /// Patch mutable draft fields using optimistic concurrency.

@@ -31,7 +31,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use memory_db::MemoryObjectDb;
-pub use object_db::{ObjectDb, ObjectDbError, ObjectDbResult, ObjectId, ObjectKind, OpId};
+pub use object_db::{
+    ObjectDb, ObjectDbError, ObjectDbLockGuard, ObjectDbResult, ObjectId, ObjectKind, OpId,
+    RecordMutation,
+};
 #[cfg(feature = "postgres")]
 pub use pg_db::PgObjectDb;
 pub use redb_db::RedbObjectDb;
@@ -207,6 +210,40 @@ pub struct CommitRecord {
     pub author: String,
     pub message: String,
     pub timestamp: String,
+}
+
+/// One bounded lexicographical page from a repository-local named-ref
+/// namespace. `next_cursor` is the last returned name and is intentionally
+/// transport-neutral; callers bind it to the request scope before exposing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedRefPage {
+    pub refs: Vec<(String, String)>,
+    pub next_cursor: Option<String>,
+}
+
+/// One bounded lexicographical page of schema-file names from an immutable
+/// repository tree. The cursor is the last returned schema path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaNamePage {
+    pub schemas: Vec<String>,
+    pub next_cursor: Option<String>,
+}
+
+/// A caller-selected set of schemas loaded from one immutable tree traversal.
+///
+/// `all_schema_names` is collected during the same traversal so higher layers
+/// can normalize repository-local imports without scanning the tree again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaLoadBatch {
+    pub schemas: BTreeMap<String, SchemaObjects>,
+    pub all_schema_names: BTreeSet<String>,
+}
+
+/// Conflict counts computed without materializing every conflicted path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictStats {
+    pub total: usize,
+    pub by_schema: BTreeMap<String, usize>,
 }
 
 /// The schemahub-shaped JJ handle — the contract `schemahub-core` consumes.
@@ -490,45 +527,93 @@ impl Jj {
         self.load_schema_from_tree(&jj_repo, &commit.tree(), schema_path)
     }
 
+    /// Load a bounded caller-selected schema set and the repository schema-name
+    /// inventory from one immutable tree traversal.
+    pub fn load_schemas(
+        &self,
+        project: &str,
+        repo: &str,
+        schema_paths: &BTreeSet<String>,
+        at_ref: &RefSpec,
+    ) -> JjResult<SchemaLoadBatch> {
+        if schema_paths.is_empty() {
+            return Ok(SchemaLoadBatch {
+                schemas: BTreeMap::new(),
+                all_schema_names: BTreeSet::new(),
+            });
+        }
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
+        self.load_schemas_from_tree(&jj_repo, &commit.tree(), schema_paths)
+    }
+
     fn load_schema_from_tree(
         &self,
         repo: &Arc<ReadonlyRepo>,
         tree: &jj_lib::merged_tree::MergedTree,
         schema_path: &str,
     ) -> JjResult<SchemaObjects> {
-        // Enumerate the schema subtree's direct entries.
-        let prefix = format!("{schema_path}/");
-        let mut found_schema = false;
-        let mut meta = MetaBlob::default();
-        let mut decls = std::collections::BTreeMap::new();
+        let selected = BTreeSet::from([schema_path.to_string()]);
+        self.load_schemas_from_tree(repo, tree, &selected)?
+            .schemas
+            .remove(schema_path)
+            .ok_or_else(|| JjError::SchemaNotFound(schema_path.to_string()))
+    }
+
+    fn load_schemas_from_tree(
+        &self,
+        repo: &Arc<ReadonlyRepo>,
+        tree: &jj_lib::merged_tree::MergedTree,
+        schema_paths: &BTreeSet<String>,
+    ) -> JjResult<SchemaLoadBatch> {
+        let mut schemas: BTreeMap<String, SchemaObjects> = schema_paths
+            .iter()
+            .cloned()
+            .map(|path| (path, SchemaObjects::default()))
+            .collect();
+        let mut found_schemas = BTreeSet::new();
+        let mut all_schema_names = BTreeSet::new();
+
         for (path, value) in tree.entries() {
             let value = Self::map_jj(value)?;
             let internal = path.as_internal_file_string();
-            let Some(rest) = internal.strip_prefix(&prefix) else {
+            let Some((schema_path, component)) = internal.rsplit_once('/') else {
                 continue;
             };
-            if rest.contains('/') {
-                continue; // not a direct child of the schema subtree
+            if component == META_NAME {
+                all_schema_names.insert(schema_path.to_string());
             }
-            // `rest` is the single encoded decl-name component; decode it back to
-            // the original name (which itself may contain `/`).
-            let name = decode_decl_name(rest);
-            found_schema = true;
+            let Some(schema) = schemas.get_mut(schema_path) else {
+                continue;
+            };
+            found_schemas.insert(schema_path.to_string());
             // Conflicted entries are surfaced via read_conflict, not here.
             let Ok(Some(TreeValue::File { id, .. })) = value.into_resolved() else {
                 continue;
             };
             let bytes = self.read_file(repo, &id)?;
-            if name == META_NAME {
-                meta = MetaBlob::new(bytes);
+            if component == META_NAME {
+                schema.meta = MetaBlob::new(bytes);
             } else {
-                decls.insert(name, DeclBlob::new(bytes));
+                // `component` is the single encoded decl-name component; decode
+                // it back to the original name (which itself may contain `/`).
+                schema
+                    .decls
+                    .insert(decode_decl_name(component), DeclBlob::new(bytes));
             }
         }
-        if !found_schema {
-            return Err(JjError::SchemaNotFound(schema_path.to_string()));
+        if let Some(missing) = schema_paths.difference(&found_schemas).next() {
+            return Err(JjError::SchemaNotFound(missing.clone()));
         }
-        Ok(SchemaObjects { meta, decls })
+        Ok(SchemaLoadBatch {
+            schemas,
+            all_schema_names,
+        })
     }
 
     /// List conflicted declaration paths at an immutable ref. Paths retain the
@@ -549,6 +634,44 @@ impl Jj {
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
         )?;
         self.conflicted_declaration_paths(&commit.tree())
+    }
+
+    /// Count all conflicts and the conflicts belonging to a bounded caller
+    /// selection of schema paths without collecting the repository-wide
+    /// conflict namespace.
+    pub fn conflict_stats(
+        &self,
+        project: &str,
+        repo: &str,
+        at_ref: &RefSpec,
+        selected_schemas: &BTreeSet<String>,
+    ) -> JjResult<ConflictStats> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
+        let mut total = 0usize;
+        let mut by_schema = BTreeMap::new();
+        for (path, value) in commit.tree().conflicts() {
+            Self::map_jj(value)?;
+            total = total
+                .checked_add(1)
+                .ok_or_else(|| JjError::Corrupt("conflict count overflow".to_string()))?;
+            let internal = path.as_internal_file_string();
+            let Some((schema, _)) = internal.rsplit_once('/') else {
+                continue;
+            };
+            if selected_schemas.contains(schema) {
+                let count = by_schema.entry(schema.to_string()).or_insert(0usize);
+                *count = count.checked_add(1).ok_or_else(|| {
+                    JjError::Corrupt("schema conflict count overflow".to_string())
+                })?;
+            }
+        }
+        Ok(ConflictStats { total, by_schema })
     }
 
     fn conflicted_declaration_paths(
@@ -587,6 +710,62 @@ impl Jj {
                 .block_on(jj_repo.store().get_commit_async(&commit_id)),
         )?;
         self.list_schemas_in_tree(&commit.tree())
+    }
+
+    /// List one bounded schema-name page in lexicographical path order.
+    ///
+    /// The tree iterator stops after one page plus lookahead and does not load
+    /// declaration blobs. A later page resumes exclusively after the returned
+    /// schema path.
+    pub fn list_schemas_page(
+        &self,
+        project: &str,
+        repo: &str,
+        at_ref: &RefSpec,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> JjResult<SchemaNamePage> {
+        if limit == 0 {
+            return Ok(SchemaNamePage {
+                schemas: Vec::new(),
+                next_cursor: None,
+            });
+        }
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let commit_id = self.resolve_ref(&repo_key, &jj_repo, at_ref)?;
+        let commit = Self::map_jj(
+            self.store
+                .block_on(jj_repo.store().get_commit_async(&commit_id)),
+        )?;
+        let mut schemas = Vec::with_capacity(limit);
+        for (path, value) in commit.tree().entries() {
+            Self::map_jj(value)?;
+            let internal = path.as_internal_file_string();
+            let Some(schema) = internal.strip_suffix(&format!("/{META_NAME}")) else {
+                continue;
+            };
+            if start_after.is_some_and(|cursor| schema <= cursor) {
+                continue;
+            }
+            schemas.push(schema.to_string());
+            if schemas.len() > limit {
+                break;
+            }
+        }
+        let has_more = schemas.len() > limit;
+        if has_more {
+            schemas.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            schemas.last().cloned()
+        } else {
+            None
+        };
+        Ok(SchemaNamePage {
+            schemas,
+            next_cursor,
+        })
     }
 
     fn list_schemas_in_tree(
@@ -1206,6 +1385,91 @@ impl Jj {
             .collect())
     }
 
+    /// Look up one bookmark without materializing the repository's complete
+    /// bookmark namespace.
+    pub fn get_bookmark(&self, project: &str, repo: &str, name: &str) -> JjResult<Option<String>> {
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let target = jj_repo.view().get_local_bookmark(RefName::new(name));
+        if target.is_absent() {
+            return Ok(None);
+        }
+        let head = target
+            .added_ids()
+            .next()
+            .map(|id| Some(id.hex()))
+            .ok_or_else(|| {
+                JjError::Corrupt(format!(
+                    "bookmark {name:?} is present without an added target"
+                ))
+            })?;
+        Ok(head)
+    }
+
+    /// List one bounded bookmark page in lexicographical name order.
+    ///
+    /// The JJ operation view stores refs in a `BTreeMap`; this method walks that
+    /// immutable view lazily and materializes at most `limit + 1` matching
+    /// entries. Loading the JJ view itself remains one repository-scoped object
+    /// read.
+    pub fn list_bookmarks_page(
+        &self,
+        project: &str,
+        repo: &str,
+        name_prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> JjResult<NamedRefPage> {
+        if limit == 0 {
+            return Ok(NamedRefPage {
+                refs: Vec::new(),
+                next_cursor: None,
+            });
+        }
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let mut refs = jj_repo
+            .view()
+            .local_bookmarks()
+            .skip_while(|(name, _)| {
+                let name = name.as_str();
+                start_after.map_or(name < name_prefix, |cursor| name <= cursor)
+            })
+            .take_while(|(name, _)| {
+                name_prefix.is_empty() || name.as_str().starts_with(name_prefix)
+            })
+            .take(limit.saturating_add(1))
+            .map(|(name, target)| {
+                let head = target.added_ids().next().ok_or_else(|| {
+                    JjError::Corrupt(format!(
+                        "bookmark {:?} is present without an added target",
+                        name.as_str()
+                    ))
+                })?;
+                Ok((name.as_str().to_string(), head.hex()))
+            })
+            .collect::<JjResult<Vec<_>>>()?;
+        let has_more = refs.len() > limit;
+        if has_more {
+            refs.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            Some(
+                refs.last()
+                    .ok_or_else(|| {
+                        JjError::Corrupt(
+                            "bookmark page lookahead had no returned predecessor".to_string(),
+                        )
+                    })?
+                    .0
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        Ok(NamedRefPage { refs, next_cursor })
+    }
+
     /// Create a tag (name → commit pin) at the commit `at` resolves to.
     pub fn create_tag(
         &self,
@@ -1260,6 +1524,65 @@ impl Jj {
                     .map(|id| (name.as_str().to_string(), id.hex()))
             })
             .collect())
+    }
+
+    /// List one bounded tag page in lexicographical name order.
+    pub fn list_tags_page(
+        &self,
+        project: &str,
+        repo: &str,
+        name_prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> JjResult<NamedRefPage> {
+        if limit == 0 {
+            return Ok(NamedRefPage {
+                refs: Vec::new(),
+                next_cursor: None,
+            });
+        }
+        let repo_key = Self::repo_key(project, repo);
+        let jj_repo = self.store.load_repo(&repo_key)?;
+        let mut refs = jj_repo
+            .view()
+            .local_tags()
+            .skip_while(|(name, _)| {
+                let name = name.as_str();
+                start_after.map_or(name < name_prefix, |cursor| name <= cursor)
+            })
+            .take_while(|(name, _)| {
+                name_prefix.is_empty() || name.as_str().starts_with(name_prefix)
+            })
+            .take(limit.saturating_add(1))
+            .map(|(name, target)| {
+                let commit = target.added_ids().next().ok_or_else(|| {
+                    JjError::Corrupt(format!(
+                        "tag {:?} is present without an added target",
+                        name.as_str()
+                    ))
+                })?;
+                Ok((name.as_str().to_string(), commit.hex()))
+            })
+            .collect::<JjResult<Vec<_>>>()?;
+        let has_more = refs.len() > limit;
+        if has_more {
+            refs.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            Some(
+                refs.last()
+                    .ok_or_else(|| {
+                        JjError::Corrupt(
+                            "tag page lookahead had no returned predecessor".to_string(),
+                        )
+                    })?
+                    .0
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        Ok(NamedRefPage { refs, next_cursor })
     }
 
     // ── Operation log & undo ──────────────────────────────────────────────────

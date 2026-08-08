@@ -1,0 +1,11 @@
+[package]
+name = "schemahub-codelab-consumers"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+flatbuffers = "25.12.19"
+prost = "0.13"

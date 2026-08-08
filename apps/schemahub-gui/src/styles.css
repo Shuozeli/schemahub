@@ -17,6 +17,31 @@ body {
   min-height: calc(100vh - 56px);
 }
 
+.shellHeader {
+  overflow: hidden;
+}
+
+.shellBrand,
+.shellIdentity {
+  flex: 0 0 auto;
+}
+
+.globalSearch {
+  flex: 1 1 420px;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.identityMenuButton {
+  max-width: min(260px, 30vw);
+}
+
+.identityMenuLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .navSectionLabel {
   color: #667085;
   font-size: 11px;
@@ -75,11 +100,66 @@ body {
   background: #f4f7fb;
 }
 
+.codeViewer {
+  overflow: auto;
+  background: #fbfcfe;
+  color: #1d2939;
+}
+
+.codeViewer:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+
+.codeViewerCode {
+  min-width: max-content;
+  margin: 0;
+  padding: 12px 0;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.codeViewerLine {
+  display: block;
+  min-height: 1.55em;
+  padding-right: 16px;
+  white-space: pre;
+}
+
+.codeViewerLine::before {
+  display: inline-block;
+  width: 4ch;
+  margin-right: 16px;
+  padding-left: 12px;
+  border-right: 1px solid #e4e7ec;
+  color: #98a2b3;
+  content: attr(data-line);
+  text-align: right;
+  user-select: none;
+}
+
 @media (max-width: 1100px) {
   .metricStrip,
   .splitGrid,
   .compareGrid,
   .conflictGrid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 47.99em) {
+  .globalSearch {
+    display: none;
+  }
+
+  .identityMenuButton {
+    min-width: 36px;
+    padding-inline: 8px;
+  }
+
+  .identityMenuLabel {
+    display: none;
   }
 }

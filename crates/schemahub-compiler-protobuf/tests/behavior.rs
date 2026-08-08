@@ -680,13 +680,12 @@ message Order {
 service Orders { rpc Get(Order) returns (Order); }
 "#,
     );
-    let mut closure = SchemaClosure::new();
+    let root = SchemaPath::new("p", "r", "order.proto");
+    let mut closure = SchemaClosure::with_root(root.clone());
     closure
         .entries
         .insert(SchemaPath::new("p", "r", "common.proto"), common);
-    closure
-        .entries
-        .insert(SchemaPath::new("p", "r", "order.proto"), order);
+    closure.entries.insert(root, order);
 
     // Act
     let code = compiler
@@ -717,6 +716,80 @@ service Orders { rpc Get(Order) returns (Order); }
     assert!(
         code.contains("pub price: ::core::option::Option<super::Money>"),
         "nested message should resolve an imported package sibling:\n{code}"
+    );
+}
+
+#[test]
+fn generate_code_renders_cross_package_modules_and_reexports_the_requested_root() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let common = parse_to_objects(
+        r#"syntax = "proto3";
+package shared.money.v1;
+message Money { int64 units = 1; }
+"#,
+    );
+    let order = parse_to_objects(
+        r#"syntax = "proto3";
+package commerce.order.v1;
+import "p/r/common.proto";
+message Order { shared.money.v1.Money total = 1; }
+"#,
+    );
+    let root = SchemaPath::new("p", "r", "order.proto");
+    let mut closure = SchemaClosure::with_root(root.clone());
+    closure
+        .entries
+        .insert(SchemaPath::new("p", "r", "common.proto"), common);
+    closure.entries.insert(root, order);
+
+    // Act
+    let code = compiler
+        .generate_code(
+            &closure,
+            Language::Rust,
+            &schemahub_types::CodegenOptions::default(),
+        )
+        .expect("cross-package closure codegen");
+
+    // Assert
+    assert!(code.contains("pub mod shared {"), "{code}");
+    assert!(code.contains("use super::super::super::shared;"), "{code}");
+    assert!(
+        code.contains("pub total: ::core::option::Option<shared::money::v1::Money>"),
+        "{code}"
+    );
+    assert!(code.contains("pub use commerce::order::v1::*;"), "{code}");
+}
+
+#[test]
+fn generate_code_rejects_a_multi_file_closure_without_an_explicit_root() {
+    // Arrange
+    let compiler = ProtobufCompiler::new();
+    let mut closure = SchemaClosure::new();
+    closure.entries.insert(
+        SchemaPath::new("p", "r", "common.proto"),
+        parse_to_objects("syntax = \"proto3\"; package shared.v1; message Shared {}"),
+    );
+    closure.entries.insert(
+        SchemaPath::new("p", "r", "root.proto"),
+        parse_to_objects("syntax = \"proto3\"; package app.v1; message Root {}"),
+    );
+
+    // Act
+    let result = compiler.generate_code(
+        &closure,
+        Language::Rust,
+        &schemahub_types::CodegenOptions::default(),
+    );
+
+    // Assert
+    let error = result.expect_err("multi-file codegen must require a root");
+    assert!(
+        error
+            .to_string()
+            .contains("multi-file Protobuf codegen requires an explicit root schema"),
+        "unexpected error: {error}"
     );
 }
 

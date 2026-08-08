@@ -62,6 +62,7 @@ pub fn to_status(err: CoreError) -> Status {
             Status::failed_precondition("idempotency capacity is occupied by in-progress requests")
         }
         CoreError::Idempotency(IdempotencyError::Backend(message)) => Status::internal(message),
+        CoreError::ControlPlaneAudit(error) => Status::internal(error.to_string()),
         CoreError::Incompatible(violations) => Status::failed_precondition(format!(
             "compatibility violation: {} issue(s) on a protected bookmark",
             violations.len()

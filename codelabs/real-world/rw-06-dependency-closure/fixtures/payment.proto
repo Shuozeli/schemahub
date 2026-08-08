@@ -1,0 +1,9 @@
+syntax = "proto3";
+package payments.capture.v1;
+
+import "payments/contracts/payments/money.proto";
+
+message PaymentCaptured {
+  string payment_id = 1;
+  .payments.money.v1.Money amount = 2;
+}

@@ -5,6 +5,7 @@ import {
   Code,
   Divider,
   Group,
+  Modal,
   Paper,
   SimpleGrid,
   Stack,
@@ -13,12 +14,29 @@ import {
   TextInput,
   Title,
 } from '@mantine/core';
-import { Bot, CheckCircle2, CircleAlert, FilePenLine, GitCommit } from 'lucide-react';
-import { useState } from 'react';
+import { useDisclosure } from '@mantine/hooks';
+import { Bot, CheckCircle2, CircleAlert, FilePenLine, GitCommit, Pencil } from 'lucide-react';
+import { FormEvent, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { useChange, useChangeAction, useSession } from '../api/queries';
-import type { ChangeAction, ChangeApplyResult, ChangeRecord } from '../api/types';
+import {
+  useChange,
+  useChangeAction,
+  useSession,
+  useUpdateChangeEdits,
+} from '../api/queries';
+import type {
+  ChangeAction,
+  ChangeApplyResult,
+  ChangeEdit,
+  ChangeEditInput,
+  ChangeRecord,
+} from '../api/types';
+import {
+  ChangeEditComposer,
+  changeEditsAreComplete,
+  prepareChangeEdits,
+} from '../components/ChangeEditComposer';
 import { ChangeStatusBadge, RefBadge } from '../components/badges';
 
 export function ChangeDetailPage() {
@@ -26,7 +44,10 @@ export function ChangeDetailPage() {
   const { data: change, error, isLoading } = useChange(project, repo, changeId);
   const { data: session } = useSession();
   const action = useChangeAction(project, repo, changeId);
+  const updateEdits = useUpdateChangeEdits(project, repo, changeId);
   const [reason, setReason] = useState('');
+  const [draftEdits, setDraftEdits] = useState<ChangeEditInput[]>([]);
+  const [editorOpened, { open: openEditor, close: closeEditor }] = useDisclosure(false);
 
   if (isLoading) return <Text>Loading change proposal...</Text>;
   if (error || !change) {
@@ -40,6 +61,26 @@ export function ChangeDetailPage() {
   );
   const canReview =
     Boolean(session?.id) && session?.id !== change.createdBy.identity && !reviewedByCaller;
+  const editableInputs = editableChangeInputs(change.edits);
+
+  function beginEditing() {
+    if (!editableInputs) return;
+    setDraftEdits(editableInputs);
+    openEditor();
+  }
+
+  async function saveEdits(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      await updateEdits.mutateAsync({
+        etag: currentEtag,
+        edits: prepareChangeEdits(draftEdits),
+      });
+      closeEditor();
+    } catch {
+      // The mutation retains the server error and renders it in the editor.
+    }
+  }
 
   async function run(nextAction: ChangeAction) {
     try {
@@ -136,8 +177,17 @@ export function ChangeDetailPage() {
 
       {change.edits.length === 0 ? (
         <Alert color="blue" icon={<FilePenLine size={18} />} title="Intent-only draft">
-          This record preserves schema-change intent but has no executable edits. Attach mutations
-          or source edits through the CLI or ChangeService before marking it ready.
+          <Group justify="space-between" align="center">
+            <Text size="sm">
+              This record preserves schema-change intent but has no executable edits. Attach source
+              or deletion edits here before marking it ready.
+            </Text>
+            {change.status === 'draft' ? (
+              <Button variant="light" size="xs" onClick={beginEditing}>
+                Add executable edits
+              </Button>
+            ) : null}
+          </Group>
         </Alert>
       ) : null}
 
@@ -239,7 +289,25 @@ export function ChangeDetailPage() {
       <Paper withBorder radius="sm">
         <Group p="md" justify="space-between">
           <Title order={4}>Executable edits</Title>
-          <Badge variant="light">{change.edits.length}</Badge>
+          <Group gap="xs">
+            <Badge variant="light">{change.edits.length}</Badge>
+            {change.status === 'draft' ? (
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={<Pencil size={14} />}
+                onClick={beginEditing}
+                disabled={!editableInputs}
+                title={
+                  editableInputs
+                    ? 'Replace the draft edit list using its current ETag'
+                    : 'Compiler mutation bytes remain editable through the CLI or gRPC client'
+                }
+              >
+                Edit
+              </Button>
+            ) : null}
+          </Group>
         </Group>
         <Table verticalSpacing="sm">
           <Table.Thead>
@@ -247,12 +315,13 @@ export function ChangeDetailPage() {
               <Table.Th>Kind</Table.Th>
               <Table.Th>Schema</Table.Th>
               <Table.Th>Format</Table.Th>
+              <Table.Th>Payload</Table.Th>
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
             {change.edits.length === 0 ? (
               <Table.Tr>
-                <Table.Td colSpan={3}>No executable edits attached.</Table.Td>
+                <Table.Td colSpan={4}>No executable edits attached.</Table.Td>
               </Table.Tr>
             ) : (
               change.edits.map((edit, index) => (
@@ -260,6 +329,13 @@ export function ChangeDetailPage() {
                   <Table.Td>{edit.kind.replace('_', ' ')}</Table.Td>
                   <Table.Td className="mono">{edit.schemaPath}</Table.Td>
                   <Table.Td>{edit.formatId}</Table.Td>
+                  <Table.Td>
+                    {edit.kind === 'replace_source'
+                      ? `${edit.source?.length || 0} source characters`
+                      : edit.kind === 'mutation'
+                        ? 'compiler operation'
+                        : 'deletion'}
+                  </Table.Td>
                 </Table.Tr>
               ))
             )}
@@ -270,8 +346,67 @@ export function ChangeDetailPage() {
       <ValidationPanel change={change} />
       <ReviewsPanel change={change} />
       {change.applyResult ? <ApplyResultPanel result={change.applyResult} /> : null}
+
+      <Modal
+        opened={editorOpened}
+        onClose={closeEditor}
+        title="Edit executable changes"
+        centered
+        size="xl"
+      >
+        <form onSubmit={saveEdits}>
+          <Stack>
+            <Alert color="blue">
+              Saving replaces this draft&apos;s executable edit list under ETag concurrency
+              control. Existing validation is cleared so the new final state must be validated
+              again.
+            </Alert>
+            <ChangeEditComposer
+              value={draftEdits}
+              onChange={setDraftEdits}
+              disabled={updateEdits.isPending}
+            />
+            {updateEdits.error ? <Alert color="red">{updateEdits.error.message}</Alert> : null}
+            <Group justify="flex-end">
+              <Button variant="default" onClick={closeEditor} disabled={updateEdits.isPending}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                loading={updateEdits.isPending}
+                disabled={!changeEditsAreComplete(draftEdits)}
+              >
+                Save executable edits
+              </Button>
+            </Group>
+          </Stack>
+        </form>
+      </Modal>
     </Stack>
   );
+}
+
+function editableChangeInputs(edits: ChangeEdit[]): ChangeEditInput[] | null {
+  const editable: ChangeEditInput[] = [];
+  for (const edit of edits) {
+    if (edit.kind === 'mutation') return null;
+    if (edit.kind === 'replace_source') {
+      if (edit.source === undefined) return null;
+      editable.push({
+        kind: 'replace_source',
+        schemaPath: edit.schemaPath,
+        formatId: edit.formatId,
+        source: edit.source,
+      });
+    } else {
+      editable.push({
+        kind: 'delete_schema',
+        schemaPath: edit.schemaPath,
+        formatId: edit.formatId,
+      });
+    }
+  }
+  return editable;
 }
 
 function ValidationPanel({ change }: { change: ChangeRecord }) {

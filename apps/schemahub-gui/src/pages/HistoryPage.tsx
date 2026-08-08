@@ -10,7 +10,12 @@ export function HistoryPage() {
   const { data: repository } = useRepository(project, repo);
   const refName = searchParams.get('ref') || repository?.defaultBranch || '';
   const { data, error, isLoading } = useHistory(project, repo, refName);
-  const { data: dashboard } = useRepoDashboard(project, repo, refName);
+  const {
+    data: dashboard,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useRepoDashboard(project, repo, refName);
 
   if (error) {
     return <Alert color="red">{error.message}</Alert>;
@@ -28,6 +33,9 @@ export function HistoryPage() {
           ...(dashboard?.tags ?? []).map((tag) => `tag:${tag}`),
         ]}
         onRefChange={(value) => setSearchParams({ ref: value })}
+        hasMoreRefs={hasNextPage}
+        loadingMoreRefs={isFetchingNextPage}
+        onLoadMoreRefs={() => void fetchNextPage()}
       />
 
       <Tabs defaultValue="commits">

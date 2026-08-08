@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T17:11:37Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 
 # Codelab: Build and Audit the SchemaHub CLI over gRPC
 
@@ -46,7 +46,7 @@ Examples of command-to-service mapping:
 | CLI command | gRPC service |
 |---|---|
 | `schemahub repo init` | `ProjectServiceClient` |
-| `schemahub project create/get/list/set-visibility/archive/member ...` | `ProjectServiceClient` |
+| `schemahub project create/get/list/set-visibility/archive/member/audit ...` | `ProjectServiceClient` |
 | `schemahub change note/add-source/validate/ready/review/apply/abandon` | `ChangeServiceClient` |
 | `schemahub schema create/update/delete` | `SchemaServiceClient` |
 | `schemahub schema pull/dependents` | `ExplorationServiceClient` |
@@ -219,10 +219,15 @@ Inspect the durable resources and their ETags:
 ```bash
 schemahub_cli project get acme
 schemahub_cli project list --prefix ac --page-size 10
+schemahub_cli project audit acme
+schemahub_cli project audit acme --json |
+  jq 'map({action, actor, resource_name, before, after})'
 ```
 
 Project/repository resources, memberships, ChangeRecords, and JJ state all use
 the selected redb database. They occupy separate record/object namespaces.
+Project/member/repository mutations and their typed administrative events
+commit atomically; only Owners can read that audit stream.
 
 Before changing a schema, record the intent. Humans get readable output; agents
 and CI can request a stable JSON resource:

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T20:46:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # schemahub — gRPC API (v2: Compilers + Jujutsu-style JJ)
 
 > This document specifies the gRPC API surface **as implemented**: all services, RPCs, request/response shapes, and mutation types. The `.proto` files described here are the external contract that the CLI, AI agents, and any future client libraries depend on. The server (`schemahub-server`) translates these wire types into the internal `Mutation` envelope and `Core` calls described in `design.md`.
@@ -205,7 +205,9 @@ service ChangeService {
   issue, incident, design, or automation IDs without trusting them as actors.
 - `ListChanges` is creation-time/name ordered, status-filterable, and paginated
   with parent/filter-bound opaque cursors. Page size defaults to 50 and is
-  capped at 200.
+  capped at 200. Each page traverses the matching repository/status index
+  through one bounded `ObjectDb` range and validates every returned target;
+  existing v1 cursor encoding and observable ordering are unchanged.
 - `UpdateChange` requires `google.protobuf.FieldMask` and the current ETag.
   Mutable paths are `target_bookmark`, `base_revision`, `title`, `description`,
   `external_references`, and `edits`. Stale ETags return `ABORTED`.
@@ -315,7 +317,14 @@ A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService
 ### 5.2 Branches (bookmarks)
 
 - **`CreateBranch`** creates a bookmark from `from` (default: the repository's configured bookmark); returns `BranchInfo` (`protected` is always reported `false` — protection lives in repo config, §8).
-- **`ListBranches`** / **`GetBranch`** enumerate bookmarks (optional `name_prefix`), reporting each bookmark's first target as `head_commit`.
+- **`ListBranches`** accepts optional `name_prefix`, `page_size`, and opaque
+  `page_token`, reporting each bookmark's first target as `head_commit` in
+  stable lexicographical name order. The continuation is bound to branch kind,
+  project, repository, and prefix; return it unchanged until
+  `next_page_token` is empty. One page lazily materializes at most
+  `page_size + 1` entries from the repository-local immutable JJ view.
+- **`GetBranch`** performs a direct named lookup rather than enumerating the
+  bookmark namespace.
 - **`DeleteBranch`** removes the bookmark via `Core::delete_bookmark` (delegating to `Jj::delete_bookmark`).
 
 ### 5.3 Tags
@@ -323,7 +332,9 @@ A **branch is a jj bookmark**; the branch name == the bookmark name. `RefService
 - **`CreateTag`** points a tag at `target` (default: the repository's configured bookmark); `annotated` is set when `message` is non-empty.
 - Tag names are immutable: creating an existing name returns `ALREADY_EXISTS`
   and leaves its original target unchanged.
-- **`ListTags`** enumerates tags (optional `name_prefix`).
+- **`ListTags`** uses the same stable, bounded pagination contract as branches;
+  its token is tag-kind/project/repository/prefix-bound and cannot be reused
+  for a branch page.
 - **`DeleteTag`** requires `force=true` (else `FAILED_PRECONDITION` — tags are immutable pins by contract); when set, removes the tag via `Core::delete_tag`.
 
 ### 5.4 Merge
@@ -579,6 +590,7 @@ service ProjectService {
   rpc CreateProject / GetProject / UpdateProject / ListProjects / DeleteProject
   rpc CreateRepo / GetRepo / UpdateRepo / ListRepos / DeleteRepo
   rpc AddMember / RemoveMember / UpdateMemberRole / ListMembers
+  rpc ListControlPlaneAuditEvents
 }
 ```
 
@@ -593,18 +605,38 @@ JJ history. See `resources-and-policy.md`.
 | `CreateProject` | **REAL** — wired to `Core::create_project`. Anonymous identities are rejected (`PERMISSION_DENIED`); the resolved caller becomes the project's Owner. |
 | `GetProject` | Reads active projects; `include_archived=true` enables an Owner-only audit read. Archived records are hidden by default. |
 | `UpdateProject` | Owner-only field-mask update of `is_public`; requires the current project ETag. |
-| `ListProjects` | Returns readable active projects in stable name order with prefix filtering and opaque pagination. `include_archived` adds only archived projects owned by the caller. |
+| `ListProjects` | Returns readable active projects in stable name order with prefix filtering and opaque pagination over bounded catalog ranges. `include_archived` adds only archived projects owned by the caller. An authorization-filtered page can be empty and still carry `next_page_token`; continue until the token is empty. |
 | `DeleteProject` | Owner-only soft archive. Requires an ETag and refuses a project containing repository records unless `force=true`; retained descendants become runtime-inert. |
 | `CreateRepo`, `GetRepo`, `UpdateRepo` | Durable authorized repository CRUD. Updates select policy fields through a field mask and require the current ETag. |
-| `ListRepos` | Stable name-ordered pagination with prefix and archive filters. |
+| `ListRepos` | Stable name-ordered pagination with prefix and archive filters over one bounded per-project catalog range. |
 | `DeleteRepo` | Soft archive that retains JJ history; requires `force=true` when refs exist. |
 | `AddMember`, `RemoveMember`, `UpdateMemberRole` | **REAL** — wired to `Core::add_member` / `remove_member` / `update_member_role`. Owner-only (`Action::ManageProject`). The "last Owner" invariant is enforced fail-fast — these calls refuse to leave a project with zero Owners. |
-| `ListMembers` | **REAL** — `Core::list_members`; gated by `Action::Read`. |
+| `ListMembers` | Gated by project `Action::Read`; stable identity-ordered pagination uses a project-bound opaque token and one bounded primary-key range. Inactive tombstones can yield an empty page with `next_page_token`; continue until the token is empty. |
+| `ListControlPlaneAuditEvents` | Owner-only, newest-first immutable administrative history below `parent=projects/{project}`, with a parent-bound opaque cursor and bounded ordered-index range read. Events contain a server-generated ID, server-derived actor/time, action, target resource name, and typed project/member/repository snapshots before and after the mutation; malformed cursors or corrupt index/event relationships fail closed. |
 
 `RepoConfig` owns compatibility direction, protected branches, required review,
 ChangeRecord-only publication, and per-artifact serving flags. `[repos.*]`
 seeds missing records; `UpdateRepo` changes the persisted runtime policy. The
 durable record wins over the startup fallback.
+
+Project, member, and repository state changes append their event in the same
+ObjectDb transaction as the resource create/CAS. A failed precondition or
+backend error therefore writes neither state nor event. This administrative
+history is distinct from `HistoryService.OpLog`, which remains repository/JJ
+history and supports undo.
+
+Project/repository creates and archive transitions also maintain active/all
+name catalogs in the resource transaction. Pre-index resources are backfilled
+once behind durable markers. Page-token encodings and catalog keys are internal;
+clients return opaque tokens unchanged. Malformed/filter-reused tokens and
+missing, corrupt, or scope-mismatched catalog targets fail closed.
+
+Membership pages use the already ordered
+`projects/{project}/members/{hex(identity)}` role primary keys, so they require
+no derived-index migration. A page reads and validates at most
+`page_size + 1` scoped records. Malformed/cross-project tokens, invalid scoped
+records, and key/content mismatches fail closed; records from another project
+are neither returned nor decoded.
 
 ---
 
@@ -696,6 +728,7 @@ The CLI (`schemahub-cli`) is a pure gRPC client. Top-level commands (`main.rs`) 
 schemahub repo init <project/repo> [--public] [--default-branch main]     # ProjectService (create project+repo)
 
 schemahub project create <name> [--public]                                 # RBAC: caller becomes Owner
+schemahub project member list <project> [--page-size 50] [--json]          # Read access; follows all pages
 schemahub project member add <project> <identity_id> [--role Reader]       # Owner-only
 schemahub project member remove <project> <identity_id>                    # Owner-only
 schemahub project member set-role <project> <identity_id> --role <role>    # Owner-only
@@ -725,12 +758,12 @@ schemahub field rename <project/repo/schema> <message> <old> <new>
 
 schemahub branch create <project/repo> <name> [--from main]
 schemahub branch delete <project/repo> <name>
-schemahub branch list   <project/repo> [--prefix ""]
+schemahub branch list   <project/repo> [--prefix ""] [--page-size 50]
 schemahub branch merge  <project/repo> <source> [--into main] [--base-revision] [--message]
 
 schemahub tag create <project/repo> <name> (--commit <id> | --branch <name>) [--message]
 schemahub tag delete <project/repo> <name> [--force]                       # --force required
-schemahub tag list   <project/repo> [--prefix ""]
+schemahub tag list   <project/repo> [--prefix ""] [--page-size 50]
 
 schemahub log  <project/repo> [--branch main] [--limit 20]                 # commit/change history
 schemahub op log <project/repo> [--limit 0]                                # operation log (audit; 0 = no limit)
@@ -743,7 +776,7 @@ schemahub codegen get     <project/repo/schema> [--branch] [--lang] [--out ./gen
 schemahub codegen preview <project/repo/schema> [--branch] [--lang] [--rust-pluggable-buffer]
 ```
 
-> **AS-BUILT — CLI scope.** Change notes have note/get/list/update/abandon commands and stable `--json` output. Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). Top-level `diff` lives at the root (`schemahub diff …`), not under `branch`; `merge` lives under `branch merge`. `op log` is the only `op` subcommand. `project` ships create/get/list/set-visibility/archive plus `member {add,remove,set-role}`; lifecycle mutations require ETags. Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env (clap `env` feature), or `~/.schemahub` profile (`--profile`). The server coordinate is required and malformed/unreadable config fails closed. CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch. `codegen preview --rust-pluggable-buffer` is honored only for FlatBuffers Rust output.
+> **AS-BUILT — CLI scope.** Change notes have note/get/list/update/abandon commands and stable `--json` output. Granular mutations are exposed only for Protobuf **fields** (`field add/remove/rename`); there is no `message` / `enum` / `service` subcommand yet (those `ApplyMutation` ops exist on the wire but have no CLI). Top-level `diff` lives at the root (`schemahub diff …`), not under `branch`; `merge` lives under `branch merge`. `op log` is the only `op` subcommand. `project` ships create/get/list/set-visibility/archive plus `member {list,add,remove,set-role}`; lifecycle mutations require ETags. Config: server/token via `--server`/`--token` flags, `SCHEMAHUB_SERVER`/`SCHEMAHUB_TOKEN` env (clap `env` feature), or `~/.schemahub` profile (`--profile`). The server coordinate is required and malformed/unreadable config fails closed. CLI ref strings parse as `tag:<name>` → tag, `@<hex>` → commit, else branch. `codegen preview --rust-pluggable-buffer` is honored only for FlatBuffers Rust output.
 
 ---
 

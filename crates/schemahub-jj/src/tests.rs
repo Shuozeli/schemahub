@@ -1,6 +1,6 @@
 //! Unit tests for the jj-style JJ model (AAA style).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -344,6 +344,128 @@ fn list_schemas_preserves_nested_schema_paths() {
             "orders/order.proto".to_string()
         ]
     );
+}
+
+#[test]
+fn schema_pages_preserve_nested_path_order_and_exclusive_continuation() {
+    // Arrange
+    let jj = mem_jj();
+    jj.commit_write_multi(
+        "proj",
+        "repo",
+        "main",
+        &RefSpec::bookmark("main"),
+        vec![
+            (
+                "orders/z.proto".to_string(),
+                upsert("LateOrder", "message late order"),
+            ),
+            (
+                "common/types.proto".to_string(),
+                upsert("Common", "message common"),
+            ),
+            (
+                "orders/a.proto".to_string(),
+                upsert("EarlyOrder", "message early order"),
+            ),
+        ],
+        "alice",
+        "seed paged schemas",
+    )
+    .expect("commit schemas");
+
+    // Act
+    let first = jj
+        .list_schemas_page("proj", "repo", &RefSpec::bookmark("main"), None, 2)
+        .expect("list first schema page");
+    let second = jj
+        .list_schemas_page(
+            "proj",
+            "repo",
+            &RefSpec::bookmark("main"),
+            first.next_cursor.as_deref(),
+            2,
+        )
+        .expect("list second schema page");
+
+    // Assert
+    assert_eq!(
+        first.schemas,
+        [
+            "common/types.proto".to_string(),
+            "orders/a.proto".to_string()
+        ]
+    );
+    assert_eq!(first.next_cursor.as_deref(), Some("orders/a.proto"));
+    assert_eq!(second.schemas, ["orders/z.proto".to_string()]);
+    assert_eq!(second.next_cursor, None);
+}
+
+#[test]
+fn selected_schemas_load_with_the_full_inventory_in_one_batch() {
+    // Arrange
+    let jj = mem_jj();
+    jj.commit_write_multi(
+        "proj",
+        "repo",
+        "main",
+        &RefSpec::bookmark("main"),
+        vec![
+            (
+                "common/types.proto".to_string(),
+                upsert("Common", "message common"),
+            ),
+            (
+                "orders/order.proto".to_string(),
+                MutationEffect {
+                    meta: Some(MetaBlob::new(b"package orders;".to_vec())),
+                    upserts: vec![
+                        (
+                            "Order".to_string(),
+                            DeclBlob::new(b"message order".to_vec()),
+                        ),
+                        (
+                            "OrderState".to_string(),
+                            DeclBlob::new(b"enum order state".to_vec()),
+                        ),
+                    ],
+                    removes: Vec::new(),
+                },
+            ),
+            (
+                "unused.proto".to_string(),
+                upsert("Unused", "message unused"),
+            ),
+        ],
+        "alice",
+        "seed batch",
+    )
+    .expect("commit schemas");
+    let selected = BTreeSet::from([
+        "common/types.proto".to_string(),
+        "orders/order.proto".to_string(),
+    ]);
+
+    // Act
+    let batch = jj
+        .load_schemas("proj", "repo", &selected, &RefSpec::bookmark("main"))
+        .expect("load selected schemas");
+
+    // Assert
+    assert_eq!(
+        batch.schemas.keys().cloned().collect::<BTreeSet<_>>(),
+        selected
+    );
+    assert_eq!(
+        batch.all_schema_names,
+        BTreeSet::from([
+            "common/types.proto".to_string(),
+            "orders/order.proto".to_string(),
+            "unused.proto".to_string(),
+        ])
+    );
+    assert_eq!(batch.schemas["common/types.proto"].decls.len(), 1);
+    assert_eq!(batch.schemas["orders/order.proto"].decls.len(), 2);
 }
 
 #[test]
@@ -963,6 +1085,45 @@ fn concurrent_edits_to_same_decl_produce_a_first_class_conflict() {
 }
 
 #[test]
+fn conflict_stats_count_the_snapshot_but_only_group_selected_schemas() {
+    // Arrange
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.commit_write(
+        "proj",
+        "repo",
+        "main",
+        "user.proto",
+        &RefSpec::commit(base.clone()),
+        upsert("UserRequest", "msg req from A"),
+        "alice",
+        "A",
+    )
+    .expect("write first side");
+    jj.commit_write(
+        "proj",
+        "repo",
+        "main",
+        "user.proto",
+        &RefSpec::commit(base),
+        upsert("UserRequest", "msg req from B"),
+        "bob",
+        "B",
+    )
+    .expect("write second side");
+    let selected = BTreeSet::from(["user.proto".to_string()]);
+
+    // Act
+    let stats = jj
+        .conflict_stats("proj", "repo", &RefSpec::bookmark("main"), &selected)
+        .expect("count conflicts");
+
+    // Assert
+    assert_eq!(stats.total, 1);
+    assert_eq!(stats.by_schema.get("user.proto"), Some(&1));
+}
+
+#[test]
 fn resolve_conflict_replaces_the_conflict_with_a_clean_decl() {
     // Arrange: produce a conflict on UserRequest.
     let jj = mem_jj();
@@ -1042,6 +1203,78 @@ fn create_and_list_bookmark() {
 }
 
 #[test]
+fn bookmark_pages_preserve_prefix_order_and_exclusive_continuation() {
+    // Arrange
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    for name in ["feature/b", "preview/a", "feature/a"] {
+        jj.create_bookmark(
+            "proj",
+            "repo",
+            name,
+            &RefSpec::commit(base.clone()),
+            "alice",
+        )
+        .expect("create bookmark");
+    }
+
+    // Act
+    let first = jj
+        .list_bookmarks_page("proj", "repo", "feature/", None, 1)
+        .expect("list first bookmark page");
+    let second = jj
+        .list_bookmarks_page("proj", "repo", "feature/", first.next_cursor.as_deref(), 1)
+        .expect("list second bookmark page");
+
+    // Assert
+    assert_eq!(
+        first
+            .refs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["feature/a"]
+    );
+    assert_eq!(first.next_cursor.as_deref(), Some("feature/a"));
+    assert_eq!(
+        second
+            .refs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["feature/b"]
+    );
+    assert_eq!(second.next_cursor, None);
+}
+
+#[test]
+fn direct_bookmark_lookup_returns_only_the_requested_head() {
+    // Arrange
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    jj.create_bookmark(
+        "proj",
+        "repo",
+        "feature/x",
+        &RefSpec::commit(base.clone()),
+        "alice",
+    )
+    .expect("create bookmark");
+
+    // Act
+    let found = jj
+        .get_bookmark("proj", "repo", "feature/x")
+        .expect("get bookmark");
+    let missing = jj
+        .get_bookmark("proj", "repo", "feature/missing")
+        .expect("get missing bookmark");
+
+    // Assert
+    assert_eq!(found.as_deref(), Some(base.as_str()));
+    assert_eq!(missing, None);
+}
+
+#[test]
 fn create_and_list_tag() {
     // Arrange
     let jj = mem_jj();
@@ -1060,6 +1293,51 @@ fn create_and_list_tag() {
     // Assert
     let tags = jj.list_tags("proj", "repo").unwrap();
     assert_eq!(tags, vec![("v1.0.0".to_string(), base)]);
+}
+
+#[test]
+fn tag_pages_preserve_prefix_order_and_exclusive_continuation() {
+    // Arrange
+    let jj = mem_jj();
+    let base = seed_two_decls(&jj);
+    for name in ["release/2", "preview/1", "release/1"] {
+        jj.create_tag(
+            "proj",
+            "repo",
+            name,
+            &RefSpec::commit(base.clone()),
+            "alice",
+        )
+        .expect("create tag");
+    }
+
+    // Act
+    let first = jj
+        .list_tags_page("proj", "repo", "release/", None, 1)
+        .expect("list first tag page");
+    let second = jj
+        .list_tags_page("proj", "repo", "release/", first.next_cursor.as_deref(), 1)
+        .expect("list second tag page");
+
+    // Assert
+    assert_eq!(
+        first
+            .refs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["release/1"]
+    );
+    assert_eq!(first.next_cursor.as_deref(), Some("release/1"));
+    assert_eq!(
+        second
+            .refs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["release/2"]
+    );
+    assert_eq!(second.next_cursor, None);
 }
 
 #[test]

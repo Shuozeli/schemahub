@@ -1,4 +1,4 @@
-import { Badge, Group, Paper, Stack, Table, Text, Title } from '@mantine/core';
+import { Badge, Button, Group, Paper, Stack, Table, Text, Title } from '@mantine/core';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { useRepos } from '../api/queries';
@@ -6,7 +6,15 @@ import { useRepos } from '../api/queries';
 export function ProjectPage() {
   const navigate = useNavigate();
   const { project = '' } = useParams();
-  const { data = [], error, isLoading } = useRepos(project);
+  const {
+    data,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+  } = useRepos(project);
+  const repositories = data?.pages.flatMap((page) => page.repositories) ?? [];
 
   return (
     <Stack>
@@ -42,12 +50,12 @@ export function ProjectPage() {
                   {error.message}
                 </Table.Td>
               </Table.Tr>
-            ) : data.length === 0 ? (
+            ) : repositories.length === 0 ? (
               <Table.Tr>
                 <Table.Td colSpan={4}>No active repositories in this project.</Table.Td>
               </Table.Tr>
             ) : (
-              data.map((repository) => (
+              repositories.map((repository) => (
                 <Table.Tr
                   key={repository.repo}
                   className="tableRowLink"
@@ -67,6 +75,15 @@ export function ProjectPage() {
           </Table.Tbody>
         </Table>
       </Paper>
+      {hasNextPage ? (
+        <Button
+          variant="default"
+          loading={isFetchingNextPage}
+          onClick={() => void fetchNextPage()}
+        >
+          Load more repositories
+        </Button>
+      ) : null}
     </Stack>
   );
 }

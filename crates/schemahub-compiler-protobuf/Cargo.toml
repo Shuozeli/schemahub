@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 schemahub-types = { path = "../schemahub-types" }
 bytes           = { workspace = true }
+heck            = { workspace = true }
 # Sibling protobuf compiler (wraps parser/schema/codegen). Declared per
 # crate-structure.md §3.5.
 protoc-rs-parser  = { workspace = true }

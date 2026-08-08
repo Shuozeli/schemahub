@@ -82,6 +82,42 @@ for token in \
     exit 2
   fi
 done
+for required_distribution_text in \
+  "bundled GUI" \
+  "schemahub-gui/index.html"; do
+  if [[ "$CONTENTS" != *"$required_distribution_text"* ]]; then
+    echo "release notes are missing required distribution text: $required_distribution_text" >&2
+    exit 2
+  fi
+done
+if [[ "$VERSION" != *-* ]]; then
+  for required_stable_text in \
+    "## Staging acceptance" \
+    "independently reviewed" \
+    "PostgreSQL" \
+    "JWT/JWKS" \
+    "versioned container tag" \
+    "schemahub-ga-readiness.tar.gz" \
+    "schemahub-staging-attestation.json"; do
+    if [[ "$CONTENTS" != *"$required_stable_text"* ]]; then
+      echo "stable release notes are missing required text: $required_stable_text" >&2
+      exit 2
+    fi
+  done
+fi
+if [[ "$VERSION" == "1.0.0" ]]; then
+  for required_1_0_text in \
+    "schemahub.v1" \
+    "/api/*" \
+    "OpenAPI code generation" \
+    "repository-scoped" \
+    "global multi-repository transaction"; do
+    if [[ "$CONTENTS" != *"$required_1_0_text"* ]]; then
+      echo "1.0 release notes are missing required boundary: $required_1_0_text" >&2
+      exit 2
+    fi
+  done
+fi
 if grep -Eiq '(^|[^A-Za-z])(TODO|TBD)([^A-Za-z]|$)' "$TEMPLATE"; then
   echo "release notes contain an unresolved TODO or TBD marker" >&2
   exit 2

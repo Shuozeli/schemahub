@@ -3,6 +3,7 @@ import type {
   ArtifactDownloadRequest,
   ChangeAction,
   ChangeActionRequest,
+  ChangePage,
   ChangeRecord,
   ConflictDetail,
   ConflictList,
@@ -12,8 +13,10 @@ import type {
   CreateChangeRequest,
   DiffResult,
   OperationEntry,
+  ProjectPage,
   ProjectSummary,
-  RepoDashboard,
+  RepoDashboardPage,
+  RepoPage,
   RepoSummary,
   ResolveConflictRequest,
   ResolveConflictResult,
@@ -21,6 +24,7 @@ import type {
   SearchResponse,
   ServerConfig,
   SessionInfo,
+  UpdateChangeEditsRequest,
 } from './types';
 import type { SchemaHubClient } from './client';
 
@@ -201,14 +205,13 @@ export class MockSchemaHubClient implements SchemaHubClient {
     },
   ];
 
-  async listProjects(): Promise<ProjectSummary[]> {
+  async listProjects(pageToken = '', pageSize = 50): Promise<ProjectPage> {
     await wait();
-    return [
+    const projects: ProjectSummary[] = [
       {
         name: 'acme',
         visibility: 'public',
         role: 'Owner',
-        repos: 2,
         lastOperation: 'MergeBranch',
         lastActivity: '2026-06-24T04:14:21Z',
       },
@@ -216,11 +219,17 @@ export class MockSchemaHubClient implements SchemaHubClient {
         name: 'platform',
         visibility: 'private',
         role: 'Maintainer',
-        repos: 4,
         lastOperation: 'CreateTag',
         lastActivity: '2026-06-23T18:41:00Z',
       },
     ];
+    const offset = Number.parseInt(pageToken || '0', 10) || 0;
+    const effectivePageSize = Math.min(1, Math.max(1, pageSize));
+    const end = Math.min(projects.length, offset + effectivePageSize);
+    return {
+      projects: projects.slice(offset, end),
+      nextPageToken: end < projects.length ? end.toString() : '',
+    };
   }
 
   async getSession(): Promise<SessionInfo> {
@@ -234,9 +243,32 @@ export class MockSchemaHubClient implements SchemaHubClient {
     };
   }
 
-  async listChanges(project: string, repo: string): Promise<ChangeRecord[]> {
+  async listChanges(
+    project: string,
+    repo: string,
+    pageToken = '',
+    pageSize = 50,
+    status = '',
+  ): Promise<ChangePage> {
     await wait();
-    return this.changes.filter((change) => change.project === project && change.repo === repo);
+    const changes = this.changes
+      .filter(
+        (change) =>
+          change.project === project &&
+          change.repo === repo &&
+          (!status || change.status === status),
+      )
+      .sort(
+        (left, right) =>
+          left.createTimeUnixMs - right.createTimeUnixMs || left.name.localeCompare(right.name),
+      );
+    const offset = Number.parseInt(pageToken || '0', 10) || 0;
+    const effectivePageSize = Math.min(1, Math.max(1, pageSize));
+    const end = Math.min(changes.length, offset + effectivePageSize);
+    return {
+      changes: changes.slice(offset, end),
+      nextPageToken: end < changes.length ? end.toString() : '',
+    };
   }
 
   async getChange(project: string, repo: string, changeId: string): Promise<ChangeRecord> {
@@ -254,7 +286,11 @@ export class MockSchemaHubClient implements SchemaHubClient {
   ): Promise<ChangeRecord> {
     await wait();
     const id = request.changeId || `note-${Date.now()}`;
-    const now = Date.now();
+    const latestStoredTime = this.changes.reduce(
+      (latest, change) => Math.max(latest, change.updateTimeUnixMs),
+      0,
+    );
+    const now = Math.max(Date.now(), latestStoredTime + 1);
     const change: ChangeRecord = {
       name: `projects/${project}/repos/${repo}/changes/${id}`,
       project,
@@ -264,7 +300,7 @@ export class MockSchemaHubClient implements SchemaHubClient {
       title: request.title,
       description: request.description,
       externalReferences: request.externalReferences,
-      edits: [],
+      edits: request.edits,
       createdBy: {
         identity: 'demo-agent',
         displayName: 'Demo Schema Agent',
@@ -279,6 +315,28 @@ export class MockSchemaHubClient implements SchemaHubClient {
     };
     this.changes.push(change);
     return change;
+  }
+
+  async updateChangeEdits(
+    project: string,
+    repo: string,
+    changeId: string,
+    request: UpdateChangeEditsRequest,
+  ): Promise<ChangeRecord> {
+    await wait();
+    const current = await this.getChange(project, repo, changeId);
+    if (current.status !== 'draft') throw new Error('only draft changes can be edited');
+    if (current.etag !== request.etag) throw new Error('change record etag mismatch');
+    const next: ChangeRecord = {
+      ...current,
+      edits: request.edits,
+      validation: undefined,
+      etag: `v${Number(current.etag.slice(1)) + 1}`,
+      updateTimeUnixMs: Date.now(),
+    };
+    const index = this.changes.indexOf(current);
+    this.changes[index] = next;
+    return next;
   }
 
   async changeAction(
@@ -465,20 +523,86 @@ export class MockSchemaHubClient implements SchemaHubClient {
     };
   }
 
-  async listRepos(project: string): Promise<RepoSummary[]> {
+  async listRepos(
+    project: string,
+    pageToken = '',
+    pageSize = 50,
+    namePrefix = '',
+  ): Promise<RepoPage> {
     await wait();
-    const repos = project === 'acme' ? ['commerce', 'billing'] : ['schemas', 'events'];
-    return repos.map((repo) => ({
+    const names = project === 'acme' ? ['billing', 'commerce'] : ['events', 'schemas'];
+    const repositories = names
+      .filter((repo) => repo.startsWith(namePrefix))
+      .map((repo) => ({
+        project,
+        repo,
+        defaultBranch: 'main',
+        protectedBranches: ['main', 'release/*'],
+        compatibility: 'full' as const,
+      }));
+    const offset = Number.parseInt(pageToken || '0', 10) || 0;
+    const effectivePageSize = Math.min(1, Math.max(1, pageSize));
+    const end = Math.min(repositories.length, offset + effectivePageSize);
+    return {
+      repositories: repositories.slice(offset, end),
+      nextPageToken: end < repositories.length ? end.toString() : '',
+    };
+  }
+
+  async getRepo(project: string, repo: string): Promise<RepoSummary | undefined> {
+    await wait();
+    const names = project === 'acme' ? ['billing', 'commerce'] : ['events', 'schemas'];
+    if (!names.includes(repo)) return undefined;
+    return {
       project,
       repo,
       defaultBranch: 'main',
       protectedBranches: ['main', 'release/*'],
       compatibility: 'full',
-    }));
+    };
   }
 
-  async getRepoDashboard(project: string, repo: string, _ref: string): Promise<RepoDashboard> {
+  async getRepoDashboard(
+    project: string,
+    repo: string,
+    _ref: string,
+    pageToken = '',
+    pageSize = 50,
+  ): Promise<RepoDashboardPage> {
     await wait();
+    const schemas = [
+      {
+        path: 'order.proto',
+        format: 'protobuf' as const,
+        declarations: 1,
+        dependencies: 1,
+        conflictCount: 0,
+        lastCommit: '6ddcd8c5b0dd',
+      },
+      {
+        path: 'build_record.fbs',
+        format: 'flatbuffers' as const,
+        declarations: 1,
+        dependencies: 0,
+        conflictCount: 0,
+        lastCommit: '4398b6668712',
+      },
+      {
+        path: 'commerce.yaml',
+        format: 'openapi' as const,
+        declarations: 1,
+        dependencies: 0,
+        conflictCount: 1,
+        lastCommit: '37119ed84bba',
+      },
+    ].sort((left, right) => left.path.localeCompare(right.path));
+    const branches = ['main', 'feature/shipping-note', 'feature/catalog-api'].sort();
+    const tags = ['release-2026-06-05'];
+    const offset = Number.parseInt(pageToken || '0', 10) || 0;
+    const effectivePageSize = Math.min(1, Math.max(1, pageSize));
+    const end = offset + effectivePageSize;
+    const hasMore =
+      end < schemas.length || end < branches.length || end < tags.length;
     return {
       repo: {
         project,
@@ -487,37 +611,14 @@ export class MockSchemaHubClient implements SchemaHubClient {
         protectedBranches: ['main', 'release/*'],
         compatibility: 'full',
       },
-      schemas: [
-        {
-          path: 'order.proto',
-          format: 'protobuf',
-          declarations: 1,
-          dependencies: 1,
-          conflictCount: 0,
-          lastCommit: '6ddcd8c5b0dd',
-        },
-        {
-          path: 'build_record.fbs',
-          format: 'flatbuffers',
-          declarations: 1,
-          dependencies: 0,
-          conflictCount: 0,
-          lastCommit: '4398b6668712',
-        },
-        {
-          path: 'commerce.yaml',
-          format: 'openapi',
-          declarations: 1,
-          dependencies: 0,
-          conflictCount: 1,
-          lastCommit: '37119ed84bba',
-        },
-      ],
-      branches: ['main', 'feature/shipping-note', 'feature/catalog-api'],
-      tags: ['release-2026-06-05'],
+      schemas: schemas.slice(offset, end),
+      branches: branches.slice(offset, end),
+      tags: tags.slice(offset, end),
       latestCommit: commits[0],
       latestOperation: operations[0],
       openConflicts: 1,
+      resolvedCommit: '6ddcd8c5b0dd',
+      nextPageToken: hasMore ? end.toString() : '',
     };
   }
 

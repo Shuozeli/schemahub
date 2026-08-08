@@ -133,6 +133,8 @@ async fn branch_mutation_is_isolated_from_main() {
             project: "acme".into(),
             repo: "core".into(),
             name_prefix: String::new(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_branches")
@@ -243,6 +245,8 @@ async fn tag_pins_an_immutable_snapshot() {
             project: "acme".into(),
             repo: "core".into(),
             name_prefix: String::new(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_tags")
@@ -252,6 +256,149 @@ async fn tag_pins_an_immutable_snapshot() {
         "v1.0.0 should be listed: {:?}",
         tags.tags.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn branch_and_tag_pages_are_prefix_scoped_and_stably_ordered() {
+    // Arrange
+    let url = start_server().await;
+    let mut c = clients(&url).await;
+    create_schema(
+        &mut c.schema,
+        "acme",
+        "core",
+        "main",
+        "user.proto",
+        pb::SchemaFormat::Protobuf,
+        USER_PROTO,
+        "ref-page-seed",
+    )
+    .await;
+    for name in ["feature/b", "preview/a", "feature/a"] {
+        c.refs
+            .create_branch(pb::CreateBranchRequest {
+                project: "acme".into(),
+                repo: "core".into(),
+                name: name.into(),
+                from: Some(vref_branch("main")),
+            })
+            .await
+            .expect("create branch");
+    }
+    for name in ["release/2", "preview/1", "release/1"] {
+        c.refs
+            .create_tag(pb::CreateTagRequest {
+                project: "acme".into(),
+                repo: "core".into(),
+                name: name.into(),
+                target: Some(vref_branch("main")),
+                message: String::new(),
+            })
+            .await
+            .expect("create tag");
+    }
+
+    // Act
+    let first_branches = c
+        .refs
+        .list_branches(pb::ListBranchesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name_prefix: "feature/".into(),
+            page_size: 1,
+            page_token: String::new(),
+        })
+        .await
+        .expect("list first branch page")
+        .into_inner();
+    let second_branches = c
+        .refs
+        .list_branches(pb::ListBranchesRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name_prefix: "feature/".into(),
+            page_size: 1,
+            page_token: first_branches.next_page_token.clone(),
+        })
+        .await
+        .expect("list second branch page")
+        .into_inner();
+    let first_tags = c
+        .refs
+        .list_tags(pb::ListTagsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name_prefix: "release/".into(),
+            page_size: 1,
+            page_token: String::new(),
+        })
+        .await
+        .expect("list first tag page")
+        .into_inner();
+    let second_tags = c
+        .refs
+        .list_tags(pb::ListTagsRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name_prefix: "release/".into(),
+            page_size: 1,
+            page_token: first_tags.next_page_token.clone(),
+        })
+        .await
+        .expect("list second tag page")
+        .into_inner();
+    let branch = c
+        .refs
+        .get_branch(pb::GetBranchRequest {
+            project: "acme".into(),
+            repo: "core".into(),
+            name: "feature/b".into(),
+        })
+        .await
+        .expect("get one branch")
+        .into_inner()
+        .branch
+        .expect("branch");
+
+    // Assert
+    assert_eq!(
+        first_branches
+            .branches
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect::<Vec<_>>(),
+        ["feature/a"]
+    );
+    assert!(!first_branches.next_page_token.is_empty());
+    assert_eq!(
+        second_branches
+            .branches
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect::<Vec<_>>(),
+        ["feature/b"]
+    );
+    assert!(second_branches.next_page_token.is_empty());
+    assert_eq!(
+        first_tags
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["release/1"]
+    );
+    assert!(!first_tags.next_page_token.is_empty());
+    assert_eq!(
+        second_tags
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["release/2"]
+    );
+    assert!(second_tags.next_page_token.is_empty());
+    assert_eq!(branch.name, "feature/b");
+    assert!(!branch.head_commit.is_empty());
 }
 
 // ── 3. Merge ────────────────────────────────────────────────────────────────────
@@ -1085,6 +1232,8 @@ async fn duplicate_tag_creation_is_rejected_without_retargeting() {
             project: "acme".into(),
             repo: "core".into(),
             name_prefix: "release".into(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list tags")

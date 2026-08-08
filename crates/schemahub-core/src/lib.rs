@@ -35,6 +35,7 @@ pub mod changes;
 pub mod codegen;
 pub mod config;
 pub mod conflict;
+pub mod control_plane_audit;
 pub mod error;
 pub mod exploration;
 pub mod gc;
@@ -54,10 +55,22 @@ use std::sync::Arc;
 pub use auth_files::{FileProjectStore, FileRoleStore};
 pub use auth_impls::{BearerTokenAuthn, RoleBasedAuthz};
 pub use auth_object_db::{ObjectDbProjectStore, ObjectDbRoleStore};
-pub use auth_store::{AccessStoreError, AccessStoreResult, ProjectMeta, ProjectStore, RoleStore};
+pub use auth_store::{
+    AccessStoreError, AccessStoreResult, ProjectMeta, ProjectStore, ProjectStorePage, RoleStore,
+    RoleStorePage,
+};
 pub use config::{RepoConfig, RepoConfigStore, ReviewPolicy, ServingPolicy};
+pub use control_plane_audit::{
+    audit_collection, audit_index_collection, is_valid_audit_cursor, ControlPlaneAuditAction,
+    ControlPlaneAuditClock, ControlPlaneAuditContext, ControlPlaneAuditError,
+    ControlPlaneAuditEvent, ControlPlaneAuditIdGenerator, ControlPlaneAuditPage,
+    ControlPlaneAuditRuntime, ControlPlaneAuditSnapshot, ObjectDbControlPlaneAuditLog,
+    SystemControlPlaneAuditClock, UuidControlPlaneAuditIdGenerator,
+};
 pub use error::{CoreError, CoreResult};
-pub use exploration::{MAX_DEPENDENCY_SCAN_REPOSITORIES, MAX_DEPENDENCY_SCAN_SCHEMAS};
+pub use exploration::{
+    SchemaInventoryStats, MAX_DEPENDENCY_SCAN_REPOSITORIES, MAX_DEPENDENCY_SCAN_SCHEMAS,
+};
 pub use mutation::idempotency::{
     FingerprintBuilder, IdempotencyError, IdempotencyStore, DEFAULT_TTL_HOURS,
 };
@@ -66,7 +79,7 @@ pub use projects::ProjectUpdate;
 pub use registry::CompilerRegistry;
 pub use repository::{
     CreateRepository, MemoryRepositoryStore, ObjectDbRepositoryStore, Repository, RepositoryError,
-    RepositoryStore, RepositoryStoreError, RepositoryUpdate,
+    RepositoryPage, RepositoryStore, RepositoryStoreError, RepositoryUpdate,
 };
 pub use request::{
     CodegenRequest, CreateSchemaRequest, DeclLocation, DeleteSchemaRequest, DependencyScanSnapshot,
@@ -74,6 +87,7 @@ pub use request::{
     RepositoryDiff, SchemaDependency, SchemaDependent, SearchHit, TransactionDeadline,
     TransactionLimits, TransactionRequest, UpdateSchemaRequest,
 };
+pub use schemahub_jj::{ConflictStats, NamedRefPage, SchemaLoadBatch, SchemaNamePage};
 pub use serving::{SchemaArtifact, SchemaArtifactKind, SchemaRevision};
 
 use schemahub_jj::Jj;
@@ -99,6 +113,8 @@ pub struct Core {
     pub(crate) change_ledger: ChangeLedger,
     pub(crate) repository_store: Arc<dyn RepositoryStore>,
     pub(crate) artifact_store: serving::ArtifactMaterializationStore,
+    pub(crate) control_plane_audit: ControlPlaneAuditRuntime,
+    pub(crate) control_plane_db: Arc<dyn schemahub_jj::ObjectDb>,
 }
 
 impl Core {
@@ -304,7 +320,40 @@ impl Core {
         repository_store: Arc<dyn RepositoryStore>,
         idempotency: IdempotencyStore,
     ) -> Self {
-        let artifact_store = serving::ArtifactMaterializationStore::new(jj.object_db());
+        Self::with_all_stores_and_audit_runtime(
+            jj,
+            registry,
+            authn,
+            authz,
+            repo_configs,
+            role_store,
+            project_store,
+            change_ledger,
+            repository_store,
+            idempotency,
+            ControlPlaneAuditRuntime::production(),
+        )
+    }
+
+    /// Full composition-root constructor with an injected control-plane audit
+    /// clock and ID generator. Tests use this to make administrative event
+    /// identity and ordering deterministic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_all_stores_and_audit_runtime(
+        jj: Arc<Jj>,
+        registry: CompilerRegistry,
+        authn: Arc<dyn AuthnProvider>,
+        authz: Arc<dyn AuthzPolicy>,
+        repo_configs: RepoConfigStore,
+        role_store: Arc<dyn RoleStore>,
+        project_store: Arc<dyn ProjectStore>,
+        change_ledger: ChangeLedger,
+        repository_store: Arc<dyn RepositoryStore>,
+        idempotency: IdempotencyStore,
+        control_plane_audit: ControlPlaneAuditRuntime,
+    ) -> Self {
+        let control_plane_db = jj.object_db();
+        let artifact_store = serving::ArtifactMaterializationStore::new(control_plane_db.clone());
         Self {
             jj,
             registry,
@@ -317,6 +366,8 @@ impl Core {
             change_ledger,
             repository_store,
             artifact_store,
+            control_plane_audit,
+            control_plane_db,
         }
     }
 

@@ -3,7 +3,7 @@
 //! produce real op envelopes / parse real `.proto` — core itself stays
 //! format-agnostic).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -1716,6 +1716,45 @@ fn list_schemas_returns_committed_files() {
 
     // Assert
     assert_eq!(schemas, vec![SCHEMA.to_string()]);
+}
+
+#[test]
+fn schema_inventory_summarizes_a_selected_page_at_one_immutable_commit() {
+    // Arrange
+    let core = core();
+    seed_proto_schema(
+        &core,
+        PROJECT,
+        REPO,
+        "main",
+        "common/types.proto",
+        "syntax=\"proto3\"; message Shared {}",
+    );
+    let expected_commit = seed_proto_schema(
+        &core,
+        PROJECT,
+        REPO,
+        "main",
+        "orders/order.proto",
+        "syntax=\"proto3\"; import \"common/types.proto\"; \
+         message Order { Shared shared = 1; } message OrderState {}",
+    );
+    let selected = BTreeSet::from([
+        "common/types.proto".to_string(),
+        "orders/order.proto".to_string(),
+    ]);
+
+    // Act
+    let (inventory, resolved_commit) = core
+        .summarize_schema_inventory_at(PROJECT, REPO, &RefSpec::bookmark("main"), &selected, None)
+        .expect("summarize schema inventory");
+
+    // Assert
+    assert_eq!(resolved_commit, expected_commit);
+    assert_eq!(inventory["common/types.proto"].declarations, 1);
+    assert_eq!(inventory["common/types.proto"].dependencies, 0);
+    assert_eq!(inventory["orders/order.proto"].declarations, 2);
+    assert_eq!(inventory["orders/order.proto"].dependencies, 1);
 }
 
 #[test]

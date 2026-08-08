@@ -2,7 +2,9 @@ import {
   AppShell as MantineAppShell,
   Badge,
   Burger,
+  Center,
   Group,
+  Loader,
   NavLink,
   ScrollArea,
   TextInput,
@@ -20,7 +22,7 @@ import {
   Search,
   Settings,
 } from 'lucide-react';
-import { FormEvent, useState } from 'react';
+import { FormEvent, lazy, Suspense, useState } from 'react';
 import {
   Link,
   Navigate,
@@ -34,17 +36,50 @@ import {
 import { schemaHubMode } from './api';
 import { useRepository, useServerConfig } from './api/queries';
 import { IdentityMenu } from './components/IdentityMenu';
-import { AdminPage } from './pages/AdminPage';
-import { ChangeDetailPage } from './pages/ChangeDetailPage';
-import { ChangesPage } from './pages/ChangesPage';
-import { ComparePage } from './pages/ComparePage';
-import { ConflictsPage } from './pages/ConflictsPage';
-import { HistoryPage } from './pages/HistoryPage';
-import { ProjectsPage } from './pages/ProjectsPage';
-import { ProjectPage } from './pages/ProjectPage';
-import { RepoDashboardPage } from './pages/RepoDashboardPage';
-import { SchemaDetailPage } from './pages/SchemaDetailPage';
-import { SearchPage } from './pages/SearchPage';
+
+const AdminPage = lazy(() =>
+  import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })),
+);
+const ChangeDetailPage = lazy(() =>
+  import('./pages/ChangeDetailPage').then((module) => ({
+    default: module.ChangeDetailPage,
+  })),
+);
+const ChangesPage = lazy(() =>
+  import('./pages/ChangesPage').then((module) => ({ default: module.ChangesPage })),
+);
+const ComparePage = lazy(() =>
+  import('./pages/ComparePage').then((module) => ({ default: module.ComparePage })),
+);
+const ConflictsPage = lazy(() =>
+  import('./pages/ConflictsPage').then((module) => ({
+    default: module.ConflictsPage,
+  })),
+);
+const HistoryPage = lazy(() =>
+  import('./pages/HistoryPage').then((module) => ({ default: module.HistoryPage })),
+);
+const ProjectsPage = lazy(() =>
+  import('./pages/ProjectsPage').then((module) => ({
+    default: module.ProjectsPage,
+  })),
+);
+const ProjectPage = lazy(() =>
+  import('./pages/ProjectPage').then((module) => ({ default: module.ProjectPage })),
+);
+const RepoDashboardPage = lazy(() =>
+  import('./pages/RepoDashboardPage').then((module) => ({
+    default: module.RepoDashboardPage,
+  })),
+);
+const SchemaDetailPage = lazy(() =>
+  import('./pages/SchemaDetailPage').then((module) => ({
+    default: module.SchemaDetailPage,
+  })),
+);
+const SearchPage = lazy(() =>
+  import('./pages/SearchPage').then((module) => ({ default: module.SearchPage })),
+);
 
 function ShellNav() {
   const location = useLocation();
@@ -171,7 +206,7 @@ function GlobalSearch() {
   }
 
   return (
-    <form onSubmit={submit}>
+    <form className="globalSearch" onSubmit={submit}>
       <TextInput
         visibleFrom="sm"
         leftSection={<Search size={16} />}
@@ -184,7 +219,7 @@ function GlobalSearch() {
         value={query}
         onChange={(event) => setQuery(event.currentTarget.value)}
         disabled={!project || !repo}
-        w={420}
+        w="100%"
       />
     </form>
   );
@@ -205,17 +240,17 @@ export function App() {
       padding="md"
     >
       <MantineAppShell.Header>
-        <Group h="100%" px="md" justify="space-between">
-          <Group>
+        <Group className="shellHeader" h="100%" px="md" gap="sm" wrap="nowrap">
+          <Group className="shellBrand" gap="xs" wrap="nowrap">
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
             <Title order={3}>SchemaHub</Title>
-            <Badge variant="light" color="blue">
+            <Badge visibleFrom="xs" variant="light" color="blue">
               {schemaHubMode === 'live' ? 'live API' : 'demo data'}
             </Badge>
           </Group>
           <GlobalSearch />
-          <Group gap="xs">
-            <Badge color="green" variant="light">
+          <Group className="shellIdentity" gap="xs" wrap="nowrap">
+            <Badge visibleFrom="md" color="green" variant="light">
               {serverConfig?.storageBackend || 'server'}
             </Badge>
             <IdentityMenu />
@@ -228,23 +263,31 @@ export function App() {
       </MantineAppShell.Navbar>
 
       <MantineAppShell.Main className="shellMain">
-        <Routes>
-          <Route path="/" element={<Navigate to="/projects" replace />} />
-          <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/projects/:project" element={<ProjectPage />} />
-          <Route path="/projects/:project/repos/:repo" element={<RepoDashboardPage />} />
-          <Route path="/projects/:project/repos/:repo/changes" element={<ChangesPage />} />
-          <Route
-            path="/projects/:project/repos/:repo/changes/:changeId"
-            element={<ChangeDetailPage />}
-          />
-          <Route path="/projects/:project/repos/:repo/conflicts" element={<ConflictsPage />} />
-          <Route path="/projects/:project/repos/:repo/schemas/*" element={<SchemaDetailPage />} />
-          <Route path="/projects/:project/repos/:repo/compare" element={<ComparePage />} />
-          <Route path="/projects/:project/repos/:repo/history" element={<HistoryPage />} />
-          <Route path="/projects/:project/repos/:repo/search" element={<SearchPage />} />
-          <Route path="/admin" element={<AdminPage />} />
-        </Routes>
+        <Suspense
+          fallback={
+            <Center mih={240}>
+              <Loader aria-label="Loading page" />
+            </Center>
+          }
+        >
+          <Routes>
+            <Route path="/" element={<Navigate to="/projects" replace />} />
+            <Route path="/projects" element={<ProjectsPage />} />
+            <Route path="/projects/:project" element={<ProjectPage />} />
+            <Route path="/projects/:project/repos/:repo" element={<RepoDashboardPage />} />
+            <Route path="/projects/:project/repos/:repo/changes" element={<ChangesPage />} />
+            <Route
+              path="/projects/:project/repos/:repo/changes/:changeId"
+              element={<ChangeDetailPage />}
+            />
+            <Route path="/projects/:project/repos/:repo/conflicts" element={<ConflictsPage />} />
+            <Route path="/projects/:project/repos/:repo/schemas/*" element={<SchemaDetailPage />} />
+            <Route path="/projects/:project/repos/:repo/compare" element={<ComparePage />} />
+            <Route path="/projects/:project/repos/:repo/history" element={<HistoryPage />} />
+            <Route path="/projects/:project/repos/:repo/search" element={<SearchPage />} />
+            <Route path="/admin" element={<AdminPage />} />
+          </Routes>
+        </Suspense>
       </MantineAppShell.Main>
     </MantineAppShell>
   );

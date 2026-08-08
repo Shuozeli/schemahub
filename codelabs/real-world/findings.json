@@ -1,0 +1,312 @@
+{
+  "schema_version": "schemahub.ga-findings.v1",
+  "findings": [
+    {
+      "id": "RV-HARNESS-001",
+      "scenario": "RW-01 site",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The pnpm native-build allowlist used invalid placeholder entries.",
+      "resolution": "Approved esbuild, sharp, and workerd explicitly; frozen installation passes."
+    },
+    {
+      "id": "RV-DOCS-001",
+      "scenario": "RW-01 site",
+      "class": "documentation",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The Tailscale development command forwarded pnpm arguments incorrectly.",
+      "resolution": "Corrected the command; the production browser smoke passes."
+    },
+    {
+      "id": "RV-SITE-001",
+      "scenario": "RW-01 site",
+      "class": "deployment-runtime",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "The Next.js server bundle retained a runtime require or exceeded the Worker size limit.",
+      "resolution": "Ship a static export behind a small assets-only Worker and boot it in workerd during CI."
+    },
+    {
+      "id": "RV-HARNESS-002",
+      "scenario": "RW-02",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "Cargo runner targets used hyphenated names instead of generated underscore names.",
+      "resolution": "Use the generated underscore target names; the clean runner passes."
+    },
+    {
+      "id": "RV-HARNESS-003",
+      "scenario": "RW-02 through RW-05",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The suite depended on ripgrep, which was absent on a clean GitHub runner.",
+      "resolution": "Use portable grep assertions; the complete CI-mode suite passes."
+    },
+    {
+      "id": "RV-HARNESS-004",
+      "scenario": "RW-07",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The tenant runner expected a different HTTP authorization diagnostic.",
+      "resolution": "Match the stable no-role-on-project diagnostic; the authorized and denied searches pass."
+    },
+    {
+      "id": "RV-HARNESS-005",
+      "scenario": "RW-05",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The FlatBuffers pipeline consumer called the legacy free table constructor removed by the warning-clean compiler.",
+      "resolution": "Use the upstream-compatible PipelineEvent::create constructor and export the generated module; RW-05 and the complete seven-scenario portfolio pass against the coordinated compiler."
+    },
+    {
+      "id": "RV-HARNESS-006",
+      "scenario": "Release package contract",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "Archive membership assertions could fail nondeterministically with SIGPIPE under shell pipefail after grep found an early match.",
+      "resolution": "Capture and validate the complete tar listing without an early-closing pipeline; the release package contract passes 120 consecutive runs and ShellCheck."
+    },
+    {
+      "id": "RV-HARNESS-007",
+      "scenario": "RustSec audit contract",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The fake auditor accepted a direct invocation shape that a real cargo-audit binary rejects because it requires the audit subcommand.",
+      "resolution": "Invoke every absolute auditor override as <binary> audit, teach the deterministic fake that exact interface, and pass both the scenario matrix and the checksummed real-binary SchemaHub scan."
+    },
+    {
+      "id": "RV-RELEASE-001",
+      "scenario": "Stable release workflow",
+      "class": "release-publication",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The stable semantic-version container tag was published before the protected staging attestation completed.",
+      "resolution": "Push only a run-unique candidate tag before staging, assemble and checksum the complete release after binary and staging gates, then promote the accepted digest; refuse a conflicting existing version tag and make GitHub publication depend on verified promotion."
+    },
+    {
+      "id": "RV-RELEASE-002",
+      "scenario": "Release assembly transfer",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The final publication job did not reverify checksums or reject extra unchecksummed files after downloading the retained release assembly.",
+      "resolution": "Validate a safe exact filename set and every SHA-256 before upload, retain the Actions artifact digest, and repeat the exact-set and checksum verification after download immediately before publication."
+    },
+    {
+      "id": "RV-RELEASE-003",
+      "scenario": "Native release reproducibility",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "Identical native release inputs could produce different OpenAPI and archive bytes because extension-key order and archive metadata were not canonical.",
+      "resolution": "Share recursively key-sorted OpenAPI bytes between HTTP and CLI, normalize archive order, ownership, modes, timestamps, and gzip headers, reject newline paths, compare fresh processes in tests, and require every release platform to package twice with byte-for-byte equality."
+    },
+    {
+      "id": "RV-SUPPLY-001",
+      "scenario": "Locked Rust dependency audit",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The release graph contained vulnerable or unsound Rust dependencies and CI did not audit the locked graph.",
+      "resolution": "Use jsonwebtoken's AWS-LC backend instead of the vulnerable RustCrypto RSA path, lock crossbeam-epoch 0.9.20 and anyhow 1.0.104, prove RS256 verification through AWS-LC, and make pinned cargo-audit 0.22.2 require zero vulnerabilities plus the exact reviewed warning set through a tested CI policy contract."
+    },
+    {
+      "id": "RV-SUPPLY-002",
+      "scenario": "Locked web dependency audit",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The GUI and workflow-demo lockfiles contained vulnerable web build or runtime dependencies and CI did not audit either graph.",
+      "resolution": "Lock patched Vite, esbuild, PostCSS, Next.js, and Sharp releases; audit both frozen pnpm graphs at Low severity in CI; and constrain the sole React Router advisory exception to its unused unstable RSC surface with a static client-only BrowserRouter contract."
+    },
+    {
+      "id": "RV-SUPPLY-003",
+      "scenario": "RustSec auditor bootstrap",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "CI installed cargo-audit 0.22.2 with its stale published lock, so the security gate itself contained two vulnerable and two unsound dependencies.",
+      "resolution": "Verify the exact crates.io source archive, replace the published lock with a separately reviewed patched lock, install that exact graph with --locked, self-audit it before use, and statically reject source, lock, version, or CI-step drift."
+    },
+    {
+      "id": "RV-SUPPLY-004",
+      "scenario": "Release instrumentation tool",
+      "class": "supply-chain-integrity",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "The cargo-auditable build-tool lock was outside the release audit boundary, so a future advisory would not stop instrumented binary publication.",
+      "resolution": "Pin and verify cargo-auditable 0.7.5's source and published-lock SHA-256 identities, require a zero-warning RustSec scan in candidate CI, and force every platform to install and invoke the exact tool from an isolated runner-temporary root."
+    },
+    {
+      "id": "RV-SUPPLY-005",
+      "scenario": "Container base provenance",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "All three production Docker stages used mutable base tags, so an unchanged SchemaHub revision could resolve different builder or runtime bytes.",
+      "resolution": "Pin the Node 24, Rust 1.95.0, and non-root distroless stages to exact multi-architecture manifest digests covering amd64 and arm64, and enforce those coordinates plus commit-pinned external actions in CI."
+    },
+    {
+      "id": "RV-SUPPLY-006",
+      "scenario": "Container build and acceptance tooling",
+      "class": "supply-chain-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The Dockerfile frontend, overridable pnpm build coordinate, moving Node 24 workflow selector, and PostgreSQL/curl CI helper tags remained mutable after the three production stages were pinned.",
+      "resolution": "Pin the Dockerfile frontend and both CI helper images to exact multi-architecture manifest digests, fix workflow Node to 24.18.0, make pnpm 11.2.2 non-overridable in the image build, and enforce every coordinate in the container supply-chain policy contract."
+    },
+    {
+      "id": "RV-SEC-001",
+      "scenario": "Bundled GUI filesystem boundary",
+      "class": "local-file-disclosure",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "Runtime GUI validation allowed symbolic links below the configured bundle root, so a linked asset or favicon could expose a file outside gui_dir through the HTTP static-file service.",
+      "resolution": "Fail startup unless the complete GUI tree contains only regular files and directories, explicitly reject a symlinked assets root and nested symlinks, and cover both escape shapes with Arrange-Act-Assert release tests."
+    },
+    {
+      "id": "RV-HTTP-001",
+      "scenario": "Bundled GUI cache policy",
+      "class": "cache-correctness",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "The GUI response middleware assigned one-year immutable caching to every successful /assets path even though the 1.0 contract limits immutable caching to content-hashed assets.",
+      "resolution": "Recognize only Vite-style name- plus eight-character URL-safe hash filenames as immutable and return no-cache for a successful unhashed asset, with positive and negative HTTP acceptance tests."
+    },
+    {
+      "id": "RV-HTTP-002",
+      "scenario": "Bundled GUI browser security policy",
+      "class": "browser-security",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The same-origin operator console stored bearer credentials but shipped without a content security policy, framing denial, or browser-feature restrictions.",
+      "resolution": "Serve every successful GUI response with a self-only CSP that blocks inline scripts, third-party runtimes, objects, frames, and form submission; deny framing and camera, geolocation, and microphone access; assert the exact policy in router and production-container tests; and render the hardened image through the neutral Pwright browser."
+    },
+    {
+      "id": "RV-CODEGEN-001",
+      "scenario": "Immutable Protobuf closure codegen",
+      "class": "protobuf-rust-codegen",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "Monolithic generated Rust flattened distinct Protobuf package modules, leaving fully qualified cross-package type paths unresolved.",
+      "resolution": "Render the complete closure as a deterministic nested Rust module tree, import only roots proven by resolved cross-package references, require an explicit root for multi-file codegen, and re-export the requested root package. Unit contracts, a three-package downstream Cargo build, and RW-06's two-version cross-package consumer pass."
+    },
+    {
+      "id": "RV-AUDIT-001",
+      "scenario": "1.0 control-plane audit",
+      "class": "audit-integrity",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "Project, membership, and repository policy mutations persisted current state but had no immutable actor-attributed history, and a separately appended event would have admitted crash-split state.",
+      "resolution": "Add typed project-partitioned control-plane events, couple each resource create/CAS to its event through one ObjectDb transaction on memory/redb/PostgreSQL, expose Owner-only cursor pagination and CLI JSON, and cover commit/rollback, typed snapshots, actor attribution, access control, and paging."
+    },
+    {
+      "id": "RV-AUTHZ-001",
+      "scenario": "1.0 concurrent membership administration",
+      "class": "authorization-invariant",
+      "severity": "high",
+      "state": "fixed",
+      "summary": "The last-Owner check and membership write were separate, so two Owners could concurrently remove or downgrade one another after both observed two Owners.",
+      "resolution": "Serialize every runtime project/member/repository mutation through a project-keyed ObjectDb publication guard before authorization, invariant checks, and atomic state/audit persistence. PostgreSQL uses its distributed advisory-lock implementation; a deterministic concurrent-removal regression proves exactly one Owner remains."
+    },
+    {
+      "id": "RV-AUDIT-002",
+      "scenario": "1.0 long-lived control-plane audit",
+      "class": "audit-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "Each public audit page loaded, decoded, and sorted the project's complete event history, so storage and memory cost grew without bound even when the caller requested one small page.",
+      "resolution": "Atomically maintain an immutable newest-first event index beside every resource/event write, add bounded stable range reads to memory, redb, and PostgreSQL ObjectDb backends, bind opaque cursors to the project, and fail closed on malformed cursors, missing targets, or typed event/index mismatches."
+    },
+    {
+      "id": "RV-CHANGE-001",
+      "scenario": "1.0 long-lived ChangeRecord ledger",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "Every public ListChanges page loaded, decoded, filtered, and sorted the complete global ChangeRecord collection before truncating to the requested repository page.",
+      "resolution": "Atomically maintain repository-scoped creation-order and status indexes with each ChangeRecord create or lifecycle transition, backfill pre-index records once behind a durable migration marker, preserve the existing parent/filter-bound v1 cursor contract, and resolve each page through a bounded ObjectDb range read with fail-closed target and index validation."
+    },
+    {
+      "id": "RV-CATALOG-001",
+      "scenario": "1.0 long-lived resource catalogs",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "Every public ListProjects and ListRepos page loaded, decoded, filtered, and sorted a complete resource collection, while ListRepos scanned repositories outside the requested project.",
+      "resolution": "Atomically maintain active and all-project catalogs plus active and all-repository catalogs partitioned by project, backfill pre-index resources once behind durable migration markers, preserve existing v1 cursor ordering, bound authorization-aware project scans, and fail closed on malformed cursors or missing, mismatched, and corrupt index targets."
+    },
+    {
+      "id": "RV-MEMBER-001",
+      "scenario": "1.0 long-lived project membership",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "ListMembers had no pagination fields and ObjectDbRoleStore loaded, decoded, filtered, and sorted the complete global role collection, including memberships from unrelated projects.",
+      "resolution": "Add project-bound opaque pagination and CLI traversal, read bounded identity-ordered ranges directly from the existing project-prefixed role primary keys, advance safely through inactive tombstones, fail closed on malformed scoped records, and let GUI summaries resolve only the caller's role without enumerating the membership catalog."
+    },
+    {
+      "id": "RV-REF-001",
+      "scenario": "1.0 long-lived repository ref namespaces",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "ListBranches and ListTags had no pagination fields and materialized every matching repository ref in one response, while GetBranch enumerated the complete bookmark namespace for one name.",
+      "resolution": "Add ref-kind/project/repository/prefix-bound opaque pagination, lazily materialize at most page_size plus one lexicographically ordered ref from the repository-local immutable JJ view, make both CLI list commands follow every continuation, and resolve GetBranch through one direct BTreeMap lookup."
+    },
+    {
+      "id": "RV-BFF-CATALOG-001",
+      "scenario": "1.0 long-lived GUI catalog navigation",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "The GUI BFF returned every visible project and every repository in one response, while each project summary triggered another complete repository scan solely to calculate a count.",
+      "resolution": "Return bounded project and repository pages over the existing Core catalog indexes, bind opaque continuations to catalog kind, project scope, and name prefix, remove the expensive repository-count projection, make the GUI load pages incrementally, and resolve repository deep links through one bounded exact-prefix lookup."
+    },
+    {
+      "id": "RV-BFF-AGGREGATE-001",
+      "scenario": "1.0 long-lived GUI repository operation",
+      "class": "pagination-scalability",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "The repository dashboard returned complete schema, branch, and tag arrays and repeatedly resolved a mutable ref while summarizing schemas, while the browser ChangeRecord route discarded the indexed Core page and returned every proposal.",
+      "resolution": "Return composite bounded dashboard pages whose repository/ref-bound opaque continuation advances schema, branch, and tag cursors together, pin every schema summary and conflict count to the first page's immutable commit, calculate conflict counts without materializing the complete conflict namespace, adapt the indexed ChangeRecord page with repository/status-bound tokens, and make the React views request continuations explicitly."
+    },
+    {
+      "id": "RW-GUI-001",
+      "scenario": "SchemaHub operator console",
+      "class": "responsive-layout",
+      "severity": "medium",
+      "state": "fixed",
+      "summary": "At tablet widths, the fixed-height operator header wrapped the identity control over page content.",
+      "resolution": "Keep fixed and flexible header groups on one line, hide secondary controls at explicit breakpoints, and assert header geometry at 930-pixel and 390-pixel viewports in the browser acceptance."
+    },
+    {
+      "id": "RW-GUI-002",
+      "scenario": "SchemaHub live operator-console acceptance",
+      "class": "validation-harness",
+      "severity": "low",
+      "state": "fixed",
+      "summary": "The live browser acceptance queried the identity control by its visual label instead of its prefixed ARIA name, then retained the remote CDP connection after a successful run.",
+      "resolution": "Assert the exact Identity-prefixed accessible button name for agent and human sessions, and close both local and remote browser connections during unconditional teardown; the governed author-review-apply flow and restart byte check now terminate cleanly against the neutral Tailscale Chrome endpoint."
+    },
+    {
+      "id": "RW-03-001",
+      "scenario": "RW-03",
+      "class": "flatbuffers-rust-codegen",
+      "severity": "low",
+      "state": "fixed",
+      "must_fix_before": "1.0.0",
+      "summary": "The pinned FlatBuffers compiler emits deprecated-accessor and camel-case warnings in the RW-03 bindings.",
+      "resolution": "Published warning-clean compiler commit 59756d23993538b722f68675c35129c3cebb7aa1 uses associated Type::create constructors, makes deprecated fields read-only, and fixes struct-union accessors. FlatBuffers main CI run 30481753669 passed its release tests, formatting, and strict Clippy matrix; SchemaHub pins that exact Git revision and passes strict downstream generated-code builds."
+    }
+  ]
+}

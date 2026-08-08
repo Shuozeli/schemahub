@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T17:11:37Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # SchemaHub Product Contract
 
 ## Purpose
@@ -70,6 +70,14 @@ The existing Jujutsu model remains authoritative for content history:
 The applied change record links intent and review history to its resulting
 commit and stable change ID.
 
+Mutable project, membership, and repository administration uses a separate
+immutable control-plane audit stream. Each resource mutation and its typed
+before/after event commit together; the server, not the caller, supplies actor,
+event identity, and time. Each public page uses a bounded immutable-index range
+read and validates the referenced typed evidence fail-closed. These events are
+evidence, while the JJ operation log remains the undo substrate for schema
+repository state.
+
 ### Schema serving plane
 
 The serving plane is read-oriented and revision-addressed. It serves:
@@ -93,6 +101,7 @@ can be cached, compared, and stored with encoded data.
 | `ChangeRecord` | Durable intent, operations, validation, review, and application result. |
 | `SchemaRevision` | Immutable schema state resolved at a specific commit. |
 | `SchemaArtifact` | Deterministic source, descriptor, or generated-code representation of a revision. |
+| `ControlPlaneAuditEvent` | Immutable actor-attributed project, membership, or repository before/after evidence. |
 
 Resource names are stable and server-assigned. Authenticated identity and audit
 timestamps are server truth, not client-supplied claims.
@@ -151,11 +160,17 @@ SchemaHub 1.0 is successful when:
   after the server restarts.
 - Repository policy, compatibility checks, and conflict state cannot be
   bypassed accidentally by choosing a different client.
+- Every release ships its exact operator console in native archives and the
+  container, and the container serves deep-linked human workflows from the
+  same origin as its BFF.
 - A human or agent can discover direct downstream imports across every
   repository visible to its identity, distinguish immutable pins from live
   edges, and retain the exact per-repository snapshots used for coordination.
 - Redb and PostgreSQL deployments have tested backup, restore, and upgrade
   procedures.
+- Candidate CI rejects known vulnerable or unsound locked dependencies and
+  accepts only documented, tested exceptions for dependency surfaces the
+  release does not execute.
 
 ## Deferred Beyond Version 1
 

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T20:46:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # SchemaHub Compatibility Policy
 
 This policy defines what SchemaHub intends to freeze at 1.0 and what remains
@@ -29,6 +29,12 @@ supported with the bundled GUI from the same release, carry
 Their generated OpenAPI document remains an exact-build contract and release
 artifact, not a claim that the BFF is public REST v1.
 
+Every native archive and release container carries that exact locked GUI.
+Its `/`, `/projects/*`, `/admin`, favicon, and hashed-asset routes are
+distribution surfaces rather than public APIs: HTML is revalidated, hashed
+assets may be cached immutably, and unknown `/api/*` requests must remain BFF
+errors instead of becoming SPA HTML.
+
 The co-located `/healthz`, `/readyz`, and `/metrics` routes are supported
 operational interfaces, not BFF routes. Any future public REST API must be
 explicitly versioned, follow the project's accepted resource/method rules,
@@ -50,6 +56,17 @@ behavior uses a new method, a new resource version, or a new API major version.
 The same additions/removals rule does not apply to GUI-only BFF routes; BFF
 changes must instead update the generated document, bundled GUI, tests, and
 release notes in the same release.
+
+The current same-release pair represents project/repository navigation,
+repository dashboards, and ChangeRecord lists as bounded page DTOs. Catalog
+continuations bind kind/project/prefix; dashboard continuations bind
+repository/ref and pin schema pages to the first immutable commit; proposal
+continuations bind repository/status and consume the public Core index. These
+are scalability invariants of the shipped 1.0 console, not a promise that
+those unversioned JSON field names or token encodings remain unchanged across
+1.x; server and GUI must change together. The same-release dashboard also
+batch-loads selected schema objects and repository-local names so its tree
+traversal count does not scale with the number of rows in a page.
 
 Repository-local v1 reads preserve explicit branch/tag/commit meaning, resolve
 mutable refs once, and expose the exact immutable commit used. Omitted refs use
@@ -76,6 +93,54 @@ downstream rewriting, or a cross-repository transaction. Compatible 1.x
 implementations may optimize the scan with an index only if they preserve those
 observable authorization, completeness, and snapshot semantics.
 
+`ProjectService.ListControlPlaneAuditEvents` is the public Owner-only
+administrative history contract. Event resource names, server-derived actor
+and time, action meanings, typed before/after snapshots, newest-first order,
+and project-bound opaque cursor semantics are stable in 1.x. These events are
+immutable evidence; they do not promise administrative undo. Each public page
+uses a bounded ordered-index range read. Every returned index record must be
+well formed and resolve to a matching immutable event; a missing target,
+mismatch, malformed record, or nonempty event collection with no index fails
+closed. Cursor contents and audit index keys are internal storage details:
+clients must return page tokens unchanged, must not synthesize them, and must
+not treat them as durable event identifiers.
+
+`ChangeService.ListChanges` preserves ascending creation-time/name order,
+optional status filtering, the default/maximum page sizes, and
+parent/filter-bound opaque continuation semantics. Each page uses a bounded
+repository/status-index range and validates returned index relationships.
+Cursor encoding and storage index keys remain internal; clients must return
+tokens unchanged. A compatible 1.x implementation may replace the index layout
+only if it preserves those observable results and bounds.
+
+`ProjectService.ListProjects` and `ListRepos` preserve stable name order,
+prefix/archive filters, default/maximum page sizes, and filter-bound opaque
+continuation semantics. Repository results remain scoped to the requested
+project. Project authorization filtering is scan-bounded, so a successful page
+may contain no resources while returning a continuation token; clients must
+continue until that token is empty. Each page uses a bounded catalog range and
+validates every target. Catalog key and cursor encodings are internal and may
+change in compatible 1.x implementations that preserve these observable
+semantics and bounds.
+
+`ProjectService.ListMembers` preserves ascending opaque-identity byte order,
+project scoping, default/maximum page sizes, and project-bound opaque
+continuations. Inactive tombstones are not returned, but a bounded
+tombstone-only page may carry a continuation; clients must continue until it
+is empty. A page validates only its bounded scoped primary-key range and fails
+closed on malformed records or tokens. Existing clients compiled before the
+pagination fields must be updated to follow `next_page_token` when a project
+can contain more than the default page size.
+
+`RefService.ListBranches` and `ListTags` preserve ascending ref-name order,
+their existing prefix filter, default/maximum page sizes, and opaque
+continuations bound to ref kind, project, repository, and prefix. A client must
+continue until `next_page_token` is empty and must not interpret token bytes.
+Each response materializes at most one page plus lookahead from the
+repository-local immutable JJ view. Existing clients compiled before the
+pagination fields must be updated to follow continuations when a ref namespace
+can exceed the default page size.
+
 ## Stored Data and Migrations
 
 Redb and PostgreSQL state created by a supported 1.x release must be readable by
@@ -89,8 +154,32 @@ and cut over after validation. Never delete migration ledger rows or apply
 destructive down SQL to the only live copy.
 
 JJ commit IDs, change IDs, operation history, immutable tag targets,
-ChangeRecord-to-commit links, and repository-scoped revision names are durable
-data contracts.
+ChangeRecord-to-commit links, repository-scoped revision names, and
+control-plane audit-event resource names are durable data contracts.
+
+The `schemahub.change_record_index.v1` collections and migration marker are
+internal derived state, not public identifiers. Upgrading a pre-index database
+performs a one-time atomic backfill before the first ChangeRecord ledger
+operation completes. Mixed old/new processes are unsupported because the old
+binary cannot maintain those indexes; rollback therefore restores the verified
+pre-upgrade backup rather than running the candidate against migrated live
+state.
+
+The `schemahub.project_index.v1` and
+`schemahub.repository_index.v1` collections and their migration markers are
+also internal derived state. A pre-index database receives one atomic,
+validated backfill before its first project/repository catalog operation.
+Project/repository creates and archive transitions must thereafter update
+resource and relevant catalog entries atomically. Mixed pre-index/index-aware
+processes are unsupported for the same reason; rollback restores the
+pre-upgrade backup.
+
+Membership pagination derives its order directly from the existing
+`schemahub.project_roles.v1` project/hex-identity primary keys and therefore
+adds no stored-data migration. That physical key and cursor encoding remain
+internal; compatible 1.x implementations may replace them if they preserve the
+observable order, project isolation, tombstone, authorization, and bounded-page
+semantics.
 
 ## Schema and Artifact Stability
 

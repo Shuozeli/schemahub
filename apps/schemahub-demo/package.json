@@ -1,0 +1,27 @@
+{
+  "name": "schemahub-workflow-lab",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.2.2",
+  "scripts": {
+    "dev": "next dev --hostname ${TAILSCALE_IP:-0.0.0.0}",
+    "build": "next build --webpack",
+    "build:sites": "bash scripts/build-sites.sh",
+    "test:worker": "bash scripts/worker-smoke.sh",
+    "typecheck": "tsc --noEmit",
+    "test:browser": "node scripts/browser-smoke.mjs"
+  },
+  "dependencies": {
+    "next": "16.2.12",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "playwright-core": "1.61.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.113.0"
+  }
+}

@@ -6,8 +6,9 @@ use thiserror::Error;
 
 use super::{
     ApplyAttempt, ApplyResult, ChangeActor, ChangeClock, ChangeIdGenerator, ChangeRecord,
-    ChangeRecordStatus, ChangeReview, ChangeReviewDecision, ChangeRuntimeError, ChangeStoreError,
-    ChangeUpdate, CreateChange, ValidationResult,
+    ChangeRecordPage, ChangeRecordPageCursor, ChangeRecordStatus, ChangeReview,
+    ChangeReviewDecision, ChangeRuntimeError, ChangeStoreError, ChangeUpdate, CreateChange,
+    ValidationResult,
 };
 use crate::change_record::ChangeRecordStore;
 
@@ -129,6 +130,21 @@ impl ChangeLedger {
         validate_segment("project", project)?;
         validate_segment("repo", repo)?;
         Ok(self.store.list(project, repo)?)
+    }
+
+    pub fn list_page(
+        &self,
+        project: &str,
+        repo: &str,
+        status_filter: Option<ChangeRecordStatus>,
+        start_after: Option<&ChangeRecordPageCursor>,
+        limit: usize,
+    ) -> Result<ChangeRecordPage, ChangeLedgerError> {
+        validate_segment("project", project)?;
+        validate_segment("repo", repo)?;
+        Ok(self
+            .store
+            .list_page(project, repo, status_filter, start_after, limit)?)
     }
 
     /// Parse and validate a change resource name, returning its repository

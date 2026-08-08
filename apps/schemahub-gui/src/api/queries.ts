@@ -1,41 +1,63 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { schemaHubClient } from './index';
 import type {
   ChangeAction,
   ChangeActionRequest,
   CreateChangeRequest,
+  RepoDashboard,
   ResolveConflictRequest,
+  UpdateChangeEditsRequest,
 } from './types';
 
 export function useProjects() {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['projects'],
-    queryFn: () => schemaHubClient.listProjects(),
+    queryFn: ({ pageParam }) => schemaHubClient.listProjects(pageParam, 50),
+    initialPageParam: '',
+    getNextPageParam: (page) => page.nextPageToken || undefined,
   });
 }
 
 export function useRepos(project: string) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['repos', project],
-    queryFn: () => schemaHubClient.listRepos(project),
+    queryFn: ({ pageParam }) => schemaHubClient.listRepos(project, pageParam, 50),
+    initialPageParam: '',
+    getNextPageParam: (page) => page.nextPageToken || undefined,
     enabled: project.length > 0,
   });
 }
 
 export function useRepository(project: string, repo: string) {
   return useQuery({
-    queryKey: ['repos', project],
-    queryFn: () => schemaHubClient.listRepos(project),
-    select: (repositories) => repositories.find((repository) => repository.repo === repo),
+    queryKey: ['repo', project, repo],
+    queryFn: () => schemaHubClient.getRepo(project, repo),
     enabled: project.length > 0 && repo.length > 0,
   });
 }
 
 export function useRepoDashboard(project: string, repo: string, ref: string) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['repo-dashboard', project, repo, ref],
-    queryFn: () => schemaHubClient.getRepoDashboard(project, repo, ref),
+    queryFn: ({ pageParam }) =>
+      schemaHubClient.getRepoDashboard(project, repo, ref, pageParam, 50),
+    initialPageParam: '',
+    getNextPageParam: (page) => page.nextPageToken || undefined,
+    select: (result): RepoDashboard => {
+      const first = result.pages[0];
+      if (!first) throw new Error('repository dashboard returned no pages');
+      return {
+        repo: first.repo,
+        schemas: result.pages.flatMap((page) => page.schemas),
+        branches: result.pages.flatMap((page) => page.branches),
+        tags: result.pages.flatMap((page) => page.tags),
+        latestCommit: first.latestCommit,
+        latestOperation: first.latestOperation,
+        openConflicts: first.openConflicts,
+        resolvedCommit: first.resolvedCommit,
+      };
+    },
     enabled: project.length > 0 && repo.length > 0 && ref.length > 0,
   });
 }
@@ -90,9 +112,12 @@ export function useSession() {
 }
 
 export function useChanges(project: string, repo: string) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['changes', project, repo],
-    queryFn: () => schemaHubClient.listChanges(project, repo),
+    queryFn: ({ pageParam }) => schemaHubClient.listChanges(project, repo, pageParam, 50),
+    initialPageParam: '',
+    getNextPageParam: (page) => page.nextPageToken || undefined,
+    select: (result) => result.pages.flatMap((page) => page.changes),
     enabled: project.length > 0 && repo.length > 0,
   });
 }
@@ -112,6 +137,22 @@ export function useCreateChange(project: string, repo: string) {
       schemaHubClient.createChange(project, repo, request),
     onSuccess: (change) => {
       queryClient.setQueryData(['change', project, repo, changeId(change.name)], change);
+      void queryClient.invalidateQueries({ queryKey: ['changes', project, repo] });
+    },
+  });
+}
+
+export function useUpdateChangeEdits(
+  project: string,
+  repo: string,
+  changeIdValue: string,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: UpdateChangeEditsRequest) =>
+      schemaHubClient.updateChangeEdits(project, repo, changeIdValue, request),
+    onSuccess: (change) => {
+      queryClient.setQueryData(['change', project, repo, changeIdValue], change);
       void queryClient.invalidateQueries({ queryKey: ['changes', project, repo] });
     },
   });

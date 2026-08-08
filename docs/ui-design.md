@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T16:49:05Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 
 # SchemaHub UI Design
 
@@ -10,12 +10,18 @@ The implementation is a React + Vite application with a typed browser boundary.
 The live Rust BFF is the default data path; an explicit mock client remains for
 isolated demos.
 
-Implementation status (2026-07-21): D5 is implemented in
+Implementation status (2026-07-29): D5 is implemented in
 `apps/schemahub-gui`. Real resource navigation, server-derived human/agent
 identity, ChangeRecord lifecycle actions, repository search, immutable artifact
-download, and conflict resolution all use Core-authorized BFF paths. See
+download, and conflict resolution all use Core-authorized BFF paths. Operator
+pages are lazy route boundaries with a CI entry-bundle budget, and the exact
+production build ships in native archives and the release container for
+fail-fast same-origin serving. See
 `docs/gui.md` for the concrete route and deployment contract. This document
 remains the product/design source for later UI expansion.
+Project and repository selectors now use TanStack infinite queries over
+bounded BFF pages; explicit continuation controls preserve server cursors
+without returning or decorating an entire catalog.
 
 ## Product Positioning
 
@@ -43,12 +49,12 @@ Use this stack for the first GUI:
 
 | Layer | Choice | Reason |
 |---|---|---|
-| App build | Vite + React + TypeScript | Fast local iteration, simple deployment artifact, no server framework assumption. |
+| App build | Vite + React + TypeScript | Fast local iteration, lazy route chunks, and one version-matched static artifact served by SchemaHub or another static host. |
 | UI library | Mantine | Complete app components, good density, strong forms/modals/tables, easier custom operational style than Ant Design. |
 | Data fetching | TanStack Query | Clear cache/loading/error model, easy mock-to-real migration. |
 | Routing | TanStack Router or React Router | Route params map cleanly to project/repo/schema/ref resources. Use React Router if we want fewer moving parts. |
 | Tables | Mantine Table first; TanStack Table later if needed | Start simple. Move to TanStack Table only when sorting/filtering/virtualization grows. |
-| Code viewer | Monaco Editor | Schema source, generated code, and diff previews need real code ergonomics. |
+| Code viewer | Self-contained source viewer | Schema source, generated code, and diff previews need line numbers, selection, and horizontal scrolling without a runtime CDN dependency. |
 | Icons | lucide-react | Consistent, lightweight operational icon set. |
 | Tests | Vitest + Testing Library | Component and API-client tests without requiring a browser server. |
 
@@ -126,8 +132,8 @@ Top-level routes:
 
 | Route | Purpose |
 |---|---|
-| `/projects` | Project list, visibility, role summary, last activity |
-| `/projects/:project` | Project overview, repos, members, permissions |
+| `/projects` | Incrementally paged project list, visibility, role summary, last activity |
+| `/projects/:project` | Incrementally paged repository list and runtime policy |
 | `/projects/:project/repos/:repo` | Repo dashboard: branches, tags, recent commits, schemas |
 | `/projects/:project/repos/:repo/changes` | Human/agent intent and executable change proposals |
 | `/projects/:project/repos/:repo/changes/:changeId` | Validation, review, Apply, and immutable receipt |
@@ -137,6 +143,23 @@ Top-level routes:
 | `/projects/:project/repos/:repo/conflicts` | Conflict list and resolution workflow |
 | `/projects/:project/repos/:repo/search` | Repository schemas, declarations, revisions, and changes |
 | `/admin` | Server config, storage backend, limits, auth mode |
+
+### Change Proposal Authoring
+
+The change list creates either a note-only draft or an executable proposal.
+Executable browser edits are typed as complete source replacement or schema
+deletion. Each edit visibly names its repository-relative path and format;
+source paths and formats must agree before the server persists the draft.
+
+The change detail page can replace the editable source/deletion list only while
+the record is a draft. It sends the displayed ETag, and the server clears the
+old validation snapshot after a successful edit. Opaque compiler mutations
+created through gRPC or the CLI remain visible and reviewable in the GUI but
+cannot be rewritten by a browser that cannot round-trip their operation bytes.
+
+This keeps the browser on the same ChangeRecord lifecycle rather than adding a
+parallel direct-write path: author, validate, mark ready, review, Apply, and
+retain the immutable receipt.
 
 Route conventions:
 
@@ -332,7 +355,7 @@ Codegen controls:
 | Language | segmented control or select | `Rust`, `TypeScript` initially; show disabled unsupported languages only if useful. |
 | Descriptor | icon button | Downloads or previews `GetDescriptors`. |
 | Pluggable buffer | switch | Visible only for FlatBuffers + Rust. Sends `PreviewCodegenRequest.rust_pluggable_buffer = true`. |
-| Preview | button | Calls preview endpoint, renders Monaco read-only result. |
+| Preview | button | Calls preview endpoint, renders the read-only source viewer. |
 
 ### Compare
 
@@ -500,12 +523,21 @@ adapters. Browser delivery uses the HTTP/JSON BFF in `schemahub-server`.
 
 The BFF owns bearer forwarding, CORS, browser DTOs, and gRPC-equivalent error
 semantics. It calls Core directly, so it does not introduce a second policy or
-lifecycle implementation. Its OpenAPI 3.1 document is generated from the same
+lifecycle implementation. Project and repository DTOs preserve Core's bounded
+catalog pages, with opaque tokens bound to kind, project, and prefix; the
+project DTO deliberately omits a repository count that would require an N+1
+scan. Its OpenAPI 3.1 document is generated from the same
 annotated handlers used for runtime routing and is available at
 `/api/openapi.json`; `http-api.md` defines the drift and release contract. Per
 ADR 0002, these unversioned routes are a same-release GUI-only BFF outside the
 public API compatibility promise. Responses and generated path metadata expose
 that classification; reusable integrations target `schemahub.v1` instead.
+
+The maintained browser acceptance crosses this boundary with real processes:
+a delegated agent authors executable source, a separate human approves it,
+the agent applies it, and the test then reads the applied schema plus immutable
+descriptor from the redb-backed server after restart. The deliberate
+pre-review Apply must fail with the BFF's `412` policy response.
 
 Initial UI API needs:
 
@@ -541,6 +573,30 @@ The React app must not import generated Rust/protobuf server internals directly.
 ```ts
 type RefName = string;
 
+type ProjectPage = {
+  projects: ProjectSummary[];
+  nextPageToken: string;
+};
+
+type RepoPage = {
+  repositories: RepoSummary[];
+  nextPageToken: string;
+};
+
+type RepoDashboardPage = {
+  repo: RepoSummary;
+  schemas: SchemaSummary[];
+  branches: string[];
+  tags: string[];
+  resolvedCommit: string;
+  nextPageToken: string;
+};
+
+type ChangePage = {
+  changes: ChangeRecord[];
+  nextPageToken: string;
+};
+
 type SchemaSummary = {
   path: string;
   format: 'protobuf' | 'flatbuffers' | 'openapi';
@@ -562,9 +618,11 @@ type CodegenPreviewRequest = {
 
 Initial client methods:
 
-- `listProjects()`
-- `listRepos(project)`
-- `getRepoDashboard(project, repo, ref)`
+- `listProjects(pageToken, pageSize)`
+- `listRepos(project, pageToken, pageSize, namePrefix)`
+- `getRepo(project, repo)` using one bounded exact-prefix page
+- `getRepoDashboard(project, repo, ref, pageToken, pageSize)`
+- `listChanges(project, repo, pageToken, pageSize, status?)`
 - `listSchemas(project, repo, ref)`
 - `getSchemaSource(project, repo, schemaPath, ref)`
 - `listDeclarations(project, repo, schemaPath, ref)`
@@ -600,7 +658,7 @@ Build these reusable components first:
 
 ### Review Components
 
-- `SourceViewer`: read-only Monaco code viewer with line numbers.
+- `SourceViewer`: self-contained read-only code viewer with line numbers.
 - `DiffViewer`: declaration-aware diff.
 - `CompatibilityPanel`: rule findings and severity.
 - `CompareRefBar`: base/head/schema filter controls.
@@ -625,8 +683,14 @@ Build these reusable components first:
 
 - Use Mantine `AppShell`, `NavLink`, `Table`, `Tabs`, `Drawer`, `Modal`, `Badge`, `SegmentedControl`, `Select`, `Switch`, `Tooltip`, and `ActionIcon`.
 - Use lucide icons inside action buttons and nav rows.
-- Use Monaco for source, generated code, and diffs; do not use plain `<textarea>` for read-only code surfaces.
+- Use the native read-only source viewer for source, generated code, and diffs;
+  do not use a plain `<textarea>` or a runtime CDN dependency for read-only
+  code surfaces.
 - Keep all tables compact and keyboard reachable.
+- Keep the top bar single-line at every supported viewport. The repository
+  search flexes between fixed brand and identity groups; the storage badge is
+  desktop-only, and mobile identity retains an accessible label while showing
+  only its icon.
 
 ## Page-Level Component Trees
 
@@ -749,7 +813,7 @@ Build a read-mostly console before mutation-heavy workflows:
 Delivered implementation sequence:
 
 1. Scaffold `apps/schemahub-gui` with Vite React TypeScript.
-2. Install Mantine, lucide-react, TanStack Query, router, Monaco.
+2. Install Mantine, lucide-react, TanStack Query, and the router.
 3. Create app shell, theme, route skeletons.
 4. Add typed UI models and `MockSchemaHubClient`.
 5. Implement repo dashboard and schema detail from mock data.
@@ -758,6 +822,10 @@ Delivered implementation sequence:
 8. Replace pinned workspace data with persisted project/repository navigation.
 9. Add authenticated ChangeRecord, search, conflict, and immutable artifact workflows.
 10. Verify the BFF lifecycle and conflict paths with release-mode integration tests.
+11. Exercise agent authoring, human approval, Apply, and restart identity in a
+    real browser against the durable server.
+12. Split operator routes, enforce the initial-entry budget, and ship the exact
+    production artifact in every native archive and release container.
 
 Later UI expansion can add:
 
@@ -781,7 +849,12 @@ The UI is successful when an auditor can answer these questions without using th
 
 ## Remaining Decisions
 
-- Monaco diff strategy: use Monaco's diff editor or precomputed server diff text plus source viewer.
-- Repo list pagination: decide how the UI retains server cursors across filters.
+- Diff strategy: render precomputed server diff text in the source viewer.
+- Repository dashboards and ChangeRecord lists remain same-release BFF
+  projections, but their page DTOs and explicit incremental controls are now
+  defined and bounded. Dashboard schema rows are summarized through one batch
+  immutable-tree read rather than per-row repository scans. A future public
+  REST surface still needs a separately versioned contract.
 - Auth: replace the development token input with the selected production login provider.
-- Testing: add component-level accessibility and browser workflow coverage.
+- Testing: add isolated component-level accessibility coverage; governed mock
+  and live browser workflows already run in CI.

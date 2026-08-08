@@ -17,18 +17,32 @@ import { FormEvent, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { useChanges, useCreateChange, useRepository } from '../api/queries';
+import type { ChangeEditInput } from '../api/types';
+import {
+  ChangeEditComposer,
+  changeEditsAreComplete,
+  prepareChangeEdits,
+} from '../components/ChangeEditComposer';
 import { ChangeStatusBadge, RefBadge } from '../components/badges';
 
 export function ChangesPage() {
   const navigate = useNavigate();
   const { project = '', repo = '' } = useParams();
   const { data: repository } = useRepository(project, repo);
-  const { data: changes = [], error, isLoading } = useChanges(project, repo);
+  const {
+    data: changes = [],
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+  } = useChanges(project, repo);
   const create = useCreateChange(project, repo);
   const [opened, { open, close }] = useDisclosure(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [externalReferences, setExternalReferences] = useState('');
+  const [edits, setEdits] = useState<ChangeEditInput[]>([]);
 
   const defaultBookmark = repository?.defaultBranch || '';
 
@@ -42,11 +56,13 @@ export function ChangesPage() {
         .map((reference) => reference.trim())
         .filter(Boolean),
       targetBookmark: defaultBookmark,
+      edits: prepareChangeEdits(edits),
     });
     close();
     setTitle('');
     setDescription('');
     setExternalReferences('');
+    setEdits([]);
     navigate(`${changePath(project, repo, change.name)}`);
   }
 
@@ -63,7 +79,7 @@ export function ChangesPage() {
           </Text>
         </div>
         <Button leftSection={<Plus size={16} />} onClick={open} disabled={!defaultBookmark}>
-          Record change note
+          Create proposal
         </Button>
       </Group>
 
@@ -89,7 +105,7 @@ export function ChangesPage() {
             ) : changes.length === 0 ? (
               <Table.Tr>
                 <Table.Td colSpan={6}>
-                  No proposals yet. Record intent here or create an executable change with the CLI.
+                  No proposals yet. Create a note-only draft or author executable schema edits here.
                 </Table.Td>
               </Table.Tr>
             ) : (
@@ -134,13 +150,31 @@ export function ChangesPage() {
           </Table.Tbody>
         </Table>
       </Paper>
+      {hasNextPage ? (
+        <Group justify="center">
+          <Button
+            variant="default"
+            loading={isFetchingNextPage}
+            onClick={() => void fetchNextPage()}
+          >
+            Load newer proposals
+          </Button>
+        </Group>
+      ) : null}
 
-      <Modal opened={opened} onClose={close} title="Record schema-change intent" centered>
+      <Modal
+        opened={opened}
+        onClose={close}
+        title="Create schema-change proposal"
+        centered
+        size="xl"
+      >
         <form onSubmit={submit}>
           <Stack>
             <Alert color="blue" icon={<Bot size={16} />}>
-              The server attributes this note to the authenticated human or agent. A note remains a
-              draft until an executable edit is attached and validated.
+              The server attributes this proposal to the authenticated human or agent. Add complete
+              schema source or a deletion below, or leave the edit list empty to preserve intent
+              before implementation.
             </Alert>
             <TextInput
               label="Title"
@@ -168,13 +202,26 @@ export function ChangesPage() {
               minRows={2}
             />
             <TextInput label="Target bookmark" value={defaultBookmark} readOnly />
+            <div>
+              <Text fw={600} size="sm" mb={4}>
+                Executable edits
+              </Text>
+              <Text size="xs" c="dimmed" mb="sm">
+                Source edits are parsed and compatibility-checked only when you validate the draft.
+              </Text>
+              <ChangeEditComposer value={edits} onChange={setEdits} />
+            </div>
             {create.error ? <Alert color="red">{create.error.message}</Alert> : null}
             <Group justify="flex-end">
               <Button variant="default" onClick={close}>
                 Cancel
               </Button>
-              <Button type="submit" loading={create.isPending} disabled={!title.trim()}>
-                Record note
+              <Button
+                type="submit"
+                loading={create.isPending}
+                disabled={!title.trim() || !changeEditsAreComplete(edits)}
+              >
+                {edits.length === 0 ? 'Record intent' : 'Create executable proposal'}
               </Button>
             </Group>
           </Stack>

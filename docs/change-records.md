@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T18:31:43Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Change Record Design
 
 ## Scope
@@ -25,6 +25,9 @@ The D1 vertical slice is implemented:
 - Memory, redb, and PostgreSQL-backed persistence. Redb is covered by a
   close/reopen test; PostgreSQL create/list/CAS behavior runs against isolated
   integration-test schemas.
+- Repository-scoped creation-order and per-status indexes. Durable creates and
+  status transitions update record/index state atomically; public pages use
+  bounded backend ranges and validate every returned index target.
 - Compiler-backed validation with immutable base resolution, deterministic edit
   digests, stored findings, protected-bookmark compatibility checks, and
   unresolved-base/conflict reporting.
@@ -180,11 +183,20 @@ service ChangeService {
 `DeleteChange` is a compatibility-shaped soft delete: it transitions a draft to
 `ABANDONED`. It does not erase the audit record.
 
-List currently uses parent/filter-bound opaque page tokens, stable
-creation-time/name ordering, and filtering by status. Actor, target-bookmark,
-and update-time filters remain planned. Update uses a field mask and ETag;
-mutable metadata includes `external_references`, and stale ETags return
-`ABORTED`. Custom mutation methods require a request ID.
+List uses parent/filter-bound opaque page tokens, stable creation-time/name
+ordering, and optional status filtering. The transport delegates each page to
+the matching repository/status index and reads at most `page_size + 1` ordered
+entries from `ObjectDb`; malformed entries, missing targets, scope/status
+mismatches, and key/record mismatches fail closed. Existing redb/PostgreSQL
+stores are indexed once before their first post-upgrade ledger operation, with
+every legacy record validated before all missing all/status entries and a
+durable completion marker commit atomically. Because a pre-index deployment
+does not maintain those indexes, mixed old/new processes against one database
+are unsupported.
+
+Actor, target-bookmark, and update-time filters remain planned. Update uses a
+field mask and ETag; mutable metadata includes `external_references`, and stale
+ETags return `ABORTED`. Custom mutation methods require a request ID.
 
 ## Validation Snapshot
 

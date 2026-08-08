@@ -3,6 +3,7 @@ import type {
   ArtifactDownloadRequest,
   ChangeAction,
   ChangeActionRequest,
+  ChangePage,
   ChangeRecord,
   ConflictDetail,
   ConflictList,
@@ -12,8 +13,9 @@ import type {
   CreateChangeRequest,
   DiffResult,
   OperationEntry,
-  ProjectSummary,
-  RepoDashboard,
+  ProjectPage,
+  RepoDashboardPage,
+  RepoPage,
   RepoSummary,
   ResolveConflictRequest,
   ResolveConflictResult,
@@ -22,6 +24,7 @@ import type {
   SchemaRevision,
   ServerConfig,
   SessionInfo,
+  UpdateChangeEditsRequest,
 } from './types';
 import type { SchemaHubClient } from './client';
 
@@ -36,17 +39,40 @@ export class HttpSchemaHubClient implements SchemaHubClient {
     private readonly token: () => string | undefined = () => undefined,
   ) {}
 
-  async listProjects(): Promise<ProjectSummary[]> {
-    return this.get('/api/projects');
+  async listProjects(pageToken = '', pageSize = 50): Promise<ProjectPage> {
+    const params = new URLSearchParams({ pageSize: pageSize.toString() });
+    if (pageToken) params.set('pageToken', pageToken);
+    return this.get(`/api/projects?${params.toString()}`);
   }
 
-  async listRepos(project: string): Promise<RepoSummary[]> {
-    return this.get(`/api/projects/${encode(project)}/repos`);
+  async listRepos(
+    project: string,
+    pageToken = '',
+    pageSize = 50,
+    namePrefix = '',
+  ): Promise<RepoPage> {
+    const params = new URLSearchParams({ pageSize: pageSize.toString() });
+    if (pageToken) params.set('pageToken', pageToken);
+    if (namePrefix) params.set('namePrefix', namePrefix);
+    return this.get(`/api/projects/${encode(project)}/repos?${params.toString()}`);
   }
 
-  async getRepoDashboard(project: string, repo: string, ref: string): Promise<RepoDashboard> {
+  async getRepo(project: string, repo: string): Promise<RepoSummary | undefined> {
+    const page = await this.listRepos(project, '', 1, repo);
+    return page.repositories.find((repository) => repository.repo === repo);
+  }
+
+  async getRepoDashboard(
+    project: string,
+    repo: string,
+    ref: string,
+    pageToken = '',
+    pageSize = 50,
+  ): Promise<RepoDashboardPage> {
+    const params = new URLSearchParams({ ref, pageSize: pageSize.toString() });
+    if (pageToken) params.set('pageToken', pageToken);
     return this.get(
-      `/api/projects/${encode(project)}/repos/${encode(repo)}/dashboard?ref=${encode(ref)}`,
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/dashboard?${params.toString()}`,
     );
   }
 
@@ -109,8 +135,19 @@ export class HttpSchemaHubClient implements SchemaHubClient {
     return this.get('/api/session');
   }
 
-  async listChanges(project: string, repo: string): Promise<ChangeRecord[]> {
-    return this.get(`/api/projects/${encode(project)}/repos/${encode(repo)}/changes`);
+  async listChanges(
+    project: string,
+    repo: string,
+    pageToken = '',
+    pageSize = 50,
+    status = '',
+  ): Promise<ChangePage> {
+    const params = new URLSearchParams({ pageSize: pageSize.toString() });
+    if (pageToken) params.set('pageToken', pageToken);
+    if (status) params.set('status', status);
+    return this.get(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/changes?${params.toString()}`,
+    );
   }
 
   async getChange(project: string, repo: string, changeId: string): Promise<ChangeRecord> {
@@ -126,6 +163,18 @@ export class HttpSchemaHubClient implements SchemaHubClient {
   ): Promise<ChangeRecord> {
     return this.post(
       `/api/projects/${encode(project)}/repos/${encode(repo)}/changes`,
+      request,
+    );
+  }
+
+  async updateChangeEdits(
+    project: string,
+    repo: string,
+    changeId: string,
+    request: UpdateChangeEditsRequest,
+  ): Promise<ChangeRecord> {
+    return this.patch(
+      `/api/projects/${encode(project)}/repos/${encode(repo)}/changes/${encode(changeId)}`,
       request,
     );
   }
@@ -245,6 +294,15 @@ export class HttpSchemaHubClient implements SchemaHubClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
+      headers: { 'content-type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify(body),
+    });
+    return readJson<T>(response);
+  }
+
+  private async patch<T>(path: string, body: unknown): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PATCH',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });

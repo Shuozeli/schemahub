@@ -1,2 +1,12 @@
 allowBuilds:
   esbuild: true
+# GHSA-qwww-vcr4-c8h2 affects only React Router's unstable server-side RSC
+# APIs. SchemaHub GUI is a client-only Vite BrowserRouter bundle and imports
+# no React Server Component or server-action surface.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-qwww-vcr4-c8h2
+overrides:
+  esbuild: 0.28.1
+  postcss: 8.5.23
+  nanoid: 3.3.17

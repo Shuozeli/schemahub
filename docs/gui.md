@@ -1,8 +1,9 @@
-<!-- agent-updated: 2026-07-21T16:49:05Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # SchemaHub GUI
 
 SchemaHub includes a React operator console in `apps/schemahub-gui`. It reads
-persisted resources, records human/agent change intent, advances the shared
+persisted resources, records human/agent change intent, authors executable
+whole-schema source replacements and deletions, advances the shared
 ChangeRecord lifecycle, resolves declaration conflicts, downloads immutable
 artifacts, and audits schema history.
 
@@ -22,7 +23,7 @@ integrations use `schemahub.v1` gRPC/protobuf or the CLI. See ADR 0002.
 ```
 apps/schemahub-gui
 |-- src/main.tsx              # React root, Mantine, QueryClient, router providers
-|-- src/App.tsx               # AppShell, sidebar navigation, route table
+|-- src/App.tsx               # AppShell, sidebar navigation, lazy route table
 |-- src/api/
 |   |-- types.ts              # Browser-facing DTOs
 |   |-- client.ts             # SchemaHubClient interface
@@ -31,9 +32,11 @@ apps/schemahub-gui
 |   |-- index.ts              # Selects HTTP or mock client
 |   `-- queries.ts            # TanStack Query hooks
 |-- src/pages/                # Route-level screens
-|-- src/components/           # Reusable UI surfaces
+|-- src/components/           # Reusable UI surfaces, including typed edit authoring
 |-- src/theme.ts              # Mantine theme
 `-- src/styles.css            # App layout styles
+
+apps/browser-cdp.mjs          # Remote CDP discovery and host normalization
 ```
 
 ### Stack
@@ -45,9 +48,14 @@ apps/schemahub-gui
 | Component library | Mantine |
 | Data fetching | TanStack Query |
 | Routing | React Router |
-| Code viewer | Monaco Editor |
+| Code viewer | Self-contained read-only source viewer |
 | Icons | lucide-react |
 | Package manager | pnpm |
+
+The production build contains every code-viewer asset. Its bundle contract
+rejects known remote CDN hosts as well as an oversized entry chunk, so an
+archive or container does not silently depend on third-party JavaScript at
+runtime.
 
 ### Data Boundary
 
@@ -56,26 +64,33 @@ Pages do not call transport APIs directly. They use hooks in `src/api/queries.ts
 Default implementation:
 
 ```text
-Page -> useQuery/useMutation hook -> SchemaHubClient -> HttpSchemaHubClient -> HTTP BFF -> Core
+Page -> useQuery/useInfiniteQuery/useMutation hook -> SchemaHubClient -> HttpSchemaHubClient -> HTTP BFF -> Core
 ```
 
 Explicit demo implementation:
 
 ```text
-Page -> useQuery/useMutation hook -> SchemaHubClient -> MockSchemaHubClient
+Page -> useQuery/useInfiniteQuery/useMutation hook -> SchemaHubClient -> MockSchemaHubClient
 ```
 
-The browser-facing DTOs intentionally differ from internal Rust storage types. Keep UI DTOs stable and workflow-oriented; adapt gRPC responses at the client or BFF boundary.
+The browser-facing DTOs intentionally differ from internal Rust storage types.
+Keep UI DTOs workflow-oriented and adapt gRPC responses at the client or BFF
+boundary. Project, repository, dashboard, and ChangeRecord list DTOs are
+bounded pages, not arrays of an entire catalog or repository projection.
+TanStack Query retains each requested page, sends the preceding
+`nextPageToken` unchanged, and only requests another page when the operator
+selects the continuation control. Repository deep links use a page of size one
+with the repository name as a prefix, then require an exact-name match.
 
 ## Implemented Screens
 
 | Route | Screen |
 |---|---|
-| `/projects` | Project list with visibility, role, repo count, and recent activity |
-| `/projects/:project` | Persisted repositories and runtime policy |
+| `/projects` | Incrementally paged project list with visibility, caller role, and recent activity |
+| `/projects/:project` | Incrementally paged persisted repositories and runtime policy |
 | `/projects/:project/repos/:repo` | Repo dashboard with schemas, refs, activity, and compatibility summary |
-| `/projects/:project/repos/:repo/changes` | Durable human/agent notes with optional external references |
-| `/projects/:project/repos/:repo/changes/:changeId` | Intent/references, validation, readiness, review, Apply, ETag, and receipt workflow |
+| `/projects/:project/repos/:repo/changes` | Durable human/agent proposals with optional executable source/deletion edits |
+| `/projects/:project/repos/:repo/changes/:changeId` | ETag-protected draft editing, validation, readiness, review, Apply, and receipt workflow |
 | `/projects/:project/repos/:repo/conflicts` | Server-rendered conflict list and compiler-validated resolution |
 | `/projects/:project/repos/:repo/search` | Schemas, declarations, revisions, and ChangeRecords at a ref |
 | `/projects/:project/repos/:repo/schemas/*` | Schema detail with source, declarations, dependencies, and codegen preview |
@@ -119,7 +134,123 @@ Build the production bundle:
 
 ```bash
 pnpm run build
+pnpm run test:bundle
+pnpm run test:cdp
 ```
+
+Every operator page is a route-level lazy boundary, so the initial shell does
+not eagerly download page-only workflows such as source editing or schema
+inspection. CI rejects a production entry chunk above 450,000 bytes; set
+`SCHEMAHUB_GUI_MAX_ENTRY_BYTES` only when deliberately rehearsing another
+budget. The mock-browser acceptance first proves project, repository, and
+dashboard schema rows arrive only after their continuation buttons are
+selected. After browser authoring it returns through SPA navigation and proves
+the newer proposal appears only after the indexed ChangeRecord continuation.
+It also fixes the viewport at 930 pixels before authoring and asserts that the
+identity control remains inside the 56-pixel header, followed by the
+self-contained source viewer's keyboard, line-number, scrolling, and
+no-third-party-resource contract.
+
+The live acceptance resolves the identity button through its exact
+`Identity: <display name>` accessible name while switching between the
+delegated agent and independent human. Its `finally` path closes pages,
+contexts, and both local or remote browser connections, so neutral-CDP runs
+cannot remain attached after success.
+
+Run the frozen dependency audit with:
+
+```bash
+pnpm audit --audit-level low
+```
+
+`pnpm-workspace.yaml` locks patched esbuild and PostCSS transitive versions.
+It contains exactly one advisory exception, `GHSA-qwww-vcr4-c8h2`, which
+applies only to React Router's unstable server-side RSC APIs. This GUI is a
+client-only Vite bundle using `BrowserRouter`; it imports no RSC or
+server-action surface. The repository dependency-policy test rejects another
+ignored advisory, a server/RSC import, vulnerable override drift, or removal
+of the GUI audit from CI.
+
+## Same-release production serving
+
+Every native release archive includes the locked production build under
+`schemahub-gui/`. Serve it from the same HTTP listener as the BFF:
+
+```bash
+schemahub-server \
+  --listen "$TAILSCALE_IP:50051" \
+  --http-listen "$TAILSCALE_IP:8080" \
+  --gui-dir ./schemahub-gui \
+  --config schemahub.toml
+```
+
+The equivalent persistent configuration is:
+
+```toml
+[http]
+gui_dir = "/absolute/path/to/schemahub-gui"
+```
+
+`gui_dir` fails startup unless it contains a regular `index.html`, an `assets`
+directory, and only regular files/directories throughout the complete tree.
+Symbolic links—including a linked `assets` root, nested asset, or favicon—are
+rejected before the listener starts so the static service cannot read outside
+the configured root. The directory must remain immutable while the server
+runs. It is also rejected when the HTTP listener is disabled. The release
+container places the exact read-only build in `/usr/share/schemahub/gui` and
+enables it by default. With port 8080 mapped to the Tailscale interface, the
+console is available at
+`http://shuoze25-yuacx.tail8f3b66.ts.net:8080/`.
+
+The server returns the SPA entry for `/`, `/projects`, every nested
+`/projects/...` route, and `/admin`. Only successful assets whose filename ends
+in Vite's `-<eight-character URL-safe content hash>.<extension>` shape receive
+`Cache-Control: public, max-age=31536000, immutable`; successful unhashed
+assets and HTML receive `no-cache`. Static routes never carry the GUI-BFF
+classification header, and unknown `/api/*` routes remain API `404` responses
+rather than falling back to HTML. Successful GUI responses also receive a
+self-only content security policy, framing denial, browser feature restrictions,
+MIME-sniffing protection, and a same-origin referrer policy. The policy permits
+inline styles because Mantine renders dynamic style attributes, but it does not
+permit inline scripts or third-party runtime origins.
+
+Exercise source creation, validation invalidation, ETag-protected editing, and
+schema deletion in a real browser against the opt-in mock client:
+
+```bash
+export SCHEMAHUB_GUI_URL="http://$TAILSCALE_HOST:5173"
+VITE_SCHEMAHUB_USE_MOCKS=true pnpm run dev
+# From another shell:
+pnpm run test:browser
+```
+
+The browser smoke connects to the neutral Ubuntu GUI's Playwright-compatible
+CDP listener at
+`http://ubuntu-gui-browser-arm2.tail8f3b66.ts.net:9223` by default. Set
+`PLAYWRIGHT_CDP_ENDPOINT` to override the remote CDP endpoint or
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to launch a local Chromium-compatible binary;
+CI uses the hosted runner's Google Chrome. The shared resolver fetches
+`/json/version` and rewrites Chrome's advertised loopback WebSocket onto the
+configured HTTP(S) CDP host; direct `ws:` and `wss:` endpoints remain
+supported. Interactive Pwright sessions use the same neutral listener from an
+isolated working directory.
+
+Exercise the governed workflow against the real release server, HTTP BFF,
+redb, and Vite. The runner creates an isolated private repository, has a
+delegated agent author Protobuf source in Chromium, proves Apply fails before
+review, switches to an independent human reviewer, applies as the agent, and
+then verifies audit and descriptor identity after a server restart:
+
+```bash
+export SCHEMAHUB_GUI_URL="http://$TAILSCALE_HOST:5173"
+./scripts/run-live-browser-smoke.sh
+```
+
+The live runner writes its evidence beneath a temporary directory by default.
+Set `SCHEMAHUB_CODELAB_EVIDENCE_DIR` to retain it at an explicit path. CI uses
+an isolated loopback fallback, uploads only the sanitized `result.json` and
+browser screenshot, and keeps credential-bearing runtime files out of the
+artifact.
 
 Preview a production build:
 
@@ -217,11 +348,13 @@ Current BFF routes:
 | Route | Purpose |
 |---|---|
 | `GET /api/openapi.json` | Generated OpenAPI 3.1 contract for this HTTP boundary |
-| `GET /api/projects` | Project list |
-| `GET /api/projects/:project/repos` | Persisted repository list and runtime policy |
-| `GET /api/projects/:project/repos/:repo/dashboard?ref=branch` | Repo dashboard and real conflict counts |
-| `GET/POST /api/projects/:project/repos/:repo/changes` | List or record note-only ChangeRecords |
-| `GET /api/projects/:project/repos/:repo/changes/:id` | Change detail shared with gRPC/CLI |
+| `GET /api/projects?pageSize=&pageToken=&namePrefix=` | Bounded visible-project page and opaque continuation |
+| `GET /api/projects/:project/repos?pageSize=&pageToken=&namePrefix=` | Bounded persisted-repository page, runtime policy, and opaque continuation |
+| `GET /api/projects/:project/repos/:repo/dashboard?ref=&pageSize=&pageToken=` | Bounded schema/branch/tag dashboard page, exact conflict counts, immutable schema snapshot, and opaque continuation |
+| `GET /api/projects/:project/repos/:repo/changes?pageSize=&pageToken=&status=` | Bounded, source-redacted ChangeRecord page over the repository/status index |
+| `POST /api/projects/:project/repos/:repo/changes` | Create a note-only or executable ChangeRecord |
+| `GET /api/projects/:project/repos/:repo/changes/:id` | Change detail shared with gRPC/CLI, including source payloads for browser-editable replacements |
+| `PATCH /api/projects/:project/repos/:repo/changes/:id` | Replace a draft's source/deletion edit list under ETag concurrency control |
 | `POST /api/projects/:project/repos/:repo/changes/:id/actions/:action` | Validate, ready, approve, reject, apply, or abandon with ETag |
 | `GET /api/projects/:project/repos/:repo/search?q=...&ref=branch` | Repository resource search |
 | `GET /api/projects/:project/repos/:repo/conflicts` | List unresolved declarations |
@@ -244,6 +377,23 @@ Implemented BFF responsibilities:
 - gRPC status/error normalization.
 - gRPC-equivalent HTTP status normalization.
 - Browser-safe JSON DTOs.
+- Bounded project/repository page DTOs backed by Core catalog ranges. Tokens
+  are bound to catalog kind, project scope, and name prefix; a token from one
+  route or filter is rejected by another.
+- A composite repository-dashboard page. Its token binds project, repository,
+  and ref expression; advances bounded schema, branch, and tag cursors
+  together; and carries the first page's resolved commit so later schema
+  summaries cannot cross a moving bookmark. Conflict totals are exact without
+  collecting the repository-wide conflict list. Selected schema objects and
+  repository-local names batch-load in one immutable traversal; dependency
+  totals count unique compiler-reported direct imports without target
+  traversal.
+- Bounded ChangeRecord list pages over Core's repository/status index. Tokens
+  cannot cross repository or lifecycle filter, and list records omit complete
+  replacement-source payloads.
+- Explicit React continuations on dashboard/ref consumers and the proposal
+  list. Loaded metrics are labeled as such rather than pretending one page is
+  a repository-wide total.
 - Handler-derived OpenAPI metadata; see `http-api.md` for generation and
   release packaging.
 - Runtime and per-path OpenAPI classification as GUI-only, with the response
@@ -258,9 +408,15 @@ server release.
 - Live mode requires `schemahub-server --http-listen`; direct browser gRPC is not supported.
 - Browser token entry uses local storage and is a development credential flow,
   not a full OIDC/login integration.
-- The GUI creates intent-only drafts. Executable mutation/source edits are
-  attached with the CLI or ChangeService, then validated/reviewed/applied in
-  either surface.
+- The GUI authors whole-schema source replacements and schema deletions directly
+  and can convert an existing note into an executable draft. Compiler-specific
+  granular operation builders remain available through the CLI and public
+  `schemahub.v1` ChangeService.
 - Search is repository-scoped; project-wide and cross-project indexes are D6+
   work.
-- No component tests have been added yet.
+- Project/repository selectors, repository dashboards, and ChangeRecord lists
+  are bounded. They remain same-release GUI BFF projections outside the public
+  1.x compatibility promise.
+- CI runs both the mock executable-edit smoke and a live Chromium
+  agent-author/human-review/agent-Apply/restart-serving acceptance. Isolated
+  component tests have not been added yet.

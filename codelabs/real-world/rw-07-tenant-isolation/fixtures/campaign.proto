@@ -1,0 +1,7 @@
+syntax = "proto3";
+package ads.campaigns.v1;
+
+message CampaignImpression {
+  string campaign_id = 1;
+  string placement = 2;
+}

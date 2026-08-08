@@ -36,12 +36,14 @@ export function IdentityMenu() {
     <Popover opened={opened} onChange={setOpened} width={340} position="bottom-end" withArrow>
       <Popover.Target>
         <Button
+          aria-label={`Identity: ${label}`}
+          className="identityMenuButton"
           variant="subtle"
           color="gray"
           leftSection={<PrincipalIcon size={16} />}
           onClick={() => setOpened((value) => !value)}
         >
-          {label}
+          <span className="identityMenuLabel">{label}</span>
         </Button>
       </Popover.Target>
       <Popover.Dropdown>

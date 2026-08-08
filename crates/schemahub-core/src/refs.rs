@@ -3,11 +3,11 @@
 //! conflicts; protected targets reject a conflicted exact final tree before
 //! publication (design.md §6).
 
-use schemahub_jj::{PublicationError, RefSpec};
+use schemahub_jj::{NamedRefPage, PublicationError, RefSpec};
 use schemahub_types::Action;
 
 use crate::auth::authorize;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::mutation::idempotency::{FingerprintBuilder, IdempotentWrite};
 use crate::request::MutationResponse;
 use crate::Core;
@@ -115,6 +115,50 @@ impl Core {
         Ok(self.jj.list_bookmarks(project, repo)?)
     }
 
+    /// Look up one bookmark without enumerating the complete namespace.
+    pub fn get_bookmark(
+        &self,
+        project: &str,
+        repo: &str,
+        name: &str,
+        token: Option<&str>,
+    ) -> CoreResult<Option<String>> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
+            token,
+            Action::Read,
+            project,
+            repo,
+        )?;
+        validate_ref_name("branch name", name)?;
+        Ok(self.jj.get_bookmark(project, repo, name)?)
+    }
+
+    /// List a bounded bookmark page in stable lexicographical name order.
+    pub fn list_bookmarks_page(
+        &self,
+        project: &str,
+        repo: &str,
+        name_prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        token: Option<&str>,
+    ) -> CoreResult<NamedRefPage> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
+            token,
+            Action::Read,
+            project,
+            repo,
+        )?;
+        validate_ref_page(name_prefix, start_after, limit)?;
+        Ok(self
+            .jj
+            .list_bookmarks_page(project, repo, name_prefix, start_after, limit)?)
+    }
+
     /// Create a tag (immutable name → commit pin).
     pub fn create_tag(
         &self,
@@ -176,6 +220,30 @@ impl Core {
             repo,
         )?;
         Ok(self.jj.list_tags(project, repo)?)
+    }
+
+    /// List a bounded tag page in stable lexicographical name order.
+    pub fn list_tags_page(
+        &self,
+        project: &str,
+        repo: &str,
+        name_prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        token: Option<&str>,
+    ) -> CoreResult<NamedRefPage> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
+            token,
+            Action::Read,
+            project,
+            repo,
+        )?;
+        validate_ref_page(name_prefix, start_after, limit)?;
+        Ok(self
+            .jj
+            .list_tags_page(project, repo, name_prefix, start_after, limit)?)
     }
 
     /// Merge bookmark `src` into `dst` (design.md §6). Conflicts become stored
@@ -293,4 +361,35 @@ impl Core {
         };
         self.complete_idempotent_write(attempt.as_ref(), response)
     }
+}
+
+fn validate_ref_page(name_prefix: &str, start_after: Option<&str>, limit: usize) -> CoreResult<()> {
+    if name_prefix.len() > 255 || name_prefix.chars().any(char::is_control) {
+        return Err(CoreError::InvalidArgument(
+            "name_prefix must be at most 255 characters without control characters".to_string(),
+        ));
+    }
+    if limit == 0 || limit > 200 {
+        return Err(CoreError::InvalidArgument(
+            "ref page limit must be between 1 and 200".to_string(),
+        ));
+    }
+    if let Some(cursor) = start_after {
+        validate_ref_name("ref page cursor", cursor)?;
+        if !cursor.starts_with(name_prefix) {
+            return Err(CoreError::InvalidArgument(
+                "ref page cursor must match name_prefix".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ref_name(label: &str, value: &str) -> CoreResult<()> {
+    if value.trim().is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        return Err(CoreError::InvalidArgument(format!(
+            "{label} must be a non-empty value of at most 255 characters without control characters"
+        )));
+    }
+    Ok(())
 }

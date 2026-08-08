@@ -32,6 +32,9 @@ pub enum BranchAction {
         repo: String,
         #[arg(long, default_value = "")]
         prefix: String,
+        /// Number of branches fetched per RPC.
+        #[arg(long, default_value_t = 50)]
+        page_size: i32,
     },
     /// Fast-forward merge a branch into a target branch
     Merge {
@@ -93,24 +96,37 @@ pub async fn run(args: BranchArgs, channel: Channel, token: &str) -> anyhow::Res
                 .context("DeleteBranch RPC")?;
             println!("Deleted branch '{name}'");
         }
-        BranchAction::List { repo, prefix } => {
+        BranchAction::List {
+            repo,
+            prefix,
+            page_size,
+        } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
-            let resp = client
-                .list_branches(bearer(
-                    ListBranchesRequest {
-                        project,
-                        repo: repo_name,
-                        name_prefix: prefix,
-                    },
-                    token,
-                )?)
-                .await
-                .context("ListBranches RPC")?;
-
-            for branch in resp.into_inner().branches {
-                let protected = if branch.protected { " [protected]" } else { "" };
-                println!("  {}{} → {}", branch.name, protected, branch.head_commit);
+            let mut page_token = String::new();
+            loop {
+                let response = client
+                    .list_branches(bearer(
+                        ListBranchesRequest {
+                            project: project.clone(),
+                            repo: repo_name.clone(),
+                            name_prefix: prefix.clone(),
+                            page_size,
+                            page_token,
+                        },
+                        token,
+                    )?)
+                    .await
+                    .context("ListBranches RPC")?
+                    .into_inner();
+                for branch in response.branches {
+                    let protected = if branch.protected { " [protected]" } else { "" };
+                    println!("  {}{} → {}", branch.name, protected, branch.head_commit);
+                }
+                if response.next_page_token.is_empty() {
+                    break;
+                }
+                page_token = response.next_page_token;
             }
         }
         BranchAction::Merge {

@@ -47,6 +47,8 @@ pub enum CoreError {
     AccessStore(#[from] crate::auth_store::AccessStoreError),
     #[error(transparent)]
     Idempotency(#[from] crate::mutation::idempotency::IdempotencyError),
+    #[error(transparent)]
+    ControlPlaneAudit(#[from] crate::control_plane_audit::ControlPlaneAuditError),
     /// One or more compatibility violations blocked a protected-bookmark write
     /// (design.md §7). Carries the per-declaration violations.
     #[error("compatibility violation: {} issue(s) on protected bookmark", .0.len())]

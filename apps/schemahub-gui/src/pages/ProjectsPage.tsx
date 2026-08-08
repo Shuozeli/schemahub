@@ -1,11 +1,19 @@
-import { Badge, Group, Paper, Stack, Table, Text, Title } from '@mantine/core';
+import { Badge, Button, Group, Paper, Stack, Table, Text, Title } from '@mantine/core';
 import { useNavigate } from 'react-router-dom';
 
 import { useProjects } from '../api/queries';
 
 export function ProjectsPage() {
   const navigate = useNavigate();
-  const { data = [], error, isLoading } = useProjects();
+  const {
+    data,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+  } = useProjects();
+  const projects = data?.pages.flatMap((page) => page.projects) ?? [];
 
   return (
     <Stack>
@@ -24,7 +32,6 @@ export function ProjectsPage() {
               <Table.Th>Project</Table.Th>
               <Table.Th>Visibility</Table.Th>
               <Table.Th>My role</Table.Th>
-              <Table.Th>Repos</Table.Th>
               <Table.Th>Last operation</Table.Th>
               <Table.Th>Last activity</Table.Th>
             </Table.Tr>
@@ -32,20 +39,20 @@ export function ProjectsPage() {
           <Table.Tbody>
             {isLoading ? (
               <Table.Tr>
-                <Table.Td colSpan={6}>Loading projects...</Table.Td>
+                <Table.Td colSpan={5}>Loading projects...</Table.Td>
               </Table.Tr>
             ) : error ? (
               <Table.Tr>
-                <Table.Td colSpan={6} c="red">
+                <Table.Td colSpan={5} c="red">
                   {error.message}
                 </Table.Td>
               </Table.Tr>
-            ) : data.length === 0 ? (
+            ) : projects.length === 0 ? (
               <Table.Tr>
-                <Table.Td colSpan={6}>No projects are visible to this identity.</Table.Td>
+                <Table.Td colSpan={5}>No projects are visible to this identity.</Table.Td>
               </Table.Tr>
             ) : (
-              data.map((project) => (
+              projects.map((project) => (
                 <Table.Tr
                   key={project.name}
                   className="tableRowLink"
@@ -58,7 +65,6 @@ export function ProjectsPage() {
                     </Badge>
                   </Table.Td>
                   <Table.Td>{project.role}</Table.Td>
-                  <Table.Td>{project.repos}</Table.Td>
                   <Table.Td>{project.lastOperation}</Table.Td>
                   <Table.Td className="mono">{project.lastActivity}</Table.Td>
                 </Table.Tr>
@@ -67,6 +73,15 @@ export function ProjectsPage() {
           </Table.Tbody>
         </Table>
       </Paper>
+      {hasNextPage ? (
+        <Button
+          variant="default"
+          loading={isFetchingNextPage}
+          onClick={() => void fetchNextPage()}
+        >
+          Load more projects
+        </Button>
+      ) : null}
     </Stack>
   );
 }

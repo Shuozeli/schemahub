@@ -2,7 +2,7 @@
 //! each read a direct object lookup; the core maps the stored blobs through the
 //! compiler into summaries / details / type refs.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use schemahub_jj::RefSpec;
 use schemahub_types::{
@@ -15,7 +15,7 @@ use crate::request::{
     DeclLocation, DependencyScanSnapshot, DependentsScan, FollowedType, SchemaDependency,
     SchemaDependent, SearchHit,
 };
-use crate::Core;
+use crate::{Core, SchemaNamePage};
 
 /// A successful reverse-dependency scan never inspects more repositories than
 /// this. Crossing the bound fails the entire call so clients never mistake a
@@ -24,6 +24,17 @@ pub const MAX_DEPENDENCY_SCAN_REPOSITORIES: usize = 1_000;
 
 /// Maximum number of schema files inspected by one reverse-dependency scan.
 pub const MAX_DEPENDENCY_SCAN_SCHEMAS: usize = 10_000;
+
+/// Bounded dashboard inventory for one schema at an immutable revision.
+///
+/// Declaration blobs are compiler-validated before they are counted.
+/// Dependencies are unique direct imports reported by the format compiler;
+/// this summary intentionally does not traverse or authorize import targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaInventoryStats {
+    pub declarations: usize,
+    pub dependencies: usize,
+}
 
 impl Core {
     /// List schema-file names in a repo at a ref (branch / tag / commit).
@@ -49,6 +60,106 @@ impl Core {
         let commit_id = self.resolve_read_commit(project, repo, at, token)?;
         let at = RefSpec::commit(commit_id.clone());
         Ok((self.jj.list_schemas(project, repo, &at)?, commit_id))
+    }
+
+    /// List one bounded schema-name page from a single immutable snapshot.
+    ///
+    /// The returned commit must be carried in transport pagination state so a
+    /// mutable ref cannot advance between pages and produce a mixed inventory.
+    pub fn list_schemas_page_resolved(
+        &self,
+        project: &str,
+        repo: &str,
+        at: &RefSpec,
+        start_after: Option<&str>,
+        limit: usize,
+        token: Option<&str>,
+    ) -> CoreResult<(SchemaNamePage, String)> {
+        if limit == 0 {
+            return Err(CoreError::InvalidArgument(
+                "schema page limit must be greater than zero".to_string(),
+            ));
+        }
+        if start_after.is_some_and(|cursor| {
+            cursor.is_empty()
+                || cursor.len() > 1_024
+                || cursor.starts_with('/')
+                || cursor.ends_with('/')
+                || cursor
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "..")
+                || cursor.chars().any(char::is_control)
+        }) {
+            return Err(CoreError::InvalidArgument(
+                "schema page cursor is invalid".to_string(),
+            ));
+        }
+        let commit_id = self.resolve_read_commit(project, repo, at, token)?;
+        let at = RefSpec::commit(commit_id.clone());
+        Ok((
+            self.jj
+                .list_schemas_page(project, repo, &at, start_after, limit)?,
+            commit_id,
+        ))
+    }
+
+    /// Summarize a caller-selected schema page with one immutable tree load.
+    ///
+    /// The ref is resolved once, selected objects and the repository-local
+    /// schema inventory are loaded in one JJ traversal, and compiler reads run
+    /// only over the selected page. The returned commit identifies the exact
+    /// snapshot represented by every summary.
+    pub fn summarize_schema_inventory_at(
+        &self,
+        project: &str,
+        repo: &str,
+        at: &RefSpec,
+        selected_schemas: &BTreeSet<String>,
+        token: Option<&str>,
+    ) -> CoreResult<(BTreeMap<String, SchemaInventoryStats>, String)> {
+        let commit_id = self.resolve_read_commit(project, repo, at, token)?;
+        if selected_schemas.is_empty() {
+            return Ok((BTreeMap::new(), commit_id));
+        }
+
+        let immutable_at = RefSpec::commit(commit_id.clone());
+        let batch = self
+            .jj
+            .load_schemas(project, repo, selected_schemas, &immutable_at)?;
+        let same_repo_schemas: HashSet<String> = batch.all_schema_names.into_iter().collect();
+        let mut summaries = BTreeMap::new();
+
+        for (schema_name, objects) in batch.schemas {
+            let compiler = self.compiler_for(&schema_name)?;
+            for declaration in objects.decls.values() {
+                compiler.summarize_decl(declaration)?;
+            }
+
+            let importing_schema = SchemaPath::new(project, repo, &schema_name);
+            let mut direct_dependencies = BTreeSet::new();
+            for import in compiler.imports(&objects)? {
+                let imported_schema =
+                    normalize_import_path(&importing_schema, &import.path, &same_repo_schemas)?;
+                direct_dependencies.insert((
+                    imported_schema.project,
+                    imported_schema.repo,
+                    imported_schema.schema_name,
+                    import.path,
+                    import.resolved_commit,
+                    import.decl_name,
+                ));
+            }
+
+            summaries.insert(
+                schema_name,
+                SchemaInventoryStats {
+                    declarations: objects.decls.len(),
+                    dependencies: direct_dependencies.len(),
+                },
+            );
+        }
+
+        Ok((summaries, commit_id))
     }
 
     /// List declaration summaries in a schema file at a ref (branch / tag /

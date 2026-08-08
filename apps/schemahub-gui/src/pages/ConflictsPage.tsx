@@ -29,7 +29,12 @@ export function ConflictsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { data: repository } = useRepository(project, repo);
   const bookmark = searchParams.get('bookmark') || repository?.defaultBranch || '';
-  const { data: dashboard } = useRepoDashboard(project, repo, bookmark);
+  const {
+    data: dashboard,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useRepoDashboard(project, repo, bookmark);
   const { data: conflictList, error: listError, isLoading } = useConflicts(
     project,
     repo,
@@ -108,13 +113,25 @@ export function ConflictsPage() {
             Inspect competing declaration sides and commit a compiler-validated resolution.
           </Text>
         </div>
-        <Select
-          label="Bookmark"
-          value={bookmark}
-          data={branches}
-          onChange={(value) => value && setSearchParams({ bookmark: value })}
-          w={260}
-        />
+        <Stack gap="xs">
+          <Select
+            label="Bookmark"
+            value={bookmark}
+            data={branches}
+            onChange={(value) => value && setSearchParams({ bookmark: value })}
+            w={260}
+          />
+          {hasNextPage ? (
+            <Button
+              size="compact-sm"
+              variant="subtle"
+              loading={isFetchingNextPage}
+              onClick={() => void fetchNextPage()}
+            >
+              Load more bookmarks
+            </Button>
+          ) : null}
+        </Stack>
       </Group>
 
       {listError ? <Alert color="red">{listError.message}</Alert> : null}

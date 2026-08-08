@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T18:31:43Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # SchemaHub GUI BFF and Operational HTTP Interfaces
 
 SchemaHub generates an OpenAPI 3.1 contract for the co-located HTTP interfaces
@@ -13,6 +13,7 @@ ADR 0002 is:
 |---|---|---|
 | `schemahub.v1` gRPC/protobuf | Public 1.0 API | Stable under the 1.x semantic-versioning policy |
 | Unversioned `/api/*` HTTP/JSON | GUI-only BFF | Excluded from the public API promise; supported with the same-release GUI |
+| `/`, `/projects/*`, `/admin`, `/assets/*` | Version-matched GUI | Static same-release console; not an API or part of OpenAPI |
 | `/healthz`, `/readyz`, `/metrics` | Operational | Supported under the operations policy |
 
 Core authorization, audit, idempotency, publication, and immutable-serving
@@ -41,6 +42,28 @@ embedded. Its `info.version` therefore matches `schemahub-server --version`,
 health payloads, metrics, and archive metadata. That value identifies the exact
 build; it is not a REST API stability version.
 
+## Bundled Console
+
+When `[http].gui_dir` or `--gui-dir` names a validated Vite production bundle,
+the same listener serves its index at `/`, `/projects`, nested
+`/projects/...`, and `/admin`, plus files beneath `/assets/` and the optional
+favicon. The setting requires an enabled HTTP listener and a directory with a
+regular `index.html` and `assets/`; invalid or incomplete bundles fail startup.
+Native archives carry this directory as `schemahub-gui/`, while the release
+container enables `/usr/share/schemahub/gui` by default.
+
+HTML and the favicon use `Cache-Control: no-cache`. Content-addressed Vite
+assets use `Cache-Control: public, max-age=31536000, immutable`. Successful GUI
+responses also emit `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: same-origin`, `X-Frame-Options: DENY`, a permissions policy
+that disables camera, geolocation, and microphone, and a content security
+policy restricted to same-origin scripts, styles, fonts, images, and
+connections. The CSP blocks inline scripts, forms, frames, media, and objects;
+inline styles remain enabled for the locked Mantine runtime. Static responses
+do not carry `x-schemahub-api-surface`. The SPA routes are explicit: an unknown
+`/api/*` request remains an HTTP `404` with the `gui-bff` classification and is
+never replaced with `index.html`.
+
 ## Generation and Drift Control
 
 HTTP DTOs and handlers in `crates/schemahub-server/src/http.rs` carry
@@ -53,9 +76,12 @@ OpenAPI path parameter is represented as `{schema_path}`. The schema-detail
 and immutable-artifact routes are the only explicit registration exceptions;
 their annotated operations are merged into the generated document beside the
 runtime `*schema_path` routes. Release-mode integration coverage verifies the
-22 current path templates, both methods on the ChangeRecord collection, the
-catch-all artifact operation, bearer security metadata, build version, and the
-ChangeRecord external-reference schema. It also verifies the boundary metadata:
+22 current path templates, 24 operations, the ChangeRecord collection methods,
+ETag-protected draft-edit `PATCH`, the catch-all artifact operation, bearer
+security metadata, build version, the ChangeRecord external-reference schema,
+the paged `ProjectPageDto`/`RepoPageDto`, `RepoDashboardPageDto`, and
+`ChangePageDto` responses, and their camel-case `pageSize` parameters. It also
+verifies the boundary metadata:
 
 - document info names `schemahub.v1` as the public API and `/api/` as the BFF
   prefix;
@@ -84,7 +110,61 @@ operation; the OpenAPI setting is not an authorization bypass.
 If an Authorization header is present but is not valid ASCII, the BFF returns
 `401` and never retries the request as anonymous. An empty ChangeRecord target
 is resolved to the repository's configured default bookmark before the durable
-record is created.
+record is created. Browser-authored source/deletion edits require a supported
+schema extension whose detected format exactly matches `formatId`; invalid
+pairs fail before a ChangeRecord is persisted. Replacing a draft edit list
+requires its current ETag and clears stale validation.
+
+## Bounded Console Lists
+
+The same-release GUI uses bounded catalog and aggregate projections:
+
+| Route | Query | Response |
+|---|---|---|
+| `GET /api/projects` | `pageSize`, `pageToken`, `namePrefix` | `{ "projects": [...], "nextPageToken": "..." }` |
+| `GET /api/projects/{project}/repos` | `pageSize`, `pageToken`, `namePrefix` | `{ "repositories": [...], "nextPageToken": "..." }` |
+| `GET /api/projects/{project}/repos/{repo}/dashboard` | `ref`, `pageSize`, `pageToken` | Bounded schemas/branches/tags, immutable `resolvedCommit`, and `nextPageToken` |
+| `GET /api/projects/{project}/repos/{repo}/changes` | `pageSize`, `pageToken`, optional `status` | `{ "changes": [...], "nextPageToken": "..." }` |
+
+An omitted or zero `pageSize` uses 50; values above 200 are clamped and
+negative values fail. Each handler delegates to the existing bounded Core
+catalog range rather than rebuilding or sorting a complete collection.
+Project summaries resolve only the caller's role and intentionally omit a
+repository count, because computing that count previously caused an N+1 full
+repository scan.
+
+Continuation tokens are opaque and bind the cursor to the catalog kind,
+project scope, and exact name prefix. Reusing a project token on a repository
+route, a repository token under another project, or any token with another
+prefix fails.
+
+The dashboard token instead binds project, repository, and exact ref
+expression. It advances schema, branch, and tag cursors together, records
+which component is already exhausted, and carries the immutable schema commit
+resolved by the first page. Later pages therefore cannot mix schema summaries
+from a bookmark that advanced mid-navigation. Schema-name iteration stops
+after one page plus lookahead without loading declaration blobs. Exact total
+conflicts and per-page schema conflict counts scan the pinned tree without
+collecting every conflict path. The selected page's objects and the complete
+repository-local schema-name inventory are then batch-loaded in one tree
+traversal, so compiler-validated declaration counts and unique declared direct
+import counts do not trigger a full-tree read per schema. Dashboard dependency
+counts are inventory summaries; they do not traverse or authorize import
+targets.
+
+ChangeRecord tokens bind project, repository, and lifecycle status. The route
+uses `Core::list_change_records_page`, so its response inherits the durable
+repository/status index, bounded backend range read, stable creation order,
+and fail-closed index validation of the public gRPC method. List DTOs suppress
+complete replacement-source bodies; `GetChange` remains the detail read.
+The matching same-release client follows every continuation through TanStack
+Query. A deep repository route performs one size-one prefix page and accepts
+only an exact name, avoiding complete repository enumeration.
+
+These DTO and token shapes are not promoted into the public 1.x contract: the
+BFF and bundled GUI may evolve together. The public
+`ProjectService.ListProjects` and `ListRepos` semantics remain documented in
+`grpc-api.md` and `compatibility-policy.md`.
 
 ## Responses and Cache Behavior
 
@@ -96,8 +176,12 @@ cache validation; the serving contract and digest headers are detailed in
 `serving.md`.
 
 `/api/openapi.json` is generated entirely from compile-time metadata and is
-served with `Cache-Control: public, max-age=3600`. Restarting the same binary
-does not change the document.
+served with `Cache-Control: public, max-age=3600`. HTTP discovery, the
+`--print-openapi` command, and native release packaging use the same recursively
+key-sorted JSON bytes, including a final newline. Fresh processes therefore
+produce the same document digest rather than inheriting hash-map iteration
+order. The static console routes are deliberately absent from OpenAPI because
+they are distribution assets, not callable API methods.
 
 ## Public REST in the Future
 
