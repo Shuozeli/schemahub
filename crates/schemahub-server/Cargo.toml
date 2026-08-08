@@ -31,7 +31,7 @@ toml     = { workspace = true }
 clap     = { workspace = true }
 tokio-stream = "0.1"
 axum = "0.7"
-tower-http = { version = "0.5", features = ["cors", "request-id", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "request-id", "trace"] }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T18:31:43Z -->
+<!-- agent-updated: 2026-07-30T04:23:54Z -->
 # schemahub — Requirements
 
 > Requirements only. Detailed design is owned by a separate engineer; this document defines *what* schemahub must do, not *how*. Where this document names a specific technology (jj-lib, protobuf-rs), it is because that choice is now a fixed project constraint, not because the requirement depends on the implementation.
@@ -58,12 +58,22 @@ The VCS layer is built on `jj-lib` and follows its model. Concretely required be
 
 - **Commits and stable change IDs.** Every state is a commit (immutable, content-addressed). Every logical edit also has a **change ID** that is stable across amend/rebase/squash — a client (human or agent) can refer to "the edit I made" even after history is rewritten underneath it.
 - **First-class conflicts.** A merge, rebase, or concurrent edit that cannot be cleanly combined produces a **committed conflict object** (at per-declaration granularity), not a hard rejection. Conflicts can be inspected and resolved later. The registry may still *refuse to publish* a conflicted state to a protected bookmark (policy), but the VCS itself never loses the ability to record the divergent states.
-- **Operation log + undo.** Every operation that changes repository state
-  (mutation, bookmark move, GC, role change) is recorded in an operation log.
-  An operation can be undone by restoring the repo to a prior operation, subject
-  to current protected-bookmark publication policy; undo must not reintroduce a
-  protected conflict or broken live import. This is the registry's audit and
-  recovery story.
+- **Operation log, administrative audit, and undo.** Every operation that
+  changes JJ repository state (mutation, bookmark/tag move, merge, undo, GC)
+  is recorded in the repository operation log. Every mutable control-plane
+  change (project, role, or repository policy/lifecycle) atomically appends an
+  immutable, actor-attributed before/after audit event. A JJ operation can be
+  undone by restoring the repo to a prior operation, subject to current
+  protected-bookmark publication policy; undo must not reintroduce a protected
+  conflict or broken live import. Administrative audit events are evidence,
+  not an implicit rollback API. Their public pagination must use an immutable
+  ordered index and bounded backend range reads; returned index records must
+  resolve to matching events, and corrupt records or missing targets fail
+  closed rather than yielding a partial page.
+- **Administrative concurrency.** Project, membership, and repository
+  mutations are coordinated per project across every server instance.
+  Authorization and the last-Owner invariant are re-evaluated inside that
+  boundary before state and audit evidence commit atomically.
 - **Bookmarks** (named pointers to commits) stand in for branches. History, diff, and merge are expressed over the commit graph.
 - **Database-backed.** All objects (commits, trees, declaration blobs, conflicts) and the operation log are persisted to a database via custom `jj-lib` backends. schemahub does **not** use jj's on-disk git/file working-copy layout.
 - Compatibility checks run when publishing to a protected bookmark; `--force` (elevated role) can override.
@@ -72,6 +82,10 @@ The VCS layer is built on `jj-lib` and follows its model. Concretely required be
 
 - **Local codegen via CLI:** client pulls descriptors and generates code on the user's machine. **Reuses the sibling compilers' codegen** (`protobuf-rs` Rust/`FileDescriptorSet` output, `flatbuffers-rs` Rust/TS/Dart output) and `codegen-infra`.
 - **Server-side preview:** an RPC that renders generated code on demand for inspection. No files written; response is the rendered text.
+- **Self-contained Protobuf Rust closure:** a multi-file generated response
+  requires an explicit requested root, preserves distinct package modules in a
+  deterministic nested tree, resolves cross-package paths, and re-exports the
+  root package so the response compiles as one downstream source artifact.
 
 ### 4. Schema Exploration API (Read)
 
@@ -186,6 +200,22 @@ design expansion.
 - Resources are namespaced as `project / repo / schema`.
 - Per-project ACLs and visibility (public / private).
 - RPCs to create, list, update, archive projects and repos.
+- Every public project/repository list page has bounded backend and memory
+  cost, preserves stable name/prefix/archive semantics, and never scans
+  repositories outside the requested project. Resource creation and archive
+  transitions atomically maintain the catalog used by the read; legacy
+  resources migrate before indexed pages are served, and corrupt catalog
+  relationships fail closed.
+- Every public membership page is bounded, stable in identity order, bound to
+  one project, and able to continue across inactive tombstones without
+  scanning or decoding another project's roles. Malformed scoped records and
+  cross-project token reuse fail closed.
+- Every public branch/tag list response is bounded, stable in ref-name order,
+  and bound to one repository, ref kind, and prefix. The server may load the
+  repository's single immutable JJ view, but it must not materialize the
+  complete matching ref namespace for one response. CLI traversal must follow
+  continuations to completion, and single-branch lookup must not enumerate all
+  bookmarks.
 - The shipped role model is project-scoped Reader, Writer, Maintainer, and
   Owner. Force requires Maintainer; project/repository management and the
   last-Owner invariant are defined in `resources-and-policy.md`.
@@ -223,6 +253,12 @@ design expansion.
 - Applied records and schema revisions are immutable. Mutable bookmarks may be
   resolved to a revision, but serving requests identify the resolved commit and
   a deterministic content digest.
+- Every public `ListChanges` page has bounded backend and memory cost,
+  preserves creation-time/name ordering, and binds its opaque continuation to
+  the repository and status filter. Record creation and lifecycle transitions
+  atomically maintain the indexes used by that read; legacy records are
+  migrated before indexed pages are served, and corrupt index relationships
+  fail closed.
 - The serving API returns canonical source, native descriptor closures, and
   supported generated source together with format, dependency, digest, and
   resolved-commit metadata.
@@ -244,9 +280,40 @@ design expansion.
   are both shipped and tested backends.
 - **Auth:** trait-abstracted; noop/static development modes and an in-tree
   production JWT/JWKS resource-server integration ship together.
+- **Dependency integrity:** release CI must audit the committed Rust and web
+  dependency graphs, reject known vulnerabilities and Rust unsoundness, pin
+  approved advisory exceptions to demonstrably unreachable surfaces, and fail
+  when the crypto backend, patched versions, exception scope, or audit steps
+  drift.
 - **HTTP boundary:** same-origin by default; cross-origin browser access uses an
   exact canonical origin allowlist without cookies, and request bodies are
   subject to a validated finite limit before mutation handlers run.
+- **GUI distribution:** every native archive and release container ships the
+  exact locked production console from that release. Same-origin serving must
+  fail startup for an incomplete or symlink-containing bundle, keep every
+  served file inside the configured root, preserve API/operations routing,
+  support direct operator deep links, and cache only hashed assets as
+  immutable. Read-only code surfaces and their support assets must be included
+  in the bundle; the production build must reject known runtime CDN
+  dependencies and an oversized initial JavaScript entry. Successful console
+  responses must block inline scripts, third-party runtime origins, framing,
+  form submission, embedded objects/frames, and unnecessary privileged browser
+  features while retaining only the style behavior required by the locked UI
+  component library. Project and repository selectors must consume bounded
+  Core catalog pages, preserve stable continuation order, reject a token from
+  another kind/project/prefix, and must not perform an unbounded repository
+  scan to decorate each project. Repository dashboards must page schema,
+  branch, and tag projections, bind continuation to one repository and ref
+  expression, and keep schema summaries on the first page's immutable commit.
+  Loading one selected dashboard page must take a bounded number of immutable
+  tree traversals independent of the page size: selected schema objects and
+  repository-local names are batch-read, declarations remain compiler
+  validated, and the displayed dependency count represents unique declared
+  direct imports rather than a transitive target traversal.
+  Browser ChangeRecord lists must consume bounded Core index pages and bind
+  continuation to repository and lifecycle status. The console must request
+  additional pages explicitly rather than eagerly reconstructing complete
+  arrays.
 - **HTTP contract:** generate OpenAPI 3.1 from the registered HTTP handlers,
   expose it from the running server and a no-startup binary command, and place
   the release-versioned document in native archives.
@@ -269,7 +336,21 @@ design expansion.
 Resolved architecture and public behavior live in the focused documents listed
 by `MANIFEST.md`. The remaining gates are explicit:
 
-Publish and pin the coordinated sibling FlatBuffers compiler revision so a
-clean independent checkout has no cross-repository path dependency. The 1.0
-reverse-dependency decision is now frozen as the bounded, direct,
+The warning-clean coordinated FlatBuffers compiler is published at
+`59756d23993538b722f68675c35129c3cebb7aa1`, pinned in the current SchemaHub
+release tree, and its 1.0 finding is closed. The RustSec auditor is itself
+checksummed, reproducibly locked, and self-audited before use; the
+cargo-auditable instrumentation graph is independently checksummed and audited
+before an isolated exact binary is allowed to build releases, and every
+external container stage is fixed to an exact multi-architecture manifest
+digest. The Dockerfile frontend and CI helper images are equally digest-pinned,
+the workflow Node runtime is exact, and the image's pnpm coordinate is
+non-overridable. The remaining external supply-chain step is to publish the
+current SchemaHub tree and obtain a clean candidate run. The live
+`PROTOBUF_RS_REF` and `FLATBUFFERS_RS_REF` repository variables already match
+the exact immutable revisions in `Cargo.lock`.
+Configure the protected production staging environment, run the intended
+external-identity and PostgreSQL acceptance, publish the 0.9 candidate, and
+supply the exact stable-release attestation before 1.0 publication. The
+reverse-dependency decision is frozen as the bounded, direct,
 snapshot-manifest `ListDependents` contract in `dependency-discovery.md`.

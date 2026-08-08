@@ -11,13 +11,13 @@
 //! redb/PostgreSQL backend. Updates use field masks plus ETags; deletion is an
 //! auditable archive that retains JJ history.
 
-use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use schemahub_core::{
-    Core, CreateRepository, ProjectUpdate, RepoConfig, Repository, RepositoryUpdate, ReviewPolicy,
-    ServingPolicy,
+    is_valid_audit_cursor, ControlPlaneAuditAction, ControlPlaneAuditEvent,
+    ControlPlaneAuditSnapshot, Core, CreateRepository, ProjectUpdate, RepoConfig, Repository,
+    RepositoryUpdate, ReviewPolicy, ServingPolicy,
 };
 use schemahub_types::{CompatibilityDirection, Role, Visibility};
 use tonic::{Request, Response, Status};
@@ -112,28 +112,23 @@ impl ProjectService for ProjectHandler {
         let limit = page_size(r.page_size)?;
         let prefix = r.name_prefix;
         let cursor = parse_project_page_token(&r.page_token, &prefix, r.include_archived)?;
-        let mut visible = self
+        let page = self
             .core
-            .list_projects_with_archived(r.include_archived, token.as_deref())
+            .list_projects_page(
+                r.include_archived,
+                &prefix,
+                cursor.as_deref(),
+                limit,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        visible.retain(|meta| {
-            (prefix.is_empty() || meta.name.starts_with(&prefix))
-                && cursor
-                    .as_ref()
-                    .is_none_or(|cursor| meta.name.cmp(cursor) == Ordering::Greater)
-        });
-        let has_more = visible.len() > limit;
-        visible.truncate(limit);
-        let next_page_token = if has_more {
-            visible
-                .last()
-                .map(|meta| make_project_page_token(&prefix, r.include_archived, &meta.name))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| make_project_page_token(&prefix, r.include_archived, cursor))
+            .unwrap_or_default();
         Ok(Response::new(pb::ListProjectsResponse {
-            projects: visible.iter().map(meta_to_proto).collect(),
+            projects: page.projects.iter().map(meta_to_proto).collect(),
             next_page_token,
         }))
     }
@@ -232,35 +227,30 @@ impl ProjectService for ProjectHandler {
             &r.name_prefix,
             r.include_archived,
         )?;
-        let mut repositories = self
+        let page = self
             .core
-            .list_repositories(&r.project, r.include_archived, token.as_deref())
+            .list_repositories_page(
+                &r.project,
+                r.include_archived,
+                &r.name_prefix,
+                cursor.as_deref(),
+                limit,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        repositories.retain(|repository| {
-            (r.name_prefix.is_empty() || repository.name.starts_with(&r.name_prefix))
-                && cursor
-                    .as_ref()
-                    .is_none_or(|cursor| repository.name.cmp(cursor) == Ordering::Greater)
-        });
-        let has_more = repositories.len() > limit;
-        repositories.truncate(limit);
-        let next_page_token = if has_more {
-            repositories
-                .last()
-                .map(|repository| {
-                    make_repo_page_token(
-                        &r.project,
-                        &r.name_prefix,
-                        r.include_archived,
-                        &repository.name,
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| {
+                make_repo_page_token(&r.project, &r.name_prefix, r.include_archived, cursor)
+            })
+            .unwrap_or_default();
         Ok(Response::new(pb::ListReposResponse {
-            repos: repositories.into_iter().map(repository_to_proto).collect(),
+            repos: page
+                .repositories
+                .into_iter()
+                .map(repository_to_proto)
+                .collect(),
             next_page_token,
         }))
     }
@@ -340,18 +330,56 @@ impl ProjectService for ProjectHandler {
     ) -> Result<Response<pb::ListMembersResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let members = self
+        let limit = page_size(r.page_size)?;
+        let cursor = parse_member_page_token(&r.page_token, &r.project)?;
+        let page = self
             .core
-            .list_members(&r.project, token.as_deref())
+            .list_members_page(&r.project, cursor.as_deref(), limit, token.as_deref())
             .map_err(to_status)?;
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| make_member_page_token(&r.project, cursor))
+            .unwrap_or_default();
         Ok(Response::new(pb::ListMembersResponse {
-            members: members
+            members: page
+                .members
                 .into_iter()
                 .map(|(id, role)| pb::MemberEntry {
                     identity: id,
                     role: role_to_proto(role) as i32,
                 })
                 .collect(),
+            next_page_token,
+        }))
+    }
+
+    async fn list_control_plane_audit_events(
+        &self,
+        request: Request<pb::ListControlPlaneAuditEventsRequest>,
+    ) -> Result<Response<pb::ListControlPlaneAuditEventsResponse>, Status> {
+        let token = token_from(&request)?;
+        let request = request.into_inner();
+        let limit = page_size(request.page_size)?;
+        let project = parse_audit_parent(&request.parent)?;
+        let cursor = parse_audit_page_token(&request.page_token, &project)?;
+        let page = self
+            .core
+            .list_control_plane_audit_events_page(
+                &project,
+                cursor.as_deref(),
+                limit,
+                token.as_deref(),
+            )
+            .map_err(to_status)?;
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| make_audit_page_token(&project, cursor))
+            .unwrap_or_default();
+        Ok(Response::new(pb::ListControlPlaneAuditEventsResponse {
+            audit_events: page.events.into_iter().map(audit_event_to_proto).collect(),
+            next_page_token,
         }))
     }
 }
@@ -606,7 +634,7 @@ fn parse_project_page_token(
         ));
     }
     decoded(parts[3])
-        .filter(|name| !name.is_empty())
+        .filter(|name| valid_catalog_cursor(name, name_prefix))
         .map(Some)
         .ok_or_else(|| Status::invalid_argument("page_token has an invalid project cursor"))
 }
@@ -647,9 +675,17 @@ fn parse_repo_page_token(
         ));
     }
     decoded(parts[4])
-        .filter(|name| !name.is_empty())
+        .filter(|name| valid_catalog_cursor(name, name_prefix))
         .map(Some)
         .ok_or_else(|| Status::invalid_argument("page_token has an invalid repository cursor"))
+}
+
+fn valid_catalog_cursor(cursor: &str, name_prefix: &str) -> bool {
+    !cursor.trim().is_empty()
+        && cursor.len() <= 128
+        && !cursor.contains('/')
+        && !cursor.chars().any(char::is_control)
+        && cursor.starts_with(name_prefix)
 }
 
 fn make_repo_page_token(
@@ -665,6 +701,72 @@ fn make_repo_page_token(
         hex::encode(name_prefix),
         hex::encode(last_name)
     )
+}
+
+fn parse_member_page_token(token: &str, project: &str) -> Result<Option<String>, Status> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(3, ':').collect();
+    let decoded = |value: &str| {
+        hex::decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if parts.len() != 3 || parts[0] != "v1" || decoded(parts[1]).as_deref() != Some(project) {
+        return Err(Status::invalid_argument(
+            "page_token is invalid for this member project",
+        ));
+    }
+    decoded(parts[2])
+        .filter(|identity_id| valid_member_cursor(identity_id))
+        .map(Some)
+        .ok_or_else(|| Status::invalid_argument("page_token has an invalid member cursor"))
+}
+
+fn valid_member_cursor(identity_id: &str) -> bool {
+    !identity_id.is_empty()
+        && identity_id.len() <= 512
+        && !identity_id.chars().any(char::is_control)
+}
+
+fn make_member_page_token(project: &str, identity_id: &str) -> String {
+    format!("v1:{}:{}", hex::encode(project), hex::encode(identity_id))
+}
+
+fn parse_audit_parent(parent: &str) -> Result<String, Status> {
+    let project = parent
+        .strip_prefix("projects/")
+        .filter(|project| !project.is_empty() && !project.contains('/'))
+        .ok_or_else(|| {
+            Status::invalid_argument("parent must be a project resource named projects/{project}")
+        })?;
+    Ok(project.to_string())
+}
+
+fn parse_audit_page_token(token: &str, project: &str) -> Result<Option<String>, Status> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(3, ':').collect();
+    let decoded = |value: &str| {
+        hex::decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if parts.len() != 3 || parts[0] != "v2" || decoded(parts[1]).as_deref() != Some(project) {
+        return Err(Status::invalid_argument(
+            "page_token is invalid for this audit-event project",
+        ));
+    }
+    decoded(parts[2])
+        .filter(|cursor| is_valid_audit_cursor(cursor))
+        .map(Some)
+        .ok_or_else(|| Status::invalid_argument("page_token has an invalid audit cursor"))
+}
+
+fn make_audit_page_token(project: &str, cursor: &str) -> String {
+    format!("v2:{}:{}", hex::encode(project), hex::encode(cursor))
 }
 
 fn timestamp_from_millis(millis: i64) -> prost_types::Timestamp {
@@ -707,5 +809,198 @@ fn role_to_proto(r: Role) -> pb::Role {
         Role::Writer => pb::Role::Writer,
         Role::Maintainer => pb::Role::Maintainer,
         Role::Owner => pb::Role::Owner,
+    }
+}
+
+fn audit_event_to_proto(event: ControlPlaneAuditEvent) -> pb::ControlPlaneAuditEvent {
+    pb::ControlPlaneAuditEvent {
+        name: event.name,
+        event_id: event.event_id,
+        project: event.project,
+        resource_name: event.resource_name,
+        action: audit_action_to_proto(event.action) as i32,
+        actor: event.actor_id,
+        event_time: Some(timestamp_from_millis(event.event_time_unix_ms)),
+        before: event.before.map(audit_snapshot_to_proto),
+        after: event.after.map(audit_snapshot_to_proto),
+    }
+}
+
+fn audit_action_to_proto(action: ControlPlaneAuditAction) -> pb::ControlPlaneAuditAction {
+    match action {
+        ControlPlaneAuditAction::ProjectCreated => pb::ControlPlaneAuditAction::ProjectCreated,
+        ControlPlaneAuditAction::ProjectUpdated => pb::ControlPlaneAuditAction::ProjectUpdated,
+        ControlPlaneAuditAction::ProjectArchived => pb::ControlPlaneAuditAction::ProjectArchived,
+        ControlPlaneAuditAction::MemberAdded => pb::ControlPlaneAuditAction::MemberAdded,
+        ControlPlaneAuditAction::MemberRoleUpdated => {
+            pb::ControlPlaneAuditAction::MemberRoleUpdated
+        }
+        ControlPlaneAuditAction::MemberRemoved => pb::ControlPlaneAuditAction::MemberRemoved,
+        ControlPlaneAuditAction::RepositoryCreated => {
+            pb::ControlPlaneAuditAction::RepositoryCreated
+        }
+        ControlPlaneAuditAction::RepositoryUpdated => {
+            pb::ControlPlaneAuditAction::RepositoryUpdated
+        }
+        ControlPlaneAuditAction::RepositoryArchived => {
+            pb::ControlPlaneAuditAction::RepositoryArchived
+        }
+    }
+}
+
+fn audit_snapshot_to_proto(snapshot: ControlPlaneAuditSnapshot) -> pb::ControlPlaneAuditSnapshot {
+    use pb::control_plane_audit_snapshot::Resource;
+
+    let resource = match snapshot {
+        ControlPlaneAuditSnapshot::Project(project) => Resource::Project(meta_to_proto(&project)),
+        ControlPlaneAuditSnapshot::Member {
+            identity_id,
+            role,
+            active,
+        } => Resource::Member(pb::MemberAuditSnapshot {
+            identity: identity_id,
+            role: role_to_proto(role) as i32,
+            active,
+        }),
+        ControlPlaneAuditSnapshot::Repository(repository) => {
+            Resource::Repository(repository_to_proto(repository))
+        }
+    };
+    pb::ControlPlaneAuditSnapshot {
+        resource: Some(resource),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn audit_cursor() -> String {
+        format!("{:019}/{}", i64::MAX - 1_000, hex::encode("audit-a"))
+    }
+
+    #[test]
+    fn project_page_token_round_trips_its_filter_and_cursor() {
+        // Arrange
+        let token = make_project_page_token("app", false, "apple");
+
+        // Act
+        let parsed = parse_project_page_token(&token, "app", false);
+
+        // Assert
+        assert_eq!(parsed.unwrap().as_deref(), Some("apple"));
+    }
+
+    #[test]
+    fn repository_page_token_round_trips_its_scope_filter_and_cursor() {
+        // Arrange
+        let token = make_repo_page_token("acme", "app", true, "apple");
+
+        // Act
+        let parsed = parse_repo_page_token(&token, "acme", "app", true);
+
+        // Assert
+        assert_eq!(parsed.unwrap().as_deref(), Some("apple"));
+    }
+
+    #[test]
+    fn catalog_page_token_rejects_a_cursor_outside_its_prefix() {
+        // Arrange
+        let token = make_project_page_token("app", false, "beta");
+
+        // Act
+        let parsed = parse_project_page_token(&token, "app", false);
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn repository_page_token_rejects_a_nested_cursor() {
+        // Arrange
+        let token = make_repo_page_token("acme", "", false, "repo/child");
+
+        // Act
+        let parsed = parse_repo_page_token(&token, "acme", "", false);
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn member_page_token_round_trips_its_project_bound_cursor() {
+        // Arrange
+        let token = make_member_page_token("acme", "agent@example.com");
+
+        // Act
+        let parsed = parse_member_page_token(&token, "acme");
+
+        // Assert
+        assert_eq!(parsed.unwrap().as_deref(), Some("agent@example.com"));
+    }
+
+    #[test]
+    fn member_page_token_cannot_be_reused_for_another_project() {
+        // Arrange
+        let token = make_member_page_token("acme", "agent");
+
+        // Act
+        let parsed = parse_member_page_token(&token, "other");
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn member_page_token_rejects_a_control_character_cursor() {
+        // Arrange
+        let token = make_member_page_token("acme", "agent\nother");
+
+        // Act
+        let parsed = parse_member_page_token(&token, "acme");
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn audit_page_token_round_trips_its_project_bound_cursor() {
+        // Arrange
+        let cursor = audit_cursor();
+        let token = make_audit_page_token("acme", &cursor);
+
+        // Act
+        let parsed = parse_audit_page_token(&token, "acme");
+
+        // Assert
+        assert_eq!(parsed.unwrap(), Some(cursor));
+    }
+
+    #[test]
+    fn audit_page_token_cannot_be_reused_for_another_project() {
+        // Arrange
+        let token = make_audit_page_token("acme", &audit_cursor());
+
+        // Act
+        let parsed = parse_audit_page_token(&token, "other");
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn audit_page_token_rejects_a_malformed_internal_cursor() {
+        // Arrange
+        let token = format!(
+            "v2:{}:{}",
+            hex::encode("acme"),
+            hex::encode("not-an-index-key")
+        );
+
+        // Act
+        let parsed = parse_audit_page_token(&token, "acme");
+
+        // Assert
+        assert_eq!(parsed.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 }

@@ -284,6 +284,8 @@ async fn create_then_delete_branch_roundtrip() {
             project: "acme".into(),
             repo: "core".into(),
             name_prefix: String::new(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_branches")
@@ -310,6 +312,8 @@ async fn create_then_delete_branch_roundtrip() {
             project: "acme".into(),
             repo: "core".into(),
             name_prefix: String::new(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_branches after delete")

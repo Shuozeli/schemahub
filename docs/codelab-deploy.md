@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:31:27Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Deploy a SchemaHub Release on Tailscale
 
 This codelab deploys the prepared release container with embedded redb and runs
@@ -43,6 +43,7 @@ provider:
 ```toml
 [http]
 max_request_body_bytes = 8388608
+# The release container supplies --gui-dir /usr/share/schemahub/gui.
 # Same-origin is the default. Add an exact HTTPS GUI origin only when needed:
 # allowed_origins = ["https://schemahub-gui.example.com"]
 
@@ -85,7 +86,9 @@ An empty `[http].allowed_origins` list emits no cross-origin permission. If a
 browser console is served from another origin, list that canonical `http(s)`
 origin exactly (including any non-default port). Wildcards and cookie
 credentials are not supported. Startup rejects malformed/duplicate origins and
-body limits outside 1 KiB through 64 MiB.
+body limits outside 1 KiB through 64 MiB. The image contains the exact
+version-matched GUI; the command below serves it from the BFF origin without
+requiring CORS.
 
 ## 4. Start the non-root container
 
@@ -101,6 +104,7 @@ docker run --detach \
   "$SCHEMAHUB_IMAGE" \
   --listen 0.0.0.0:50051 \
   --http-listen 0.0.0.0:8080 \
+  --gui-dir /usr/share/schemahub/gui \
   --db /var/lib/schemahub/schemahub.redb \
   --config /etc/schemahub/schemahub.toml
 ```
@@ -115,6 +119,33 @@ curl --fail --silent --show-error "http://$TAILSCALE_HOST:8080/healthz" | jq
 curl --fail --silent --show-error "http://$TAILSCALE_HOST:8080/readyz" | jq
 curl --fail --silent --show-error "http://$TAILSCALE_HOST:8080/metrics" \
   | grep schemahub_build_info
+GUI_INDEX="$(
+  curl --fail --silent --show-error "http://$TAILSCALE_HOST:8080/"
+)"
+grep -q '<title>SchemaHub Console</title>' <<<"$GUI_INDEX"
+GUI_HEADERS="$(
+  curl --fail --silent --show-error --dump-header - --output /dev/null \
+    "http://$TAILSCALE_HOST:8080/" | tr -d '\r'
+)"
+grep -Fxi 'cache-control: no-cache' <<<"$GUI_HEADERS"
+grep -Fxi 'x-content-type-options: nosniff' <<<"$GUI_HEADERS"
+grep -Fxi 'referrer-policy: same-origin' <<<"$GUI_HEADERS"
+grep -Fxi 'x-frame-options: DENY' <<<"$GUI_HEADERS"
+grep -Fxi \
+  'permissions-policy: camera=(), geolocation=(), microphone=()' \
+  <<<"$GUI_HEADERS"
+grep -Fxi \
+  "content-security-policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'" \
+  <<<"$GUI_HEADERS"
+curl --fail --silent --show-error \
+  "http://$TAILSCALE_HOST:8080/projects/acceptance/repos/registry" \
+  | grep -q '<title>SchemaHub Console</title>'
+GUI_ASSET="$(grep -o '/assets/[^"]*\.js' <<<"$GUI_INDEX" | head -n 1)"
+test -n "$GUI_ASSET"
+curl --fail --silent --show-error --dump-header - --output /dev/null \
+  "http://$TAILSCALE_HOST:8080$GUI_ASSET" \
+  | tr -d '\r' \
+  | grep -Fxi 'cache-control: public, max-age=31536000, immutable'
 curl --fail --silent --show-error \
   "http://$TAILSCALE_HOST:8080/api/openapi.json" \
   | jq -e '.openapi == "3.1.0"
@@ -129,7 +160,10 @@ curl --fail --silent --show-error --dump-header - --output /dev/null \
 
 Confirm the health version, container label, and intended tag agree. The BFF
 header and OpenAPI extensions are the machine-readable ADR 0002 boundary;
-operational probe responses must not carry the `gui-bff` header.
+operational probe responses must not carry the `gui-bff` header. The console
+header checks prove that the exact image rejects inline scripts and third-party
+runtimes, cannot be framed, and does not receive camera, geolocation, or
+microphone privileges.
 
 ## 5. Apply a recorded change
 
@@ -168,8 +202,9 @@ schemahub change apply "$CHANGE_NAME" \
   --json | jq
 ```
 
-The same resource can be inspected or reviewed through the GUI. The broader
-CLI/gRPC walkthrough is in `docs/codelab-cli-grpc.md`.
+The same resource can be inspected or reviewed through the GUI at
+`http://shuoze25-yuacx.tail8f3b66.ts.net:8080/projects/acceptance/repos/registry/changes`.
+The broader CLI/gRPC walkthrough is in `docs/codelab-cli-grpc.md`.
 
 Resolve and persist the immutable coordinates:
 
@@ -208,6 +243,19 @@ retaining the volume. The new process must return the stored bytes even if its
 compiler would render differently; a digest mismatch is a failed release gate,
 not a warning.
 
+The CI-equivalent local contract automates the non-root named-volume write,
+container replacement, and descriptor/generated-Rust digest checks with a
+disposable static development identity:
+
+```bash
+SCHEMAHUB_CONTAINER_IMAGE="$SCHEMAHUB_IMAGE" \
+  scripts/test-runtime-container.sh
+```
+
+The script uses isolated, collision-checked Docker resource names and removes
+its containers, network, and volume on exit. It is a runtime packaging check;
+its static identity does not replace the real-provider JWT staging gate.
+
 ## 7. Back up and roll forward
 
 Drain and stop the container before copying redb from the volume. Follow the
@@ -218,4 +266,7 @@ online `pg_dump`/fresh-database restore procedure from that runbook instead.
 Do not publish a release based only on this redb rehearsal. The PostgreSQL
 matrix, real-provider rotation/staleness drill, SBOM/checksum review, clean
 compiler-ref build, and durable cross-release artifact-byte verification must
-also pass.
+also pass. For a stable release, complete
+`codelab-stable-release-staging.md`; its versioned attestation binds those
+results to the exact tag SHA, container digest, and GA-readiness evidence and
+is required by the protected publication job.

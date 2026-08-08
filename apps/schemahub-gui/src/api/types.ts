@@ -5,9 +5,13 @@ export type ProjectSummary = {
   name: string;
   visibility: 'public' | 'private';
   role: 'Owner' | 'Maintainer' | 'Writer' | 'Reader';
-  repos: number;
   lastOperation: string;
   lastActivity: string;
+};
+
+export type ProjectPage = {
+  projects: ProjectSummary[];
+  nextPageToken: string;
 };
 
 export type RepoSummary = {
@@ -16,6 +20,11 @@ export type RepoSummary = {
   defaultBranch: string;
   protectedBranches: string[];
   compatibility: 'backward' | 'forward' | 'full' | 'disabled';
+};
+
+export type RepoPage = {
+  repositories: RepoSummary[];
+  nextPageToken: string;
 };
 
 export type SchemaSummary = {
@@ -35,6 +44,11 @@ export type RepoDashboard = {
   latestCommit: CommitEntry;
   latestOperation: OperationEntry;
   openConflicts: number;
+  resolvedCommit: string;
+};
+
+export type RepoDashboardPage = RepoDashboard & {
+  nextPageToken: string;
 };
 
 export type DeclarationSummary = {
@@ -141,8 +155,22 @@ export type ChangeActor = {
 export type ChangeEdit = {
   kind: 'mutation' | 'replace_source' | 'delete_schema';
   schemaPath: string;
-  formatId: string;
+  formatId: SchemaFormat;
+  source?: string;
 };
+
+export type ChangeEditInput =
+  | {
+      kind: 'replace_source';
+      schemaPath: string;
+      formatId: SchemaFormat;
+      source: string;
+    }
+  | {
+      kind: 'delete_schema';
+      schemaPath: string;
+      formatId: SchemaFormat;
+    };
 
 export type ChangeValidationIssue = {
   code: string;
@@ -195,6 +223,11 @@ export type ChangeRecord = {
   updateTimeUnixMs: number;
 };
 
+export type ChangePage = {
+  changes: ChangeRecord[];
+  nextPageToken: string;
+};
+
 export type CreateChangeRequest = {
   title: string;
   description: string;
@@ -202,6 +235,12 @@ export type CreateChangeRequest = {
   targetBookmark: string;
   baseRevision?: string;
   changeId?: string;
+  edits: ChangeEditInput[];
+};
+
+export type UpdateChangeEditsRequest = {
+  etag: string;
+  edits: ChangeEditInput[];
 };
 
 export type ChangeAction = 'validate' | 'ready' | 'approve' | 'reject' | 'apply' | 'abandon';

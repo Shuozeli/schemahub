@@ -20,6 +20,10 @@ use crate::error::to_status;
 use crate::services::{refspec_or_repository_default, resolve_author, token_from};
 
 const MAX_COMMIT_STREAM_SCAN: usize = 10_000;
+const DEFAULT_REF_PAGE_SIZE: usize = 50;
+const MAX_REF_PAGE_SIZE: usize = 200;
+const BRANCH_TOKEN_KIND: &str = "branch";
+const TAG_TOKEN_KIND: &str = "tag";
 
 pub struct BookmarkHandler {
     core: Arc<Core>,
@@ -208,22 +212,53 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::ListBranchesResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let bms = self
+        let limit = ref_page_size(r.page_size)?;
+        let cursor = parse_ref_page_token(
+            &r.page_token,
+            BRANCH_TOKEN_KIND,
+            &r.project,
+            &r.repo,
+            &r.name_prefix,
+        )?;
+        let page = self
             .core
-            .list_bookmarks(&r.project, &r.repo, token.as_deref())
+            .list_bookmarks_page(
+                &r.project,
+                &r.repo,
+                &r.name_prefix,
+                cursor.as_deref(),
+                limit,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        let branches = bms
+        let branches = page
+            .refs
             .into_iter()
-            .filter(|(name, _)| r.name_prefix.is_empty() || name.starts_with(&r.name_prefix))
-            .map(|(name, targets)| pb::BranchInfo {
+            .map(|(name, head_commit)| pb::BranchInfo {
                 project: r.project.clone(),
                 repo: r.repo.clone(),
                 name,
-                head_commit: targets.first().cloned().unwrap_or_default(),
+                head_commit,
                 protected: false,
             })
             .collect();
-        Ok(Response::new(pb::ListBranchesResponse { branches }))
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| {
+                make_ref_page_token(
+                    BRANCH_TOKEN_KIND,
+                    &r.project,
+                    &r.repo,
+                    &r.name_prefix,
+                    cursor,
+                )
+            })
+            .unwrap_or_default();
+        Ok(Response::new(pb::ListBranchesResponse {
+            branches,
+            next_page_token,
+        }))
     }
 
     async fn get_branch(
@@ -232,20 +267,17 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::GetBranchResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let bms = self
+        let head_commit = self
             .core
-            .list_bookmarks(&r.project, &r.repo, token.as_deref())
-            .map_err(to_status)?;
-        let (name, targets) = bms
-            .into_iter()
-            .find(|(name, _)| name == &r.name)
+            .get_bookmark(&r.project, &r.repo, &r.name, token.as_deref())
+            .map_err(to_status)?
             .ok_or_else(|| Status::not_found(format!("branch {} not found", r.name)))?;
         Ok(Response::new(pb::GetBranchResponse {
             branch: Some(pb::BranchInfo {
                 project: r.project,
                 repo: r.repo,
-                name,
-                head_commit: targets.first().cloned().unwrap_or_default(),
+                name: r.name,
+                head_commit,
                 protected: false,
             }),
         }))
@@ -316,13 +348,28 @@ impl RefService for BookmarkHandler {
     ) -> Result<Response<pb::ListTagsResponse>, Status> {
         let token = token_from(&request)?;
         let r = request.into_inner();
-        let tags = self
+        let limit = ref_page_size(r.page_size)?;
+        let cursor = parse_ref_page_token(
+            &r.page_token,
+            TAG_TOKEN_KIND,
+            &r.project,
+            &r.repo,
+            &r.name_prefix,
+        )?;
+        let page = self
             .core
-            .list_tags(&r.project, &r.repo, token.as_deref())
+            .list_tags_page(
+                &r.project,
+                &r.repo,
+                &r.name_prefix,
+                cursor.as_deref(),
+                limit,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        let tags = tags
+        let tags = page
+            .refs
             .into_iter()
-            .filter(|(name, _)| r.name_prefix.is_empty() || name.starts_with(&r.name_prefix))
             .map(|(name, commit)| pb::TagInfo {
                 project: r.project.clone(),
                 repo: r.repo.clone(),
@@ -334,7 +381,17 @@ impl RefService for BookmarkHandler {
                 timestamp: None,
             })
             .collect();
-        Ok(Response::new(pb::ListTagsResponse { tags }))
+        let next_page_token = page
+            .next_cursor
+            .as_deref()
+            .map(|cursor| {
+                make_ref_page_token(TAG_TOKEN_KIND, &r.project, &r.repo, &r.name_prefix, cursor)
+            })
+            .unwrap_or_default();
+        Ok(Response::new(pb::ListTagsResponse {
+            tags,
+            next_page_token,
+        }))
     }
 
     // ── Merge ─────────────────────────────────────────────────────────────────
@@ -390,5 +447,164 @@ fn decl_change_to_pb(c: &DeclChange) -> pb::DeclarationChange {
         change_type: change_type.to_string(),
         decl_name,
         detail,
+    }
+}
+
+fn ref_page_size(requested: i32) -> Result<usize, Status> {
+    if requested < 0 {
+        return Err(Status::invalid_argument("page_size must not be negative"));
+    }
+    Ok(if requested == 0 {
+        DEFAULT_REF_PAGE_SIZE
+    } else {
+        (requested as usize).min(MAX_REF_PAGE_SIZE)
+    })
+}
+
+fn parse_ref_page_token(
+    token: &str,
+    kind: &str,
+    project: &str,
+    repo: &str,
+    name_prefix: &str,
+) -> Result<Option<String>, Status> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(6, ':').collect();
+    let decoded = |value: &str| {
+        hex::decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if parts.len() != 6
+        || parts[0] != "v1"
+        || parts[1] != kind
+        || decoded(parts[2]).as_deref() != Some(project)
+        || decoded(parts[3]).as_deref() != Some(repo)
+        || decoded(parts[4]).as_deref() != Some(name_prefix)
+    {
+        return Err(Status::invalid_argument(
+            "page_token is invalid for this ref kind, repository, or prefix",
+        ));
+    }
+    decoded(parts[5])
+        .filter(|cursor| valid_ref_cursor(cursor, name_prefix))
+        .map(Some)
+        .ok_or_else(|| Status::invalid_argument("page_token has an invalid ref cursor"))
+}
+
+fn valid_ref_cursor(cursor: &str, name_prefix: &str) -> bool {
+    !cursor.trim().is_empty()
+        && cursor.len() <= 255
+        && !cursor.chars().any(char::is_control)
+        && cursor.starts_with(name_prefix)
+}
+
+fn make_ref_page_token(
+    kind: &str,
+    project: &str,
+    repo: &str,
+    name_prefix: &str,
+    cursor: &str,
+) -> String {
+    format!(
+        "v1:{kind}:{}:{}:{}:{}",
+        hex::encode(project),
+        hex::encode(repo),
+        hex::encode(name_prefix),
+        hex::encode(cursor)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ref_page_token_round_trips_its_complete_scope() {
+        // Arrange
+        let token = make_ref_page_token(
+            BRANCH_TOKEN_KIND,
+            "acme",
+            "commerce",
+            "feature/",
+            "feature/b",
+        );
+
+        // Act
+        let cursor =
+            parse_ref_page_token(&token, BRANCH_TOKEN_KIND, "acme", "commerce", "feature/")
+                .expect("parse token");
+
+        // Assert
+        assert_eq!(cursor.as_deref(), Some("feature/b"));
+    }
+
+    #[test]
+    fn ref_page_token_cannot_cross_kind_or_repository() {
+        // Arrange
+        let token = make_ref_page_token(BRANCH_TOKEN_KIND, "acme", "commerce", "", "feature/b");
+
+        // Act
+        let tag_result = parse_ref_page_token(&token, TAG_TOKEN_KIND, "acme", "commerce", "");
+        let repo_result = parse_ref_page_token(&token, BRANCH_TOKEN_KIND, "acme", "identity", "");
+
+        // Assert
+        assert_eq!(
+            tag_result
+                .expect_err("branch token must not page tags")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            repo_result
+                .expect_err("token must not cross repositories")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn ref_page_token_cannot_cross_project_or_prefix() {
+        // Arrange
+        let token =
+            make_ref_page_token(TAG_TOKEN_KIND, "acme", "commerce", "release/", "release/2");
+
+        // Act
+        let project_result =
+            parse_ref_page_token(&token, TAG_TOKEN_KIND, "other", "commerce", "release/");
+        let prefix_result =
+            parse_ref_page_token(&token, TAG_TOKEN_KIND, "acme", "commerce", "preview/");
+
+        // Assert
+        assert_eq!(
+            project_result
+                .expect_err("token must not cross projects")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            prefix_result
+                .expect_err("token must not cross prefixes")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn ref_page_token_rejects_a_cursor_outside_its_prefix() {
+        // Arrange
+        let token =
+            make_ref_page_token(TAG_TOKEN_KIND, "acme", "commerce", "release/", "preview/a");
+
+        // Act
+        let result = parse_ref_page_token(&token, TAG_TOKEN_KIND, "acme", "commerce", "release/");
+
+        // Assert
+        assert_eq!(
+            result.expect_err("cursor must match prefix").code(),
+            tonic::Code::InvalidArgument
+        );
     }
 }

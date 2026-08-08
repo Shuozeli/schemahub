@@ -9,6 +9,7 @@
 
 use std::io::{self, Write};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +61,10 @@ struct Args {
     /// Optional HTTP/JSON BFF listen address for the web console.
     #[arg(long)]
     http_listen: Option<String>,
+    /// Production Vite bundle to serve from the HTTP listener. Overrides
+    /// `[http].gui_dir` and requires `--http-listen`.
+    #[arg(long, value_name = "DIRECTORY")]
+    gui_dir: Option<PathBuf>,
     /// Maximum time to drain active gRPC and HTTP requests after shutdown.
     #[arg(long, env = "SCHEMAHUB_SHUTDOWN_TIMEOUT_SECONDS", default_value_t = 30)]
     shutdown_timeout_seconds: u64,
@@ -115,15 +120,9 @@ async fn main() -> ExitCode {
 }
 
 fn write_openapi(mut writer: impl Write) -> anyhow::Result<()> {
-    let document = http::openapi_document()
-        .to_pretty_json()
-        .context("serializing generated OpenAPI document")?;
     writer
-        .write_all(document.as_bytes())
+        .write_all(http::openapi_json_bytes())
         .context("writing generated OpenAPI document")?;
-    writer
-        .write_all(b"\n")
-        .context("finishing generated OpenAPI document")?;
     Ok(())
 }
 
@@ -182,6 +181,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     let addr = resolve_listen_addr(args.listen, &config)?;
     let http_addr = resolve_http_listen_addr(args.http_listen)?;
+    let gui_dir_override = args.gui_dir.clone();
+    let effective_gui_dir = gui_dir_override
+        .as_deref()
+        .or(config.http.gui_dir.as_deref());
+    ensure_gui_has_http_listener(http_addr, effective_gui_dir)?;
     let shutdown_timeout = Duration::from_secs(args.shutdown_timeout_seconds);
     let readiness = http::Readiness::new(false);
     let metrics = ServerMetrics::default();
@@ -231,7 +235,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         let http_readiness = readiness.clone();
         let http_shutdown = shutdown_rx.clone();
         let http_policy =
-            http::HttpPolicy::from_config(&config.http).context("building HTTP boundary policy")?;
+            http::HttpPolicy::from_config_with_gui_dir(&config.http, gui_dir_override)
+                .context("building HTTP boundary policy")?;
         let http_app = http::router_with_metrics_and_policy(
             http_core,
             http_db,
@@ -464,6 +469,17 @@ fn resolve_http_listen_addr(explicit: Option<String>) -> anyhow::Result<Option<S
         .context("parsing --http-listen address")
 }
 
+fn ensure_gui_has_http_listener(
+    http_addr: Option<SocketAddr>,
+    gui_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        gui_dir.is_none() || http_addr.is_some(),
+        "serving [http].gui_dir or --gui-dir requires --http-listen"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +533,32 @@ mod tests {
             serde_json::from_slice(&output).expect("OpenAPI output should be JSON");
         assert_eq!(document["openapi"], "3.1.0");
         assert_eq!(document["info"]["version"], BUILD_VERSION);
+        assert_eq!(output, http::openapi_json_bytes());
+    }
+
+    #[test]
+    fn gui_directory_requires_an_http_listener() {
+        // Arrange
+        let gui_dir = Path::new("/tmp/schemahub-gui");
+
+        // Act
+        let error = ensure_gui_has_http_listener(None, Some(gui_dir))
+            .expect_err("GUI without HTTP listener must fail");
+
+        // Assert
+        assert!(error.to_string().contains("requires --http-listen"));
+    }
+
+    #[test]
+    fn gui_directory_is_allowed_with_an_http_listener() {
+        // Arrange
+        let http_addr: SocketAddr = "127.0.0.1:8080".parse().expect("HTTP address");
+        let gui_dir = Path::new("/tmp/schemahub-gui");
+
+        // Act
+        let result = ensure_gui_has_http_listener(Some(http_addr), Some(gui_dir));
+
+        // Assert
+        assert!(result.is_ok());
     }
 }

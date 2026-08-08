@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T12:41:58Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Authentication and Production Identity
 
 SchemaHub is an OAuth 2/OIDC-compatible resource server: clients obtain bearer
@@ -64,6 +64,14 @@ Only asymmetric JWT algorithms are accepted. `HS256`, `HS384`, and `HS512`
 are rejected at configuration time so a public verification key can never be
 confused with a shared HMAC secret. Keep the algorithm list to the smallest set
 the issuer actually uses.
+
+Production signature verification uses jsonwebtoken's AWS-LC backend rather
+than its RustCrypto RSA backend. The locked graph contains no `rsa` crate, and
+an RS256 token signed for a real RSA JWK is exercised alongside the EdDSA,
+claim-validation, rotation, and stale-key tests. Release CI runs pinned
+RustSec auditing with a zero-vulnerability and exact reviewed-warning contract,
+so a crypto-backend regression or new warning cannot enter a candidate only
+through lockfile drift.
 
 ## Token Contract
 

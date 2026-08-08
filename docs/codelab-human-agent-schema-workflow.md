@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-22T16:00:04Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Codelab: From an Agent Proposal to an Immutable Data Schema
 
 This codelab exercises the primary SchemaHub workflow:
@@ -31,6 +31,18 @@ The complete lab uses static development credentials and embedded redb. For a
 production deployment, use externally issued JWTs and PostgreSQL as described in
 [Authentication](authentication.md) and
 [Deploy a SchemaHub Release on Tailscale](codelab-deploy.md).
+
+An automated release-mode version of every step is available from the
+repository root:
+
+```bash
+./codelabs/real-world/rw-01-human-agent/run.sh
+```
+
+It also compiles the served Rust binding, writes and reads real Protobuf order
+bytes, retries Apply, restarts SchemaHub, and emits a normalized `result.json`
+in the printed evidence directory. The sections below remain the expanded
+command-by-command walkthrough.
 
 ## 1. Prerequisites
 
@@ -406,6 +418,26 @@ agent_schemahub artifact verify "${REVISION_NAME}" \
 
 The ChangeRecord, actor attribution, review, apply receipt, immutable revision,
 and first-materialized artifact bytes all survive the restart.
+
+The Owner can also inspect immutable administrative history. This is separate
+from the JJ operation log used for schema writes and undo:
+
+```bash
+human_schemahub project member set-role \
+  codelab schema-agent --role Maintainer
+human_schemahub project member set-role \
+  codelab schema-agent --role Writer
+
+human_schemahub project audit codelab
+human_schemahub project audit codelab --json |
+  jq -e 'map(select(
+    .action == "CONTROL_PLANE_AUDIT_ACTION_MEMBER_ROLE_UPDATED"
+  )) | length == 2'
+```
+
+Each administrative event includes the server-derived actor and typed
+project/member/repository state. The resource mutation and event were committed
+in the same database transaction.
 
 Stop the lab server when finished:
 

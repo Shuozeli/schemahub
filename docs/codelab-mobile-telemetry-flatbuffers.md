@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T14:57:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Codelab: Evolve a FlatBuffers Mobile Telemetry Event
 
 This lab models mobile clients that cannot all upgrade at once. A telemetry
@@ -129,13 +129,22 @@ cmp "$EVIDENCE/mobile-event-v2.rs" \
 Both comparisons must be byte-identical. The v2 descriptor digest is verified
 through the serving API after restart.
 
-## 7. Known finding exposed by this lab
+## 7. Resolved finding exposed by this lab
 
-The current FlatBuffers generated Rust is correct but emits normal compiler
-warnings for generated camel-case builder functions, unused root helpers, and
-a deprecated accessor used by its own `Debug` implementation. This is tracked
-as `RW-03-001` in the real-world bug ledger. It is an ergonomics/codegen
-cleanliness issue, not a wire-correctness failure.
+The lab originally found that FlatBuffers generated Rust was wire-correct but
+emitted warnings for camel-case free constructors and a deprecated accessor
+used by its own `Debug` implementation. The codelab's generated modules are
+public, so exported root helpers no longer produce false dead-code warnings.
+
+A coordinated compiler patch now published at
+`59756d23993538b722f68675c35129c3cebb7aa1` emits only the upstream-style
+`Type::create(...)` constructor and makes deprecated fields read-only: their
+old-data accessors remain, while builders, Args, Object API, `Debug`, and serde
+omit them. The exact RW-03 consumer compiles under `-D warnings` and passes its
+old-reader/new-reader runtime assertions with that patch. SchemaHub's complete
+release workspace and all seven real-world codelabs passed against the
+coordinated compiler. FlatBuffers main Actions run `30481753669` is green,
+SchemaHub now pins the exact immutable Git revision, and `RW-03-001` is fixed.
 
 Continue with
 [the concurrent-editor codelab](codelab-concurrent-human-agent.md).

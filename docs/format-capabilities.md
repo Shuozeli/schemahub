@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T20:46:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # Format Capability Contract
 
 SchemaHub publishes an executable, versioned description of the schema-format
@@ -27,6 +27,12 @@ operation does not require a version bump.
 format's native resolved artifact: a Protobuf `FileDescriptorSet`, a reconstructed
 FlatBuffers bundle, or resolved OpenAPI YAML. OpenAPI source and descriptors are
 served, but generated client/server code is outside the 1.0 scope.
+
+Protobuf Rust generation returns one self-contained closure artifact. Package
+outputs become a deterministic nested Rust module tree, only resolved
+cross-package roots are imported, and the explicitly requested package is
+re-exported for top-level consumer compatibility. Multi-file codegen without an
+explicit root fails instead of selecting one by iteration or lexical order.
 
 ## Mutation operations
 

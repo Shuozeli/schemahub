@@ -4,11 +4,14 @@
 //! import Rust/protobuf internals; it talks to these stable UI shapes while the
 //! BFF adapts them to `Core`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -16,8 +19,8 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use schemahub_core::change_record::{
-    ApplyResult, ChangeActor, ChangeEdit, ChangeRecord, ChangeRecordStatus, ChangeReview,
-    ChangeReviewDecision, CreateChange, ValidationResult,
+    ApplyResult, ChangeActor, ChangeEdit, ChangeRecord, ChangeRecordPageCursor, ChangeRecordStatus,
+    ChangeReview, ChangeReviewDecision, ChangeUpdate, CreateChange, ValidationResult,
 };
 use schemahub_core::{
     detect_format_from_name, Core, CoreError, LogEntry, OperationRecord, RepoConfig,
@@ -31,11 +34,12 @@ use schemahub_types::{
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
-use crate::config::{HttpConfig, DEFAULT_HTTP_MAX_REQUEST_BODY_BYTES};
+use crate::config::{validate_gui_directory, HttpConfig, DEFAULT_HTTP_MAX_REQUEST_BODY_BYTES};
 use crate::observability::{self, ReadinessResult, ServerMetrics};
 
 mod openapi;
@@ -45,6 +49,14 @@ pub const HTTP_API_SURFACE_HEADER: &str = "x-schemahub-api-surface";
 
 /// Header value emitted by the unversioned browser-facing `/api/*` routes.
 pub const HTTP_API_SURFACE_GUI_BFF: &str = "gui-bff";
+
+const GUI_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'";
+const DEFAULT_GUI_PAGE_SIZE: usize = 50;
+const MAX_GUI_PAGE_SIZE: usize = 200;
+const PROJECT_CATALOG_TOKEN_KIND: &str = "projects";
+const REPOSITORY_CATALOG_TOKEN_KIND: &str = "repositories";
+const DASHBOARD_TOKEN_KIND: &str = "dashboard";
+const CHANGE_TOKEN_KIND: &str = "changes";
 
 #[derive(Clone)]
 struct AppState {
@@ -73,10 +85,18 @@ pub struct Readiness {
 pub struct HttpPolicy {
     allowed_origins: Vec<HeaderValue>,
     max_request_body_bytes: usize,
+    gui_dir: Option<PathBuf>,
 }
 
 impl HttpPolicy {
     pub fn from_config(config: &HttpConfig) -> anyhow::Result<Self> {
+        Self::from_config_with_gui_dir(config, None)
+    }
+
+    pub fn from_config_with_gui_dir(
+        config: &HttpConfig,
+        gui_dir_override: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
         config.validate()?;
         let allowed_origins = config
             .allowed_origins
@@ -87,9 +107,15 @@ impl HttpPolicy {
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let configured_gui_dir = gui_dir_override.or_else(|| config.gui_dir.clone());
+        let gui_dir = configured_gui_dir
+            .as_deref()
+            .map(validate_gui_directory)
+            .transpose()?;
         Ok(Self {
             allowed_origins,
             max_request_body_bytes: config.max_request_body_bytes,
+            gui_dir,
         })
     }
 
@@ -97,7 +123,7 @@ impl HttpPolicy {
         let request_id_header = HeaderName::from_static("x-request-id");
         CorsLayer::new()
             .allow_origin(self.allowed_origins.clone())
-            .allow_methods([Method::GET, Method::POST])
+            .allow_methods([Method::GET, Method::POST, Method::PATCH])
             .allow_headers([
                 AUTHORIZATION,
                 CONTENT_TYPE,
@@ -118,6 +144,7 @@ impl Default for HttpPolicy {
         Self {
             allowed_origins: Vec::new(),
             max_request_body_bytes: DEFAULT_HTTP_MAX_REQUEST_BODY_BYTES,
+            gui_dir: None,
         }
     }
 }
@@ -236,6 +263,7 @@ pub fn router_with_metrics_and_policy(
     metrics: ServerMetrics,
     policy: HttpPolicy,
 ) -> Router {
+    let gui_dir = policy.gui_dir.clone();
     let state = AppState {
         core,
         object_db,
@@ -245,39 +273,118 @@ pub fn router_with_metrics_and_policy(
         auth_mode,
     };
     let request_id_header = HeaderName::from_static("x-request-id");
-    let app = openapi::http_router()
-        .layer(DefaultBodyLimit::max(policy.max_request_body_bytes))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &axum::http::Request<_>| {
-                    let request_id = request
-                        .headers()
-                        .get("x-request-id")
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("missing");
-                    tracing::info_span!(
-                        "http_request",
-                        event = "schemahub.http.request",
-                        method = %request.method(),
-                        path = request.uri().path(),
-                        request_id,
-                    )
-                })
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        )
-        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
-        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
-        .layer(middleware::from_fn_with_state(
-            metrics,
-            observability::track_http_requests,
-        ))
-        .with_state(state);
+    let app = match gui_dir {
+        Some(gui_dir) => with_gui_routes(openapi::http_router(), gui_dir),
+        None => openapi::http_router(),
+    }
+    .layer(DefaultBodyLimit::max(policy.max_request_body_bytes))
+    .layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &axum::http::Request<_>| {
+                let request_id = request
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                tracing::info_span!(
+                    "http_request",
+                    event = "schemahub.http.request",
+                    method = %request.method(),
+                    path = request.uri().path(),
+                    request_id,
+                )
+            })
+            .on_response(DefaultOnResponse::new().level(Level::INFO)),
+    )
+    .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+    .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+    .layer(middleware::from_fn_with_state(
+        metrics,
+        observability::track_http_requests,
+    ))
+    .with_state(state);
     let app = if policy.allowed_origins.is_empty() {
         app
     } else {
         app.layer(policy.cors_layer())
     };
     app.layer(middleware::from_fn(mark_http_api_surface))
+}
+
+fn with_gui_routes(router: Router<AppState>, gui_dir: PathBuf) -> Router<AppState> {
+    let index = ServeFile::new(gui_dir.join("index.html"));
+    let mut gui = Router::new()
+        .route_service("/", index.clone())
+        .route_service("/projects", index.clone())
+        .route_service("/projects/*path", index.clone())
+        .route_service("/admin", index)
+        .nest_service("/assets", ServeDir::new(gui_dir.join("assets")));
+    let favicon = gui_dir.join("favicon.svg");
+    if favicon.is_file() {
+        gui = gui.route_service("/favicon.svg", ServeFile::new(favicon));
+    }
+    router.merge(gui.layer(middleware::from_fn(mark_gui_response)))
+}
+
+async fn mark_gui_response(request: axum::extract::Request, next: middleware::Next) -> Response {
+    let immutable_asset = is_hashed_gui_asset_path(request.uri().path());
+    let mut response = next.run(request).await;
+    if response.status().is_success() {
+        response.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static(if immutable_asset {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            }),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(GUI_CONTENT_SECURITY_POLICY),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(), geolocation=(), microphone=()"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        );
+    }
+    response
+}
+
+fn is_hashed_gui_asset_path(path: &str) -> bool {
+    let Some(relative) = path.strip_prefix("/assets/") else {
+        return false;
+    };
+    let Some(file_name) = relative.rsplit('/').next() else {
+        return false;
+    };
+    let Some((stem, extension)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    if extension.is_empty()
+        || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || stem.len() <= 9
+    {
+        return false;
+    }
+    let hash_start = stem.len() - 8;
+    let (name_and_separator, hash) = stem.split_at(hash_start);
+    name_and_separator.len() > 1
+        && name_and_separator.ends_with('-')
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 async fn mark_http_api_surface(
@@ -301,6 +408,44 @@ async fn mark_http_api_surface(
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     static DOCUMENT: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
     DOCUMENT.get_or_init(openapi::build_document).clone()
+}
+
+/// Return the canonical OpenAPI bytes used by both HTTP discovery and release
+/// packaging.
+///
+/// `utoipa` extensions are backed by hash maps, so serializing the generated
+/// document directly can emit semantically identical keys in a different
+/// order across processes. Rebuilding every JSON object in lexical key order
+/// makes the public document byte-stable as well as semantically stable.
+pub fn openapi_json_bytes() -> &'static [u8] {
+    static JSON: OnceLock<Vec<u8>> = OnceLock::new();
+    JSON.get_or_init(|| {
+        let value = serde_json::to_value(openapi_document())
+            .expect("generated OpenAPI document must serialize to JSON");
+        let canonical = canonicalize_json(value);
+        let mut bytes = serde_json::to_vec_pretty(&canonical)
+            .expect("canonical OpenAPI JSON value must serialize");
+        bytes.push(b'\n');
+        bytes
+    })
+}
+
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonicalize_json).collect())
+        }
+        serde_json::Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let canonical = entries
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect();
+            serde_json::Value::Object(canonical)
+        }
+        scalar => scalar,
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -482,7 +627,10 @@ async fn prometheus_metrics(State(state): State<AppState>) -> Response {
     responses((status = 200, description = "Generated OpenAPI 3.1 document", content_type = "application/json"))
 )]
 async fn serve_openapi_document() -> Response {
-    let mut response = Json(openapi_document()).into_response();
+    let mut response = Response::new(Body::from(openapi_json_bytes()));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     response.headers_mut().insert(
         CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600"),
@@ -504,9 +652,15 @@ struct ProjectSummaryDto {
     name: String,
     visibility: String,
     role: String,
-    repos: usize,
     last_operation: String,
     last_activity: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ProjectPageDto {
+    projects: Vec<ProjectSummaryDto>,
+    next_page_token: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -517,6 +671,28 @@ struct RepoSummaryDto {
     default_branch: String,
     protected_branches: Vec<String>,
     compatibility: String,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct RepoPageDto {
+    repositories: Vec<RepoSummaryDto>,
+    next_page_token: String,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct CatalogPageQuery {
+    /// 0 uses the server default; values above the maximum are clamped.
+    #[serde(default)]
+    page_size: i32,
+    /// Opaque continuation returned by the previous response.
+    #[serde(default)]
+    page_token: String,
+    /// Optional stable name-prefix filter.
+    #[serde(default)]
+    name_prefix: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -532,7 +708,7 @@ struct SchemaSummaryDto {
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct RepoDashboardDto {
+struct RepoDashboardPageDto {
     repo: RepoSummaryDto,
     schemas: Vec<SchemaSummaryDto>,
     branches: Vec<String>,
@@ -540,6 +716,8 @@ struct RepoDashboardDto {
     latest_commit: CommitEntryDto,
     latest_operation: OperationEntryDto,
     open_conflicts: usize,
+    resolved_commit: String,
+    next_page_token: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -682,6 +860,8 @@ struct ChangeEditDto {
     kind: String,
     schema_path: String,
     format_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -745,6 +925,29 @@ struct ChangeRecordDto {
     update_time_unix_ms: i64,
 }
 
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ChangePageDto {
+    changes: Vec<ChangeRecordDto>,
+    next_page_token: String,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct ChangePageQuery {
+    /// 0 uses the server default; values above the maximum are clamped.
+    #[serde(default)]
+    page_size: i32,
+    /// Opaque continuation returned by the previous response.
+    #[serde(default)]
+    page_token: String,
+    /// Optional lifecycle status: draft, ready, applying, applied, rejected,
+    /// or abandoned.
+    #[serde(default)]
+    status: String,
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateChangeDto {
@@ -757,6 +960,24 @@ struct CreateChangeDto {
     target_bookmark: String,
     base_revision: Option<String>,
     change_id: Option<String>,
+    #[serde(default)]
+    edits: Vec<ChangeEditInputDto>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ChangeEditInputDto {
+    kind: String,
+    schema_path: String,
+    format_id: String,
+    source: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct UpdateChangeEditsDto {
+    etag: String,
+    edits: Vec<ChangeEditInputDto>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -839,6 +1060,28 @@ struct RefQuery {
     r#ref: String,
 }
 
+#[derive(Deserialize, IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+struct DashboardPageQuery {
+    /// Bookmark, tag:<name>, or @<commit>; defaults to the repository default.
+    #[serde(default)]
+    r#ref: String,
+    /// 0 uses the server default; values above the maximum are clamped.
+    #[serde(default)]
+    page_size: i32,
+    /// Opaque continuation returned by the previous response.
+    #[serde(default)]
+    page_token: String,
+}
+
+struct DashboardContinuation {
+    resolved_commit: String,
+    schema_cursor: Option<String>,
+    branch_cursor: Option<String>,
+    tag_cursor: Option<String>,
+}
+
 #[derive(Deserialize, ToSchema)]
 struct DiffQuery {
     #[serde(default)]
@@ -893,46 +1136,61 @@ fn default_artifact_kind() -> String {
     path = "/api/projects",
     tag = "projects",
     operation_id = "listProjects",
+    params(CatalogPageQuery),
     responses(
-        (status = 200, description = "Projects visible to the caller", body = [ProjectSummaryDto]),
+        (status = 200, description = "One bounded page of projects visible to the caller", body = ProjectPageDto),
         (status = "default", description = "Request failed", content((ApiErrorDto = "application/json"), (String = "text/plain")))
     )
 )]
 async fn list_projects(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<ProjectSummaryDto>>, ApiError> {
+    Query(query): Query<CatalogPageQuery>,
+) -> Result<Json<ProjectPageDto>, ApiError> {
     let token = auth_token(&headers)?;
-    let projects = state.core.list_projects(token.as_deref())?;
-    let identity = state.core.resolve_identity(token.as_deref())?;
-    let mut summaries = Vec::with_capacity(projects.len());
-    for project in projects {
-        let repositories = state
+    let limit = gui_page_size(query.page_size)?;
+    let cursor = parse_gui_catalog_page_token(
+        &query.page_token,
+        PROJECT_CATALOG_TOKEN_KIND,
+        "",
+        &query.name_prefix,
+    )?;
+    let page = state.core.list_projects_page(
+        false,
+        &query.name_prefix,
+        cursor.as_deref(),
+        limit,
+        token.as_deref(),
+    )?;
+    let mut projects = Vec::with_capacity(page.projects.len());
+    for project in page.projects {
+        let role = state
             .core
-            .list_repositories(&project.name, false, token.as_deref())?;
-        let members = state.core.list_members(&project.name, token.as_deref())?;
-        let role = identity
-            .id()
-            .and_then(|identity_id| {
-                members
-                    .iter()
-                    .find(|(member_id, _)| member_id == identity_id)
-            })
-            .map(|(_, role)| format!("{role:?}"))
+            .caller_project_role(&project.name, token.as_deref())?
+            .map(|role| format!("{role:?}"))
             .unwrap_or_else(|| "Reader".to_string());
-        summaries.push(ProjectSummaryDto {
+        projects.push(ProjectSummaryDto {
             name: project.name,
             visibility: match project.visibility {
                 schemahub_types::Visibility::Public => "public".to_string(),
                 schemahub_types::Visibility::Private => "private".to_string(),
             },
             role,
-            repos: repositories.len(),
             last_operation: "project updated".to_string(),
             last_activity: project.update_time_unix_ms.to_string(),
         });
     }
-    Ok(Json(summaries))
+    let next_page_token = page
+        .next_cursor
+        .as_deref()
+        .map(|cursor| {
+            make_gui_catalog_page_token(PROJECT_CATALOG_TOKEN_KIND, "", &query.name_prefix, cursor)
+        })
+        .unwrap_or_default();
+    Ok(Json(ProjectPageDto {
+        projects,
+        next_page_token,
+    }))
 }
 
 #[utoipa::path(
@@ -942,10 +1200,11 @@ async fn list_projects(
     operation_id = "listChanges",
     params(
         ("project" = String, Path, description = "Project resource ID"),
-        ("repo" = String, Path, description = "Repository resource ID")
+        ("repo" = String, Path, description = "Repository resource ID"),
+        ChangePageQuery
     ),
     responses(
-        (status = 200, description = "Durable human and agent change records", body = [ChangeRecordDto]),
+        (status = 200, description = "One bounded page of durable human and agent change records", body = ChangePageDto),
         (status = "default", description = "Request failed", content((ApiErrorDto = "application/json"), (String = "text/plain")))
     )
 )]
@@ -953,12 +1212,33 @@ async fn list_changes(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((project, repo)): Path<(String, String)>,
-) -> Result<Json<Vec<ChangeRecordDto>>, ApiError> {
+    Query(query): Query<ChangePageQuery>,
+) -> Result<Json<ChangePageDto>, ApiError> {
     let token = auth_token(&headers)?;
-    let changes = state
-        .core
-        .list_change_records(&project, &repo, token.as_deref())?;
-    Ok(Json(changes.into_iter().map(change_to_dto).collect()))
+    let limit = gui_page_size(query.page_size)?;
+    let status_filter = gui_change_status(&query.status)?;
+    let cursor = parse_gui_change_page_token(&query.page_token, &project, &repo, &query.status)?;
+    let page = state.core.list_change_records_page(
+        &project,
+        &repo,
+        status_filter,
+        cursor.as_ref(),
+        limit,
+        token.as_deref(),
+    )?;
+    let next_page_token = page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| make_gui_change_page_token(&project, &repo, &query.status, cursor))
+        .unwrap_or_default();
+    Ok(Json(ChangePageDto {
+        changes: page
+            .records
+            .into_iter()
+            .map(|change| change_to_dto(change, false))
+            .collect(),
+        next_page_token,
+    }))
 }
 
 #[utoipa::path(
@@ -983,6 +1263,7 @@ async fn create_change(
     Json(request): Json<CreateChangeDto>,
 ) -> Result<(StatusCode, Json<ChangeRecordDto>), ApiError> {
     let token = auth_token(&headers)?;
+    let edits = change_edits_from_dto(&project, &repo, request.edits)?;
     let target_bookmark = if request.target_bookmark.trim().is_empty() {
         state
             .core
@@ -1002,14 +1283,48 @@ async fn create_change(
             title: request.title,
             description: request.description,
             external_references: request.external_references,
-            // The browser creates note-only drafts. Agents and the CLI can
-            // attach executable edits through ChangeService; all surfaces
-            // then read and advance the same durable record.
-            edits: Vec::new(),
+            edits,
         },
         token.as_deref(),
     )?;
-    Ok((StatusCode::CREATED, Json(change_to_dto(change))))
+    Ok((StatusCode::CREATED, Json(change_to_dto(change, true))))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/projects/{project}/repos/{repo}/changes/{change_id}",
+    tag = "changes",
+    operation_id = "updateChangeEdits",
+    params(
+        ("project" = String, Path, description = "Project resource ID"),
+        ("repo" = String, Path, description = "Repository resource ID"),
+        ("change_id" = String, Path, description = "Change record ID")
+    ),
+    request_body = UpdateChangeEditsDto,
+    responses(
+        (status = 200, description = "Draft executable edits replaced under ETag concurrency control", body = ChangeRecordDto),
+        (status = "default", description = "Request failed", content((ApiErrorDto = "application/json"), (String = "text/plain")))
+    )
+)]
+async fn update_change_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project, repo, change_id)): Path<(String, String, String)>,
+    Json(request): Json<UpdateChangeEditsDto>,
+) -> Result<Json<ChangeRecordDto>, ApiError> {
+    let token = auth_token(&headers)?;
+    let name = change_resource_name(&project, &repo, &change_id);
+    let edits = change_edits_from_dto(&project, &repo, request.edits)?;
+    let change = state.core.update_change_record(
+        &name,
+        &request.etag,
+        ChangeUpdate {
+            edits: Some(edits),
+            ..ChangeUpdate::default()
+        },
+        token.as_deref(),
+    )?;
+    Ok(Json(change_to_dto(change, true)))
 }
 
 #[utoipa::path(
@@ -1035,7 +1350,7 @@ async fn get_change(
     let token = auth_token(&headers)?;
     let name = change_resource_name(&project, &repo, &change_id);
     let change = state.core.get_change_record(&name, token.as_deref())?;
-    Ok(Json(change_to_dto(change)))
+    Ok(Json(change_to_dto(change, true)))
 }
 
 #[utoipa::path(
@@ -1096,7 +1411,7 @@ async fn change_action(
             )))
         }
     };
-    Ok(Json(change_to_dto(change)))
+    Ok(Json(change_to_dto(change, true)))
 }
 
 #[utoipa::path(
@@ -1104,9 +1419,12 @@ async fn change_action(
     path = "/api/projects/{project}/repos",
     tag = "repositories",
     operation_id = "listRepositories",
-    params(("project" = String, Path, description = "Project resource ID")),
+    params(
+        ("project" = String, Path, description = "Project resource ID"),
+        CatalogPageQuery
+    ),
     responses(
-        (status = 200, description = "Repositories visible to the caller", body = [RepoSummaryDto]),
+        (status = 200, description = "One bounded page of repositories visible to the caller", body = RepoPageDto),
         (status = "default", description = "Request failed", content((ApiErrorDto = "application/json"), (String = "text/plain")))
     )
 )]
@@ -1114,19 +1432,45 @@ async fn list_repos(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(project): Path<String>,
-) -> Result<Json<Vec<RepoSummaryDto>>, ApiError> {
+    Query(query): Query<CatalogPageQuery>,
+) -> Result<Json<RepoPageDto>, ApiError> {
     let token = auth_token(&headers)?;
-    let repositories = state
-        .core
-        .list_repositories(&project, false, token.as_deref())?;
-    Ok(Json(
-        repositories
-            .into_iter()
-            .map(|repository| {
-                repo_summary(&repository.project, &repository.name, &repository.config)
-            })
-            .collect(),
-    ))
+    let limit = gui_page_size(query.page_size)?;
+    let cursor = parse_gui_catalog_page_token(
+        &query.page_token,
+        REPOSITORY_CATALOG_TOKEN_KIND,
+        &project,
+        &query.name_prefix,
+    )?;
+    let page = state.core.list_repositories_page(
+        &project,
+        false,
+        &query.name_prefix,
+        cursor.as_deref(),
+        limit,
+        token.as_deref(),
+    )?;
+    let repositories = page
+        .repositories
+        .into_iter()
+        .map(|repository| repo_summary(&repository.project, &repository.name, &repository.config))
+        .collect();
+    let next_page_token = page
+        .next_cursor
+        .as_deref()
+        .map(|cursor| {
+            make_gui_catalog_page_token(
+                REPOSITORY_CATALOG_TOKEN_KIND,
+                &project,
+                &query.name_prefix,
+                cursor,
+            )
+        })
+        .unwrap_or_default();
+    Ok(Json(RepoPageDto {
+        repositories,
+        next_page_token,
+    }))
 }
 
 #[utoipa::path(
@@ -1137,10 +1481,10 @@ async fn list_repos(
     params(
         ("project" = String, Path, description = "Project resource ID"),
         ("repo" = String, Path, description = "Repository resource ID"),
-        ("ref" = Option<String>, Query, description = "Bookmark, tag:<name>, or @<commit>")
+        DashboardPageQuery
     ),
     responses(
-        (status = 200, description = "Repository dashboard projection", body = RepoDashboardDto),
+        (status = 200, description = "One bounded repository dashboard page pinned to an immutable schema snapshot", body = RepoDashboardPageDto),
         (status = "default", description = "Request failed", content((ApiErrorDto = "application/json"), (String = "text/plain")))
     )
 )]
@@ -1148,12 +1492,14 @@ async fn repo_dashboard(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((project, repo)): Path<(String, String)>,
-    Query(query): Query<RefQuery>,
-) -> Result<Json<RepoDashboardDto>, ApiError> {
+    Query(query): Query<DashboardPageQuery>,
+) -> Result<Json<RepoDashboardPageDto>, ApiError> {
     let token = auth_token(&headers)?;
+    let token = token.as_deref();
+    let limit = gui_page_size(query.page_size)?;
     let config = state
         .core
-        .get_repository(&project, &repo, false, token.as_deref())?
+        .get_repository(&project, &repo, false, token)?
         .map(|repository| repository.config)
         .ok_or_else(|| ApiError::not_found(format!("repository {project}/{repo} not found")))?;
     let ref_name = if query.r#ref.is_empty() {
@@ -1161,82 +1507,175 @@ async fn repo_dashboard(
     } else {
         query.r#ref
     };
-    let at = refspec(&ref_name);
+    let continuation = parse_dashboard_page_token(&query.page_token, &project, &repo, &ref_name)?;
     let is_empty_default = ref_name == config.default_bookmark;
-    let schemas = match state
-        .core
-        .list_schemas(&project, &repo, &at, token.as_deref())
-    {
-        Ok(schemas) => schemas,
-        Err(error) if is_empty_default && is_missing_bookmark(&error) => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let commits = match state
-        .core
-        .log(&project, &repo, Some(&at), Some(1), token.as_deref())
-    {
-        Ok(commits) => commits,
-        Err(error) if is_empty_default && is_missing_bookmark(&error) => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let ops = state
-        .core
-        .op_log(&project, &repo, Some(1), token.as_deref())?;
-    let branches = state
-        .core
-        .list_bookmarks(&project, &repo, token.as_deref())?
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    let tags = state
-        .core
-        .list_tags(&project, &repo, token.as_deref())?
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    let conflicts = if !ref_name.starts_with('@') && !ref_name.starts_with("tag:") {
-        match state
-            .core
-            .list_conflicts(&project, &repo, &ref_name, token.as_deref())
-        {
-            Ok(conflicts) => conflicts,
-            Err(error) if is_empty_default && is_missing_bookmark(&error) => Vec::new(),
+
+    let schema_done = continuation
+        .as_ref()
+        .is_some_and(|cursor| cursor.schema_cursor.is_none());
+    let schema_start = continuation
+        .as_ref()
+        .and_then(|cursor| cursor.schema_cursor.as_deref());
+    let schema_at = continuation
+        .as_ref()
+        .map(|cursor| RefSpec::commit(cursor.resolved_commit.clone()))
+        .unwrap_or_else(|| refspec(&ref_name));
+    let (schema_names, resolved_commit, next_schema_cursor) = if schema_done {
+        (
+            Vec::new(),
+            continuation
+                .as_ref()
+                .expect("schema_done requires a continuation")
+                .resolved_commit
+                .clone(),
+            None,
+        )
+    } else {
+        match state.core.list_schemas_page_resolved(
+            &project,
+            &repo,
+            &schema_at,
+            schema_start,
+            limit,
+            token,
+        ) {
+            Ok((page, commit)) => {
+                if continuation
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.resolved_commit != commit)
+                {
+                    return Err(ApiError::bad_request(
+                        "pageToken no longer resolves to its dashboard snapshot",
+                    ));
+                }
+                (page.schemas, commit, page.next_cursor)
+            }
+            Err(error)
+                if continuation.is_none() && is_empty_default && is_missing_bookmark(&error) =>
+            {
+                (Vec::new(), String::new(), None)
+            }
             Err(error) => return Err(error.into()),
         }
+    };
+
+    let first_page = continuation.is_none();
+    let branch_start = continuation
+        .as_ref()
+        .and_then(|cursor| cursor.branch_cursor.as_deref());
+    let (branches, next_branch_cursor) = if first_page
+        || continuation
+            .as_ref()
+            .is_some_and(|cursor| cursor.branch_cursor.is_some())
+    {
+        let page =
+            state
+                .core
+                .list_bookmarks_page(&project, &repo, "", branch_start, limit, token)?;
+        (
+            page.refs.into_iter().map(|(name, _)| name).collect(),
+            page.next_cursor,
+        )
+    } else {
+        (Vec::new(), None)
+    };
+    let tag_start = continuation
+        .as_ref()
+        .and_then(|cursor| cursor.tag_cursor.as_deref());
+    let (tags, next_tag_cursor) = if first_page
+        || continuation
+            .as_ref()
+            .is_some_and(|cursor| cursor.tag_cursor.is_some())
+    {
+        let page = state
+            .core
+            .list_tags_page(&project, &repo, "", tag_start, limit, token)?;
+        (
+            page.refs.into_iter().map(|(name, _)| name).collect(),
+            page.next_cursor,
+        )
+    } else {
+        (Vec::new(), None)
+    };
+
+    let immutable_at =
+        (!resolved_commit.is_empty()).then(|| RefSpec::commit(resolved_commit.clone()));
+    let commits = if let Some(at) = immutable_at.as_ref() {
+        state.core.log(&project, &repo, Some(at), Some(1), token)?
     } else {
         Vec::new()
+    };
+    let ops = state.core.op_log(&project, &repo, Some(1), token)?;
+
+    let selected_schemas: BTreeSet<_> = schema_names.iter().cloned().collect();
+    let (open_conflicts, conflicts_by_schema) = match immutable_at.as_ref() {
+        Some(at) if !ref_name.starts_with('@') && !ref_name.starts_with("tag:") => {
+            let stats =
+                state
+                    .core
+                    .conflict_stats_at(&project, &repo, at, &selected_schemas, token)?;
+            (stats.total, stats.by_schema)
+        }
+        _ => (0, BTreeMap::new()),
+    };
+    let mut schema_inventory = if let Some(at) = immutable_at.as_ref() {
+        let (inventory, inventory_commit) = state.core.summarize_schema_inventory_at(
+            &project,
+            &repo,
+            at,
+            &selected_schemas,
+            token,
+        )?;
+        if inventory_commit != resolved_commit {
+            return Err(ApiError::internal(
+                "dashboard schema inventory escaped its immutable snapshot",
+            ));
+        }
+        inventory
+    } else {
+        BTreeMap::new()
     };
 
     let latest_commit_id = commits
         .first()
         .map(|c| c.commit_id.clone())
         .unwrap_or_default();
-    let mut schema_summaries = Vec::new();
-    for schema_name in schemas {
-        let path = SchemaPath::new(&project, &repo, &schema_name);
-        let declarations = state.core.list_declarations(&path, &at, token.as_deref())?;
-        let dependencies = state
-            .core
-            .list_dependencies(&path, &at, false, token.as_deref())?;
-        let conflict_count = conflicts
-            .iter()
-            .filter(|conflict| {
-                conflict
-                    .strip_prefix(&schema_name)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            })
-            .count();
+    let mut schema_summaries = Vec::with_capacity(schema_names.len());
+    for schema_name in schema_names {
+        let inventory = schema_inventory.remove(&schema_name).ok_or_else(|| {
+            ApiError::internal(format!(
+                "dashboard schema inventory omitted selected schema {schema_name}"
+            ))
+        })?;
+        let conflict_count = conflicts_by_schema.get(&schema_name).copied().unwrap_or(0);
         schema_summaries.push(SchemaSummaryDto {
             format: schema_format(&schema_name).to_string(),
             path: schema_name,
-            declarations: declarations.len(),
-            dependencies: dependencies.len(),
+            declarations: inventory.declarations,
+            dependencies: inventory.dependencies,
             conflict_count,
             last_commit: latest_commit_id.clone(),
         });
     }
 
-    Ok(Json(RepoDashboardDto {
+    let next_page_token = if next_schema_cursor.is_some()
+        || next_branch_cursor.is_some()
+        || next_tag_cursor.is_some()
+    {
+        make_dashboard_page_token(
+            &project,
+            &repo,
+            &ref_name,
+            &resolved_commit,
+            next_schema_cursor.as_deref(),
+            next_branch_cursor.as_deref(),
+            next_tag_cursor.as_deref(),
+        )
+    } else {
+        String::new()
+    };
+
+    Ok(Json(RepoDashboardPageDto {
         repo: repo_summary(&project, &repo, &config),
         schemas: schema_summaries,
         branches,
@@ -1246,7 +1685,9 @@ async fn repo_dashboard(
             .map(commit_to_dto)
             .unwrap_or_else(empty_commit),
         latest_operation: ops.first().map(operation_to_dto).unwrap_or_else(empty_op),
-        open_conflicts: conflicts.len(),
+        open_conflicts,
+        resolved_commit,
+        next_page_token,
     }))
 }
 
@@ -2046,10 +2487,307 @@ fn change_resource_name(project: &str, repo: &str, change_id: &str) -> String {
     format!("projects/{project}/repos/{repo}/changes/{change_id}")
 }
 
+fn change_edits_from_dto(
+    project: &str,
+    repo: &str,
+    edits: Vec<ChangeEditInputDto>,
+) -> Result<Vec<ChangeEdit>, ApiError> {
+    edits
+        .into_iter()
+        .map(|edit| change_edit_from_dto(project, repo, edit))
+        .collect()
+}
+
+fn change_edit_from_dto(
+    project: &str,
+    repo: &str,
+    edit: ChangeEditInputDto,
+) -> Result<ChangeEdit, ApiError> {
+    let schema_path = edit.schema_path.trim();
+    let format_id = edit.format_id.trim();
+    if schema_path.is_empty() {
+        return Err(ApiError::bad_request(
+            "change edit schemaPath must not be empty",
+        ));
+    }
+    let detected_format = detect_format_from_name(schema_path).ok_or_else(|| {
+        ApiError::bad_request(
+            "change edit schemaPath must end in .proto, .fbs, .yaml, .yml, or .json",
+        )
+    })?;
+    if format_id != detected_format {
+        return Err(ApiError::bad_request(format!(
+            "change edit formatId {format_id:?} does not match {schema_path:?} ({detected_format})"
+        )));
+    }
+
+    let schema = SchemaPath::new(project, repo, schema_path);
+    match edit.kind.as_str() {
+        "replace_source" => {
+            let source = edit.source.ok_or_else(|| {
+                ApiError::bad_request("replace_source change edit requires source")
+            })?;
+            if source.trim().is_empty() {
+                return Err(ApiError::bad_request(
+                    "replace_source change edit source must not be empty",
+                ));
+            }
+            Ok(ChangeEdit::ReplaceSource {
+                schema,
+                format_id: format_id.to_string(),
+                source,
+            })
+        }
+        "delete_schema" => {
+            if edit.source.is_some() {
+                return Err(ApiError::bad_request(
+                    "delete_schema change edit must not include source",
+                ));
+            }
+            Ok(ChangeEdit::DeleteSchema {
+                schema,
+                format_id: format_id.to_string(),
+            })
+        }
+        other => Err(ApiError::bad_request(format!(
+            "unsupported browser change edit kind {other:?}; expected replace_source or delete_schema"
+        ))),
+    }
+}
+
 fn required_query_value(value: Option<String>, field: &str) -> Result<String, ApiError> {
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::bad_request(format!("{field} query parameter is required")))
+}
+
+fn gui_page_size(requested: i32) -> Result<usize, ApiError> {
+    if requested < 0 {
+        return Err(ApiError::bad_request("pageSize must not be negative"));
+    }
+    Ok(if requested == 0 {
+        DEFAULT_GUI_PAGE_SIZE
+    } else {
+        (requested as usize).min(MAX_GUI_PAGE_SIZE)
+    })
+}
+
+fn parse_gui_catalog_page_token(
+    token: &str,
+    kind: &str,
+    scope: &str,
+    name_prefix: &str,
+) -> Result<Option<String>, ApiError> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(5, ':').collect();
+    let decoded = |value: &str| {
+        hex::decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if parts.len() != 5
+        || parts[0] != "v1"
+        || parts[1] != kind
+        || decoded(parts[2]).as_deref() != Some(scope)
+        || decoded(parts[3]).as_deref() != Some(name_prefix)
+    {
+        return Err(ApiError::bad_request(
+            "pageToken is invalid for this catalog scope or prefix",
+        ));
+    }
+    decoded(parts[4])
+        .filter(|cursor| valid_gui_catalog_cursor(cursor, name_prefix))
+        .map(Some)
+        .ok_or_else(|| ApiError::bad_request("pageToken has an invalid catalog cursor"))
+}
+
+fn valid_gui_catalog_cursor(cursor: &str, name_prefix: &str) -> bool {
+    !cursor.trim().is_empty()
+        && cursor.len() <= 128
+        && !cursor.contains('/')
+        && !cursor.chars().any(char::is_control)
+        && cursor.starts_with(name_prefix)
+}
+
+fn make_gui_catalog_page_token(kind: &str, scope: &str, name_prefix: &str, cursor: &str) -> String {
+    format!(
+        "v1:{kind}:{}:{}:{}",
+        hex::encode(scope),
+        hex::encode(name_prefix),
+        hex::encode(cursor)
+    )
+}
+
+fn gui_change_status(value: &str) -> Result<Option<ChangeRecordStatus>, ApiError> {
+    match value {
+        "" => Ok(None),
+        "draft" => Ok(Some(ChangeRecordStatus::Draft)),
+        "ready" => Ok(Some(ChangeRecordStatus::Ready)),
+        "applying" => Ok(Some(ChangeRecordStatus::Applying)),
+        "applied" => Ok(Some(ChangeRecordStatus::Applied)),
+        "rejected" => Ok(Some(ChangeRecordStatus::Rejected)),
+        "abandoned" => Ok(Some(ChangeRecordStatus::Abandoned)),
+        _ => Err(ApiError::bad_request(
+            "status must be draft, ready, applying, applied, rejected, or abandoned",
+        )),
+    }
+}
+
+fn parse_gui_change_page_token(
+    token: &str,
+    project: &str,
+    repo: &str,
+    status: &str,
+) -> Result<Option<ChangeRecordPageCursor>, ApiError> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(7, ':').collect();
+    let decoded = |value: &str| {
+        hex::decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    let create_time_unix_ms = parts.get(5).and_then(|value| value.parse::<i64>().ok());
+    let name = parts.get(6).and_then(|value| decoded(value));
+    let expected_prefix = format!("projects/{project}/repos/{repo}/changes/");
+    if parts.len() != 7
+        || parts[0] != "v1"
+        || parts[1] != CHANGE_TOKEN_KIND
+        || decoded(parts[2]).as_deref() != Some(project)
+        || decoded(parts[3]).as_deref() != Some(repo)
+        || decoded(parts[4]).as_deref() != Some(status)
+        || create_time_unix_ms.is_none_or(|value| value < 0)
+        || name
+            .as_deref()
+            .and_then(|value| value.strip_prefix(&expected_prefix))
+            .is_none_or(|change_id| {
+                change_id.is_empty()
+                    || change_id.contains('/')
+                    || change_id.chars().any(char::is_control)
+            })
+    {
+        return Err(ApiError::bad_request(
+            "pageToken is invalid for this ChangeRecord parent or status",
+        ));
+    }
+    Ok(Some(ChangeRecordPageCursor {
+        create_time_unix_ms: create_time_unix_ms.expect("validated above"),
+        name: name.expect("validated above"),
+    }))
+}
+
+fn make_gui_change_page_token(
+    project: &str,
+    repo: &str,
+    status: &str,
+    cursor: &ChangeRecordPageCursor,
+) -> String {
+    format!(
+        "v1:{CHANGE_TOKEN_KIND}:{}:{}:{}:{}:{}",
+        hex::encode(project),
+        hex::encode(repo),
+        hex::encode(status),
+        cursor.create_time_unix_ms,
+        hex::encode(&cursor.name),
+    )
+}
+
+fn parse_dashboard_page_token(
+    token: &str,
+    project: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<Option<DashboardContinuation>, ApiError> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<_> = token.splitn(9, ':').collect();
+    let decoded = |index: usize| {
+        parts
+            .get(index)
+            .and_then(|value| hex::decode(value).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    if parts.len() != 9
+        || parts[0] != "v1"
+        || parts[1] != DASHBOARD_TOKEN_KIND
+        || decoded(2).as_deref() != Some(project)
+        || decoded(3).as_deref() != Some(repo)
+        || decoded(4).as_deref() != Some(ref_name)
+    {
+        return Err(ApiError::bad_request(
+            "pageToken is invalid for this dashboard repository or ref",
+        ));
+    }
+    let resolved_commit = decoded(5).ok_or_else(|| {
+        ApiError::bad_request("pageToken has invalid dashboard snapshot encoding")
+    })?;
+    let schema_cursor = decoded(6)
+        .ok_or_else(|| ApiError::bad_request("pageToken has invalid schema cursor encoding"))?;
+    let branch_cursor = decoded(7)
+        .ok_or_else(|| ApiError::bad_request("pageToken has invalid branch cursor encoding"))?;
+    let tag_cursor = decoded(8)
+        .ok_or_else(|| ApiError::bad_request("pageToken has invalid tag cursor encoding"))?;
+    let optional_cursor = |value: String| (!value.is_empty()).then_some(value);
+    let continuation = DashboardContinuation {
+        resolved_commit,
+        schema_cursor: optional_cursor(schema_cursor),
+        branch_cursor: optional_cursor(branch_cursor),
+        tag_cursor: optional_cursor(tag_cursor),
+    };
+    let commit_valid = continuation.resolved_commit.is_empty()
+        || (continuation.resolved_commit.len() <= 128
+            && continuation
+                .resolved_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()));
+    let cursors_valid = [
+        continuation.schema_cursor.as_deref(),
+        continuation.branch_cursor.as_deref(),
+        continuation.tag_cursor.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|cursor| {
+        cursor.len() <= 1_024 && !cursor.starts_with('/') && !cursor.chars().any(char::is_control)
+    });
+    if !commit_valid
+        || !cursors_valid
+        || (continuation.resolved_commit.is_empty() && continuation.schema_cursor.is_some())
+        || (continuation.schema_cursor.is_none()
+            && continuation.branch_cursor.is_none()
+            && continuation.tag_cursor.is_none())
+    {
+        return Err(ApiError::bad_request(
+            "pageToken contains an invalid dashboard continuation",
+        ));
+    }
+    Ok(Some(continuation))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_dashboard_page_token(
+    project: &str,
+    repo: &str,
+    ref_name: &str,
+    resolved_commit: &str,
+    schema_cursor: Option<&str>,
+    branch_cursor: Option<&str>,
+    tag_cursor: Option<&str>,
+) -> String {
+    format!(
+        "v1:{DASHBOARD_TOKEN_KIND}:{}:{}:{}:{}:{}:{}:{}",
+        hex::encode(project),
+        hex::encode(repo),
+        hex::encode(ref_name),
+        hex::encode(resolved_commit),
+        hex::encode(schema_cursor.unwrap_or_default()),
+        hex::encode(branch_cursor.unwrap_or_default()),
+        hex::encode(tag_cursor.unwrap_or_default()),
+    )
 }
 
 fn conflict_summary(path: String) -> ConflictSummaryDto {
@@ -2065,7 +2803,7 @@ fn conflict_summary(path: String) -> ConflictSummaryDto {
     }
 }
 
-fn change_to_dto(change: ChangeRecord) -> ChangeRecordDto {
+fn change_to_dto(change: ChangeRecord, include_edit_source: bool) -> ChangeRecordDto {
     let ChangeRecord {
         name,
         project,
@@ -2095,7 +2833,10 @@ fn change_to_dto(change: ChangeRecord) -> ChangeRecordDto {
         title,
         description,
         external_references,
-        edits: edits.into_iter().map(change_edit_to_dto).collect(),
+        edits: edits
+            .into_iter()
+            .map(|edit| change_edit_to_dto(edit, include_edit_source))
+            .collect(),
         created_by: change_actor_to_dto(created_by),
         status: change_status_to_string(status),
         validation: validation.map(change_validation_to_dto),
@@ -2116,20 +2857,30 @@ fn change_actor_to_dto(actor: ChangeActor) -> ChangeActorDto {
     }
 }
 
-fn change_edit_to_dto(edit: ChangeEdit) -> ChangeEditDto {
-    let (kind, schema, format_id) = match edit {
+fn change_edit_to_dto(edit: ChangeEdit, include_source: bool) -> ChangeEditDto {
+    let (kind, schema, format_id, source) = match edit {
         ChangeEdit::Mutation {
             schema, format_id, ..
-        } => ("mutation", schema, format_id),
+        } => ("mutation", schema, format_id, None),
         ChangeEdit::ReplaceSource {
-            schema, format_id, ..
-        } => ("replace_source", schema, format_id),
-        ChangeEdit::DeleteSchema { schema, format_id } => ("delete_schema", schema, format_id),
+            schema,
+            format_id,
+            source,
+        } => (
+            "replace_source",
+            schema,
+            format_id,
+            include_source.then_some(source),
+        ),
+        ChangeEdit::DeleteSchema { schema, format_id } => {
+            ("delete_schema", schema, format_id, None)
+        }
     };
     ChangeEditDto {
         kind: kind.to_string(),
         schema_path: schema.schema_name,
         format_id,
+        source,
     }
 }
 

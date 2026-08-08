@@ -27,6 +27,10 @@ service ProjectService {
   rpc RemoveMember(RemoveMemberRequest)   returns (RemoveMemberResponse);
   rpc UpdateMemberRole(UpdateMemberRoleRequest) returns (UpdateMemberRoleResponse);
   rpc ListMembers(ListMembersRequest)     returns (ListMembersResponse);
+
+  // ── Immutable control-plane audit ────────────────────────────────────────────
+  rpc ListControlPlaneAuditEvents(ListControlPlaneAuditEventsRequest)
+      returns (ListControlPlaneAuditEventsResponse);
 }
 
 // ── Project messages ──────────────────────────────────────────────────────────
@@ -223,8 +227,67 @@ message UpdateMemberRoleResponse {
 
 message ListMembersRequest {
   string project = 1;
+  // 0 uses the server default; values above the maximum are clamped.
+  int32 page_size = 2;
+  // Opaque and bound to project. Return it unchanged.
+  string page_token = 3;
 }
 
 message ListMembersResponse {
   repeated MemberEntry members = 1;
+  string next_page_token = 2;
+}
+
+// ── Control-plane audit messages ─────────────────────────────────────────────
+
+enum ControlPlaneAuditAction {
+  CONTROL_PLANE_AUDIT_ACTION_UNSPECIFIED            = 0;
+  CONTROL_PLANE_AUDIT_ACTION_PROJECT_CREATED        = 1;
+  CONTROL_PLANE_AUDIT_ACTION_PROJECT_UPDATED        = 2;
+  CONTROL_PLANE_AUDIT_ACTION_PROJECT_ARCHIVED       = 3;
+  CONTROL_PLANE_AUDIT_ACTION_MEMBER_ADDED           = 4;
+  CONTROL_PLANE_AUDIT_ACTION_MEMBER_ROLE_UPDATED    = 5;
+  CONTROL_PLANE_AUDIT_ACTION_MEMBER_REMOVED         = 6;
+  CONTROL_PLANE_AUDIT_ACTION_REPOSITORY_CREATED     = 7;
+  CONTROL_PLANE_AUDIT_ACTION_REPOSITORY_UPDATED     = 8;
+  CONTROL_PLANE_AUDIT_ACTION_REPOSITORY_ARCHIVED    = 9;
+}
+
+message MemberAuditSnapshot {
+  string identity = 1;
+  Role role = 2;
+  bool active = 3;
+}
+
+message ControlPlaneAuditSnapshot {
+  oneof resource {
+    ProjectInfo project = 1;
+    MemberAuditSnapshot member = 2;
+    RepoConfig repository = 3;
+  }
+}
+
+message ControlPlaneAuditEvent {
+  // `projects/{project}/auditEvents/{event_id}`.
+  string name = 1;
+  string event_id = 2;
+  string project = 3;
+  string resource_name = 4;
+  ControlPlaneAuditAction action = 5;
+  string actor = 6;
+  google.protobuf.Timestamp event_time = 7;
+  ControlPlaneAuditSnapshot before = 8;
+  ControlPlaneAuditSnapshot after = 9;
+}
+
+message ListControlPlaneAuditEventsRequest {
+  // Parent project resource: `projects/{project}`.
+  string parent = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListControlPlaneAuditEventsResponse {
+  repeated ControlPlaneAuditEvent audit_events = 1;
+  string next_page_token = 2;
 }

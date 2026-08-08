@@ -837,7 +837,12 @@ fn redb_change_record_survives_database_reopen() {
     );
 
     // Act
-    let restored = reader.get(&name).expect("restore record after reopen");
+    let restored = reader
+        .list("acme", "commerce")
+        .expect("list records after reopen")
+        .into_iter()
+        .next()
+        .expect("restored record");
 
     // Assert
     assert_eq!(restored.name, name);

@@ -1,0 +1,7 @@
+syntax = "proto3";
+package payments.money.v1;
+
+message Money {
+  int64 units = 1;
+  int32 nanos = 2;
+}

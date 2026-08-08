@@ -274,15 +274,15 @@ export function WorkflowLab() {
             <h2>Use reality to find the bugs.</h2>
           </div>
           <p>
-            The interactive lesson is paired with four executable domain labs.
+            The interactive lesson is paired with seven executable domain labs.
             Each starts a release server, compiles served bindings, preserves
             evidence, and exercises a recognizable producer or operator workflow.
           </p>
         </div>
 
         <div className="portfolio-status">
-          <span><i /> 5 scenarios passing</span>
-          <span>4 executable domain codelabs</span>
+          <span><i /> 7 scenarios passing</span>
+          <span>7 executable domain codelabs</span>
           <span>Real CLI · real compiler · reproducible evidence</span>
         </div>
 
@@ -297,7 +297,13 @@ export function WorkflowLab() {
               Delegated intent, compiler validation, a human policy gate,
               idempotent Apply, and immutable artifact fetch.
             </p>
-            <a href="#workflow">Open interactive scenario <ArrowIcon /></a>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-human-agent-schema-workflow.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
           </article>
           <article className="scenario-card">
             <div className="scenario-card-top">
@@ -365,6 +371,42 @@ export function WorkflowLab() {
             </p>
             <a
               href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-data-pipeline-handoff.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
+          </article>
+          <article className="scenario-card">
+            <div className="scenario-card-top">
+              <span>06</span>
+              <strong>Passing</strong>
+            </div>
+            <h3>Payments dependency closure</h3>
+            <p>
+              Imported Protobuf types, reverse dependency discovery, closure
+              codegen, compatible evolution, and live-dependency deletion guards.
+            </p>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-payments-dependency-closure.md"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open runnable codelab <ArrowIcon />
+            </a>
+          </article>
+          <article className="scenario-card">
+            <div className="scenario-card-top">
+              <span>07</span>
+              <strong>Passing</strong>
+            </div>
+            <h3>Private tenant isolation</h3>
+            <p>
+              Private project discovery, role boundaries, repository-scoped
+              search, isolated serving, and an authorized generated consumer.
+            </p>
+            <a
+              href="https://github.com/Shuozeli/schemahub/blob/agent/schemahub-usage-codelab/docs/codelab-private-tenant-isolation.md"
               rel="noreferrer"
               target="_blank"
             >
@@ -631,7 +673,7 @@ export function WorkflowLab() {
               <li>No global multi-repository transaction</li>
               <li>Repository-scoped search and bounded discovery</li>
               <li>No OpenAPI client/server code generation in 1.0</li>
-              <li>GUI reviews mutations but does not author them directly</li>
+              <li>Granular compiler mutations remain a CLI/gRPC workflow</li>
             </ul>
           </article>
         </div>

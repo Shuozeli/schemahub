@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T14:57:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # SchemaHub Workflow Lab
 
 This Next.js site is the interactive companion to the SchemaHub human–agent
@@ -14,9 +14,10 @@ portfolio:
 4. A data consumer resolves an immutable revision, fetches an artifact, and
    persists its revision and digest beside application data.
 
-The scenario index also links four executable real-server codelabs: Protobuf
-commerce rollout, FlatBuffers telemetry evolution, concurrent human/agent
-editing, and a two-repository producer/consumer handoff with rollback.
+The scenario index also links seven executable real-server codelabs: governed
+human/agent collaboration, Protobuf commerce rollout, FlatBuffers telemetry
+evolution, concurrent editing, a two-repository producer/consumer handoff,
+Protobuf dependency-closure evolution, and private-tenant isolation.
 
 The demo never sends production data and does not replace those runners. See
 `../../docs/real-world-validation.md` for the complete evidence, severity, and
@@ -53,9 +54,14 @@ SCHEMAHUB_DEMO_URL="http://$TAILSCALE_HOST:4178" pnpm test:browser
 
 The Worker smoke starts the static Sites bundle in the real local workerd
 runtime and rejects boot/runtime errors. The browser smoke connects to the
-shared Playwright Chrome CDP endpoint, checks all four runnable-codelab links,
-walks the lifecycle, switches to FlatBuffers, checks the mobile layout, and
-writes screenshots under `/tmp`.
+neutral Ubuntu GUI's Playwright-compatible CDP listener at
+`http://ubuntu-gui-browser-arm2.tail8f3b66.ts.net:9223` by default; set
+`PLAYWRIGHT_CDP_ENDPOINT` to override it. Shared discovery rewrites Chrome's
+advertised loopback WebSocket onto that Tailscale host and accepts direct
+`ws:`/`wss:` endpoints as well. Interactive Pwright sessions use the same
+neutral listener from an isolated working directory. The smoke checks all seven runnable
+codelab links, walks the lifecycle, switches to FlatBuffers, checks the mobile
+layout, and writes screenshots under `/tmp`.
 
 ## Deploy
 

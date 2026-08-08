@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T20:46:16Z -->
+<!-- agent-updated: 2026-07-30T04:16:42Z -->
 # schemahub — Design (v2: Compilers + Jujutsu-style JJ)
 
 > This document specifies *how* schemahub is built. It supersedes the v1 git-style design (preserved in git history). Two project-level decisions drive this revision:
@@ -21,11 +21,70 @@
 > memory, redb, and PostgreSQL implementations; JJ's content-addressed object
 > namespace remains unchanged. The server injects this durable ledger and
 > exposes the draft-note workflow through `ChangeService`.
+>
+> **Indexed ledger increment (2026-07-30):** `ChangeRecord` creates and
+> lifecycle transitions now atomically maintain repository-scoped
+> creation-order and status indexes. `ListChanges` reads only a bounded ordered
+> range and validates every returned target; a one-time durable-marker
+> migration backfills records written before the indexes existed.
 
 > **Durable resource increment (2026-07-21):** Project, membership, and
 > repository control-plane state now uses those ObjectDb resource records too.
 > Project creation and its initial Owner are one transaction; mutable resources
 > use ETags; archive retains JJ history. See `resources-and-policy.md`.
+>
+> **Indexed resource-catalog increment (2026-07-30):** Project and
+> per-project repository creates/archive transitions atomically maintain
+> active/all name indexes. `ListProjects` and `ListRepos` use bounded prefix
+> ranges with existing v1 tokens and fail-closed target validation; durable
+> one-time markers backfill resources created before the indexes.
+>
+> **Bounded membership increment (2026-07-30):** `ListMembers` pages the
+> existing project-prefixed, hex-identity role primary keys instead of loading
+> the global role collection. Project-bound cursors advance across inactive
+> tombstones; the CLI follows every page and GUI summaries fetch only the
+> caller's role.
+>
+> **Bounded repository-ref increment (2026-07-30):** `ListBranches` and
+> `ListTags` expose stable lexicographical pages with opaque cursors bound to
+> ref kind, project, repository, and prefix. JJ's operation view remains one
+> repository-scoped immutable object containing ordered ref maps; a page walks
+> that view lazily and materializes at most the requested limit plus one
+> lookahead entry. `GetBranch` uses the map's direct named lookup, and both CLI
+> list commands consume continuations to completion.
+
+> **Bounded GUI-catalog increment (2026-07-30):** The unversioned BFF now
+> adapts Core's indexed project/repository pages into `ProjectPageDto` and
+> `RepoPageDto` rather than returning complete arrays. Its opaque cursor binds
+> catalog kind, project scope, and name prefix. The React client keeps pages in
+> an infinite query and requests continuation explicitly; repository deep links
+> use a size-one exact-prefix read. Project summaries no longer enumerate every
+> repository to calculate a count.
+>
+> **Bounded GUI-aggregate increment (2026-07-30):** Repository dashboards now
+> return bounded schema, branch, and tag pages. One opaque continuation binds
+> project, repository, and ref expression, advances all three component
+> cursors, and carries the immutable commit resolved by the first page so a
+> mutable bookmark cannot produce a mixed schema inventory. Schema conflict
+> counts scan that immutable tree without collecting every conflict path.
+> The selected schema page and the repository-local schema-name inventory load
+> together in one additional JJ tree traversal; Core validates each selected
+> declaration through its format compiler and counts unique compiler-reported
+> direct imports without an N-per-schema tree scan or dependency traversal.
+> Browser ChangeRecord pages adapt the repository/status index already used by
+> `schemahub.v1`, with parent/status-bound tokens and source-redacted list
+> records. TanStack infinite queries retain only explicitly requested pages.
+
+> **Control-plane audit increment (2026-07-29):** Runtime project, membership,
+> and repository mutations append typed immutable audit events in the same
+> ObjectDb transaction as the resource create/CAS. Events are partitioned by
+> project and exposed newest-first to Owners through an immutable order index
+> and bounded backend range reads. Every index target and typed transition is
+> validated fail-closed. JJ operations remain the separate undoable
+> schema/repository history. A project-keyed distributed publication guard
+> spans authorization, last-Owner validation, and state/event/index commit so
+> concurrent administrators cannot violate membership invariants. See
+> `resources-and-policy.md`.
 
 > **Immutable artifact increment (2026-07-21):** `schemahub-core::serving`
 > stores the first successful artifact bytes in a versioned ObjectDb record
@@ -325,6 +384,17 @@ use embedded, checksum-verified SQLx migrations. The adoption-safe baseline
 registers databases created before migration tracking without rewriting their
 tables or records.
 
+Mutable ChangeRecords remain stable-key records outside JJ. Their public
+creation-time/name and optional status pagination is backed by per-repository
+ordered collections. Create atomically inserts the resource plus its all/status
+entries; a lifecycle transition atomically compare-swaps the resource, removes
+the old status entry, and inserts the new one. The first post-upgrade ledger
+operation scans legacy records once, creates missing entries plus a completion
+marker in one transaction, and fails closed on malformed or conflicting state.
+Subsequent pages are bounded `ObjectDb::list_records_page` ranges. The marker
+means old and new binaries cannot safely share one database during this
+migration.
+
 Because content objects deduplicate globally, GC is also global at the object
 layer even when the authorized request names one repository. The mark phase
 discovers repository keys directly from op/ref storage, retains every operation
@@ -599,7 +669,7 @@ configured, the server installs the same durable RBAC layer:
   supervised HTTPS/file loader. JWT time uses an injected `JwtClock`. Static
   tokens and `[auth.jwt]` are mutually exclusive.
 - **`RoleBasedAuthz`** (`schemahub-core/src/auth_impls.rs`) — project-scoped role checks over a `RoleStore` and `ProjectStore`.
-- **`ObjectDbRoleStore` + `ObjectDbProjectStore`** (`schemahub-core/src/auth_object_db.rs`) — transactional resource records in the selected redb/PostgreSQL database. The JSON stores remain one-time migration readers.
+- **`ObjectDbRoleStore` + `ObjectDbProjectStore`** (`schemahub-core/src/auth_object_db.rs`) — transactional resource records, bounded project membership ranges, and active/all project catalogs in the selected redb/PostgreSQL database. The JSON stores remain one-time migration readers.
 
 The production provider validates an explicit token type, asymmetric algorithm
 allowlist, configured issuer/audience, signature, `kid`, expiration, optional
@@ -642,6 +712,12 @@ and history-preserving archive. An archived project fails closed for all normal
 descendant operations; only Owners may request its explicit audit view. Former
 `[auth].data_dir` JSON records are imported project-plus-complete-ACL in one
 transaction on first database-backed startup.
+
+Active membership reads use a bounded exclusive range over
+`projects/{project}/members/{hex(identity)}`. The key order is the public
+identity-byte order, but the physical key and token encoding stay internal.
+Inactive records remain as tombstones and may produce an empty continuable
+page; scoped malformed records fail the request.
 
 ---
 

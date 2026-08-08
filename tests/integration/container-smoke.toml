@@ -1,0 +1,4 @@
+[auth.tokens.container-smoke-owner-token]
+id = "container-smoke-owner"
+display = "Container Smoke Owner"
+kind = "human"

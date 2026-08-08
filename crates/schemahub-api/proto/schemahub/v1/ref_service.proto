@@ -117,10 +117,15 @@ message ListBranchesRequest {
   string project      = 1;
   string repo         = 2;
   string name_prefix  = 3;  // optional filter; e.g. "feature/" to list feature branches
+  // 0 uses the server default; values above the maximum are clamped.
+  int32  page_size    = 4;
+  // Opaque and bound to the ref kind, project, repo, and name_prefix.
+  string page_token   = 5;
 }
 
 message ListBranchesResponse {
   repeated BranchInfo branches = 1;
+  string next_page_token = 2;
 }
 
 message GetBranchRequest {
@@ -164,10 +169,15 @@ message ListTagsRequest {
   string project     = 1;
   string repo        = 2;
   string name_prefix = 3;
+  // 0 uses the server default; values above the maximum are clamped.
+  int32  page_size   = 4;
+  // Opaque and bound to the ref kind, project, repo, and name_prefix.
+  string page_token  = 5;
 }
 
 message ListTagsResponse {
   repeated TagInfo tags = 1;
+  string next_page_token = 2;
 }
 
 // ── Merge ─────────────────────────────────────────────────────────────────────

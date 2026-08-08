@@ -29,6 +29,8 @@ SCHEMAHUB_DB=""
 SCHEMAHUB_SERVER_LOG=""
 SCHEMAHUB_TRANSCRIPT=""
 SCHEMAHUB_SERVER_URL=""
+SCHEMAHUB_HTTP_SERVER_URL=""
+SCHEMAHUB_CODELAB_HTTP_LISTEN=""
 SCHEMAHUB_SERVER_BIN=""
 SCHEMAHUB_CLI_BIN=""
 
@@ -49,6 +51,7 @@ schemahub_note() {
 schemahub_lab_init() {
   local scenario_id="$1"
   local default_port="$2"
+  local default_http_port="${3:-}"
 
   SCHEMAHUB_SCENARIO_ID="${scenario_id}"
   schemahub_require_command cargo
@@ -91,6 +94,11 @@ schemahub_lab_init() {
   local port="${SCHEMAHUB_CODELAB_PORT:-${default_port}}"
   SCHEMAHUB_SERVER_URL="http://${client_host}:${port}"
   SCHEMAHUB_CODELAB_LISTEN="${bind_ip}:${port}"
+  if [[ -n "${default_http_port}" ]]; then
+    local http_port="${SCHEMAHUB_CODELAB_HTTP_PORT:-${default_http_port}}"
+    SCHEMAHUB_HTTP_SERVER_URL="http://${client_host}:${http_port}"
+    SCHEMAHUB_CODELAB_HTTP_LISTEN="${bind_ip}:${http_port}"
+  fi
   SCHEMAHUB_SERVER_BIN="${SCHEMAHUB_REPO_ROOT}/target/release/schemahub-server"
   SCHEMAHUB_CLI_BIN="${SCHEMAHUB_REPO_ROOT}/target/release/schemahub"
 
@@ -148,8 +156,14 @@ consumer_schemahub() {
 
 schemahub_start() {
   schemahub_note "Starting release server on ${SCHEMAHUB_CODELAB_LISTEN}"
+  local -a http_args=()
+  if [[ -n "${SCHEMAHUB_CODELAB_HTTP_LISTEN}" ]]; then
+    schemahub_note "Starting HTTP BFF on ${SCHEMAHUB_CODELAB_HTTP_LISTEN}"
+    http_args=(--http-listen "${SCHEMAHUB_CODELAB_HTTP_LISTEN}")
+  fi
   "${SCHEMAHUB_SERVER_BIN}" \
     --listen "${SCHEMAHUB_CODELAB_LISTEN}" \
+    "${http_args[@]}" \
     --db "${SCHEMAHUB_DB}" \
     --config "${SCHEMAHUB_CONFIG}" \
     --log-format json \

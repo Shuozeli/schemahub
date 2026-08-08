@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-21T23:31:27Z -->
+<!-- agent-updated: 2026-07-30T04:23:54Z -->
 # SchemaHub Deliverable Roadmap
 
 ## Outcome
@@ -61,12 +61,14 @@ Exit criteria:
 
 **Release target:** 0.3
 
-**Status (2026-07-21): complete.** The policy-neutral lifecycle works through
+**Status (2026-07-30): complete.** The policy-neutral lifecycle works through
 gRPC and CLI on memory, redb, and PostgreSQL: executable edits, deterministic
 validation, readiness/review, recoverable correlated Apply, and idempotent
 receipts. Redb process-restart recovery proves the post-JJ/pre-receipt window,
 and 32 independent writers prove single-lease election and first-receipt
-convergence.
+convergence. Public listing now traverses atomically maintained,
+repository-scoped creation/status indexes with bounded backend reads,
+fail-closed target validation, and one-time legacy backfill.
 
 Ordered external issue, incident, design, and automation references now travel
 with the same durable record across every human and agent surface.
@@ -81,6 +83,7 @@ Deliverables:
 - Standard Create/Get/List/Update/Delete-draft methods plus custom Validate,
   MarkReady, Approve, Reject, Abandon, and Apply methods.
 - A storage trait with redb and PostgreSQL implementations.
+- Stable, status-filterable pagination over bounded repository index ranges.
 - Server-derived actor identity and injected clock/ID providers.
 - Atomic apply: one record transition, schema commit, and auditable operation.
 - Compatibility reports and conflicts attached as structured data.
@@ -91,6 +94,8 @@ Exit criteria:
 - A note-only draft can be created and later made executable.
 - A validated record can be applied exactly once despite request retries.
 - Restart tests preserve records and their links to commits.
+- Each public list page performs a bounded backend range read, while creation
+  and lifecycle transitions cannot split record state from its indexes.
 - Human and agent identities are distinguishable in audit output without
   accepting an untrusted client-supplied identity.
 
@@ -132,14 +137,28 @@ Exit criteria:
 
 **Release target:** 0.5
 
-**Status (2026-07-21): complete.** Project, membership, and repository resources
+**Status (2026-07-30): complete.** Project, membership, and repository resources
 persist in redb/PostgreSQL with atomic bootstrap ownership, ETags, field-mask
 updates, stable pagination, and history-preserving archive behavior. Review and
 serving policies are enforced dynamically, malformed startup configuration is
 rejected, and legacy JSON ACLs import transactionally. Tag names are immutable;
 base revisions are repository-owned causal inputs with stale bases accepted;
 all direct schema writes use bounded, persistent, JJ-correlated receipts that
-survive restart and post-publication crashes.
+survive restart and post-publication crashes. Every runtime project, membership,
+and repository mutation also commits a typed immutable audit event atomically
+with state; Owners can page the history through gRPC or CLI JSON. Project-keyed
+cross-instance coordination spans authorization and invariant checks, closing
+the concurrent last-Owner race. Audit pages traverse an immutable ordered
+index through bounded memory/redb/PostgreSQL range reads and fail closed on
+malformed or corrupt evidence. Project and per-project repository listings now
+traverse atomically maintained active/all catalogs through bounded prefix
+ranges; one-time backfills cover pre-index resources and corrupt targets fail
+closed. Membership pages now traverse bounded project-prefixed primary-key
+ranges, advance through inactive tombstones, and bind continuations to the
+parent project. Branch and tag list responses now page stable
+repository-local JJ ref order with ref-kind/repository/prefix-bound tokens;
+each page materializes only the requested entries plus lookahead, both CLI
+commands follow all pages, and branch Get uses a direct named lookup.
 
 Replace resource stubs with a truthful, persistent control plane.
 
@@ -152,6 +171,17 @@ Deliverables:
   policies.
 - Immutable tag behavior and explicit base-revision semantics under JJ.
 - Persistent bounded idempotency records.
+- Project-partitioned immutable control-plane audit events with atomic
+  resource/event/index commit, typed before/after state, and bounded ordered
+  pagination.
+- Project-keyed distributed coordination for authorization and membership
+  invariants.
+- Atomic active/all project and per-project repository catalogs with bounded,
+  authorization-correct pagination and durable pre-index backfill.
+- Bounded project-scoped membership pagination over stable identity keys, plus
+  complete CLI traversal and direct caller-role lookup for GUI summaries.
+- Bounded branch/tag response pagination over the repository-local ordered JJ
+  view, complete CLI traversal, and direct branch lookup.
 - Startup rejection of malformed configuration.
 
 Exit criteria:
@@ -159,6 +189,15 @@ Exit criteria:
 - No echo-only or silently successful project/repository RPC remains.
 - All database reads and writes execute inside transactions.
 - Authorization and pagination contract tests cover every resource method.
+- A successful administrative mutation cannot exist without its audit event,
+  and a failed/stale mutation cannot emit an event.
+- A public audit page does not scan or sort the complete project history, and
+  malformed cursors or corrupt index targets fail closed.
+- A public project/repository page does not load or sort a complete resource
+  collection or scan repositories outside its parent project.
+- A public membership page does not load the global role collection and a
+  tombstone-only page remains safely continuable.
+- Concurrent Owner removals/downgrades leave at least one Owner.
 - Protected targets reject unreviewed or conflicted publication according to
   repository policy.
 - Literal retries across every direct write surface return the original commit
@@ -204,18 +243,34 @@ persisted project/repository context drives every route and default bookmark.
 Humans and delegated agents share ChangeRecords across CLI/gRPC/browser;
 browser actions cover note creation, validation, readiness, review, Apply,
 abandonment, conflict resolution, immutable artifact downloads, and
-repository-scoped search. ETags, server-derived identities, real auth mode,
-stable CLI JSON, JSON errors, and classified exit codes are surfaced and
-covered by release tests.
+repository-scoped search. The browser now also creates complete source
+replacement/deletion edits and converts note-only drafts into executable
+proposals under ETag concurrency control. ETags, server-derived identities,
+real auth mode, stable CLI JSON, JSON errors, and classified exit codes are
+surfaced and covered by release tests. A live Chromium acceptance now crosses
+the real HTTP BFF and redb server for delegated-agent authoring, independent
+human review, agent Apply, schema rendering, and restart-stable audit/artifact
+identity. Project and repository selectors now consume bounded opaque BFF
+pages, load continuations incrementally, and avoid the former project-summary
+N+1 repository scans. Repository dashboards also page schema/branch/tag
+projections while pinning schemas to one immutable commit, and browser
+ChangeRecord lists now adapt the existing indexed Core continuation instead
+of rebuilding a complete proposal array. Selected dashboard schema objects and
+the repository-local name inventory load in one tree traversal, replacing the
+remaining per-schema full-tree scan while preserving compiler validation.
 
 Expose the same trustworthy workflows through interfaces optimized for each
 actor without creating separate policy paths.
 
 Deliverables:
 
-- GUI project/repository selection backed by real persisted resources.
+- GUI project/repository selection backed by real persisted resources and
+  bounded Core catalog pages.
 - GUI change drafting, validation, review, diff, conflict resolution, and
   artifact download.
+- Real-browser acceptance of the governed agent/human workflow against the
+  durable server path, including fail-closed pre-review Apply and restart.
+- Lazy operator routes with a fail-closed production entry-bundle budget.
 - CLI resource names, machine-readable JSON, non-interactive operation, and
   stable exit codes for agents and CI.
 - Search over schemas, revisions, and change records.
@@ -224,14 +279,22 @@ Deliverables:
 Exit criteria:
 
 - The GUI has no hard-coded workspace or mock-only production path.
+- Project/repository navigation never returns or decorates an entire catalog
+  in one BFF response, and cross-kind/project/prefix token reuse fails closed.
+- Dashboard and ChangeRecord routes return bounded pages; dashboard tokens
+  cannot cross repository/ref and ChangeRecord tokens cannot cross
+  repository/status. Dashboard summary work performs a bounded number of tree
+  traversals independent of the schema page size.
 - The same change can be created by CLI and reviewed/applied in the GUI.
+- A browser-created applied change and served descriptor retain exact audit
+  and artifact identity after redb restart.
 - An agent can complete the workflow without scraping human-formatted output.
 
 ## D6: Production Hardening and SchemaHub 1.0
 
 **Release targets:** 0.9 release candidate, then 1.0
 
-**Progress (2026-07-21):** SchemaHub now uses a bounded long-lived PostgreSQL
+**Progress (2026-07-30):** SchemaHub now uses a bounded long-lived PostgreSQL
 executor, applies checksum-verified embedded migrations before readiness, and
 exposes correlated structured events, Prometheus metrics, HTTP probes, standard
 gRPC health, and coordinated graceful shutdown. Cross-repository GC reachability
@@ -250,17 +313,43 @@ closes the cross-version artifact-byte gate through atomic first-writer-wins
 storage, verified restart-without-renderer retrieval, and fail-closed record
 validation. The browser BFF now defaults to same-origin access, validates an
 exact trusted-origin allowlist, and rejects oversized requests before handlers
-run. Its 22-path/23-operation OpenAPI 3.1 contract is generated from registered
+run. Its project/repository selectors return bounded pages over Core's indexed
+catalogs, use scope-bound continuations, and no longer calculate an N+1
+repository count. Its 22-path/24-operation OpenAPI 3.1 contract is generated from registered
 handlers, served at runtime, printable without startup, and embedded in native
 release archives. ADR 0002 now designates `schemahub.v1` gRPC/protobuf as the
 public 1.0 API and classifies unversioned `/api/*` as a same-release GUI BFF
 outside that compatibility promise. Runtime headers, per-path OpenAPI metadata,
 and integration tests enforce the distinction; operational routes remain a
-separate supported contract. Cross-repository coordination now has a public,
+separate supported contract. The exact locked GUI now ships in every native
+archive and the release container. The HTTP server validates its bundle before
+startup, serves explicit same-origin SPA routes and immutable hashed assets,
+preserves true `404` behavior for unknown BFF paths, and ships a native
+read-only source viewer whose bundle gate rejects runtime CDN dependencies.
+Cross-repository
+coordination now has a public,
 bounded `ListDependents` contract: it returns direct pinned/live edges and a
 per-repository immutable snapshot manifest after Core Read filtering, without
-claiming a global transaction or automatic propagation. Publishing clean
-compiler pins, the 0.9 candidate, and final 1.0 acceptance remain open.
+claiming a global transaction or automatic propagation. The initial Protobuf
+and FlatBuffers compiler pins are immutable. The warning-clean FlatBuffers
+follow-up is published at
+`59756d23993538b722f68675c35129c3cebb7aa1`, passed the sibling compiler's
+complete GitHub Actions matrix, and is now SchemaHub's exact local release
+coordinate. Both live compiler repository variables now match `Cargo.lock`.
+Publishing the current SchemaHub tree, real-provider staging, the 0.9
+candidate, and final 1.0 acceptance remain open.
+The locked dependency graph is also release-gated: JWT verification uses
+AWS-LC; the checksummed RustSec auditor builds from an independently reviewed
+lock and self-audits before use; SchemaHub requires zero vulnerabilities and
+exactly the reviewed warning set; cargo-auditable's checksummed source and
+48-package lock must be warning-free before an isolated exact binary instruments
+release artifacts; every container stage is pinned to a multi-architecture
+manifest digest; the Dockerfile frontend and CI helpers use exact manifests;
+the workflow Node runtime is exact; the image build-tool versions cannot be
+overridden; both frozen web graphs are audited; and static policy contracts
+prevent tool-source, tool-lock, base/helper-image, action-commit,
+runtime/patched-version, crypto-backend, CI-step, or the one unreachable
+RSC-exception scope from drifting.
 Exact-final-tree policy is now enforced under
 a backend repository publication guard: protected conflicts and live-import
 deletion races reject before JJ publication, including across PostgreSQL
@@ -315,6 +404,13 @@ Deliverables:
   and fail-closed readiness (delivered 2026-07-21).
 - Versioned binaries and container image, SBOM, release notes, deployment
   codelab, and compatibility policy.
+- Locked Rust and web dependency audits with a tested crypto-backend,
+  patched-version, audit-step, and narrowly scoped advisory-exception contract
+  (delivered 2026-07-29).
+- Version-matched GUI assets in every native archive and release container,
+  with fail-fast same-origin serving, explicit deep-link routes, immutable
+  asset caching, a self-contained source viewer, CDN-free bundle contract
+  tests, and runtime-container smoke coverage (delivered 2026-07-29).
 - Cross-release byte stability for artifacts already returned from an immutable
   revision through durable, versioned first-materialization storage (delivered
   2026-07-21).
@@ -338,11 +434,30 @@ Deliverables:
 - Whole-schema compiler import discovery for supported external OpenAPI
   component refs, including round-trip, immutable closure, reverse discovery,
   exact `FollowType`, and deletion-guard semantics (delivered 2026-07-21).
+- Seven release-mode real-world codelabs covering human/agent governance,
+  Protobuf and FlatBuffers rollout behavior, concurrent conflict resolution,
+  producer/consumer replay and rollback, multi-file dependency closures, and
+  private-project RBAC/search isolation (delivered 2026-07-24).
+- A fail-closed scenario-readiness artifact that binds the exact seven passing
+  summaries and open-finding counts to clean source/run provenance, rejects
+  credential leakage, is retained by CI, and enters release checksum assembly
+  (delivered 2026-07-24).
+- A protected stable-promotion gate that validates a fresh production-like
+  staging attestation against the exact tag source, image digest, and retained
+  GA archive, including same-origin bundled-GUI acceptance; independently
+  verifies the environment's sole `v*.*.*` deployment policy, then checksums
+  and publishes the normalized evidence (delivered 2026-07-29).
+- A version-specific 1.0 upgrade/compatibility/limitation/provenance contract
+  plus target-version finding deadlines that prevent a lower-severity
+  must-fix item from slipping into stable publication (delivered 2026-07-24).
 
 Exit criteria:
 
 - CI covers redb, PostgreSQL, all compilers, generated-code compilation, CLI,
-  HTTP BFF, and GUI builds.
+  HTTP BFF, bounded GUI builds, GUI archive contents, and container-hosted
+  deep routes/assets.
+- CI rejects known vulnerable or unsound locked dependencies and rejects any
+  unreviewed dependency-audit exception expansion.
 - A clean environment can deploy, create and apply a change, store a revision
   identifier, retrieve the artifact, restart, and retrieve identical bytes.
 - The automated GA journey performs that lifecycle for both Protobuf and
@@ -360,6 +475,14 @@ Exit criteria:
   honored, foreign commits cannot cross repository boundaries, history filters
   are real, and forward dependency/type traversal returns exact source/target
   commits or explicit failure state.
+- Candidate CI retains a clean-source GA report with all seven scenarios
+  passing and no open release-blocker or high finding; the report remains
+  distinct from real-provider staging and explicit publication authorization.
+- Stable publication fails closed until the protected staging environment
+  provides an independently reviewed attestation for the exact image digest,
+  source, and GA archive.
+- Stable 1.0 cannot construct artifacts while any open finding whose
+  `must_fix_before` deadline is 1.0.0 remains unresolved.
 
 ## Scheduling Assumption
 

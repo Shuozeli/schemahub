@@ -16,7 +16,12 @@ export function ComparePage() {
   const refName = searchParams.get('ref') || head;
   const schema = searchParams.get('schema') || '';
   const { data, error, isLoading } = useDiff(project, repo, base, head, schema || undefined);
-  const { data: dashboard } = useRepoDashboard(project, repo, refName);
+  const {
+    data: dashboard,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useRepoDashboard(project, repo, refName);
   const refs = [
     ...(dashboard?.branches ?? []).map((value) => ({ value, label: value })),
     ...(dashboard?.tags ?? []).map((tag) => ({ value: `tag:${tag}`, label: `tag:${tag}` })),
@@ -45,6 +50,9 @@ export function ComparePage() {
         refName={refName}
         refs={refs.map(({ value }) => value)}
         onRefChange={(value) => updateParam('ref', value)}
+        hasMoreRefs={hasNextPage}
+        loadingMoreRefs={isFetchingNextPage}
+        onLoadMoreRefs={() => void fetchNextPage()}
       />
 
       <Paper withBorder p="md" radius="sm">

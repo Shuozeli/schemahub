@@ -1,13 +1,15 @@
 //! First-class conflict orchestration (design.md §6): render a conflicted
 //! declaration for display, and validate + apply a proposed resolution.
 
+use std::collections::BTreeSet;
+
 use schemahub_jj::RefSpec;
 use schemahub_types::{Action, DeclBlob, SchemaPath};
 
 use crate::auth::authorize;
 use crate::error::CoreResult;
 use crate::request::MutationResponse;
-use crate::Core;
+use crate::{ConflictStats, Core};
 
 impl Core {
     /// List unresolved declaration conflicts on one mutable bookmark after the
@@ -30,6 +32,29 @@ impl Core {
         Ok(self
             .jj
             .list_conflicted_declarations(project, repo, &RefSpec::bookmark(bookmark))?)
+    }
+
+    /// Count conflicts at one immutable read snapshot. Per-schema counts are
+    /// restricted to the caller's bounded dashboard page.
+    pub fn conflict_stats_at(
+        &self,
+        project: &str,
+        repo: &str,
+        at: &RefSpec,
+        selected_schemas: &BTreeSet<String>,
+        token: Option<&str>,
+    ) -> CoreResult<ConflictStats> {
+        authorize(
+            self.authn.as_ref(),
+            self.authz.as_ref(),
+            token,
+            Action::Read,
+            project,
+            repo,
+        )?;
+        Ok(self
+            .jj
+            .conflict_stats(project, repo, at, selected_schemas)?)
     }
 
     /// Render a conflicted declaration's competing sides for human/agent display

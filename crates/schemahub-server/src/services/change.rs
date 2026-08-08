@@ -3,15 +3,14 @@
 //! Actor and validation/review data always come from Core authentication and
 //! compiler policy; output-only audit fields are rejected on Create.
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use schemahub_api::schemahub_v1 as pb;
 use schemahub_api::schemahub_v1::change_service_server::ChangeService;
 use schemahub_core::change_record::{
-    ApplyAttempt, ApplyResult, ChangeActor, ChangeEdit, ChangeRecord, ChangeRecordStatus,
-    ChangeReview, ChangeReviewDecision, ChangeUpdate, CreateChange, ValidationIssue,
-    ValidationResult,
+    ApplyAttempt, ApplyResult, ChangeActor, ChangeEdit, ChangeRecord, ChangeRecordPageCursor,
+    ChangeRecordStatus, ChangeReview, ChangeReviewDecision, ChangeUpdate, CreateChange,
+    ValidationIssue, ValidationResult,
 };
 use schemahub_core::Core;
 use schemahub_types::{Action, IdentityKind, SchemaPath};
@@ -96,28 +95,25 @@ impl ChangeService for ChangeHandler {
         let status_filter = status_filter_from_proto(request.status_filter)?;
         let cursor = parse_page_token(&request.page_token, &request.parent, request.status_filter)?;
 
-        let mut changes = self
+        let page = self
             .core
-            .list_change_records(project, repo, token.as_deref())
+            .list_change_records_page(
+                project,
+                repo,
+                status_filter,
+                cursor.as_ref(),
+                page_size,
+                token.as_deref(),
+            )
             .map_err(to_status)?;
-        changes.retain(|change| status_filter.is_none_or(|status| change.status == status));
-        if let Some(cursor) = cursor {
-            changes.retain(|change| compare_to_cursor(change, &cursor) == Ordering::Greater);
-        }
-
-        let has_more = changes.len() > page_size;
-        changes.truncate(page_size);
-        let next_page_token = if has_more {
-            changes
-                .last()
-                .map(|change| make_page_token(change, request.status_filter))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let next_page_token = page
+            .next_cursor
+            .as_ref()
+            .map(|cursor| make_page_token(cursor, request.status_filter))
+            .unwrap_or_default();
 
         Ok(Response::new(pb::ListChangesResponse {
-            changes: changes.into_iter().map(change_to_proto).collect(),
+            changes: page.records.into_iter().map(change_to_proto).collect(),
             next_page_token,
         }))
     }
@@ -331,16 +327,11 @@ fn status_filter_from_proto(value: i32) -> Result<Option<ChangeRecordStatus>, St
     })
 }
 
-struct PageCursor {
-    create_time_unix_ms: i64,
-    name: String,
-}
-
 fn parse_page_token(
     token: &str,
     parent: &str,
     status_filter: i32,
-) -> Result<Option<PageCursor>, Status> {
+) -> Result<Option<ChangeRecordPageCursor>, Status> {
     if token.is_empty() {
         return Ok(None);
     }
@@ -355,34 +346,32 @@ fn parse_page_token(
     let expected_prefix = format!("{parent}/changes/");
     if version != Some("v1")
         || token_status != Some(status_filter)
-        || create_time.is_none()
+        || create_time.is_none_or(|value| value < 0)
         || name
             .as_deref()
-            .is_none_or(|name| !name.starts_with(&expected_prefix))
+            .and_then(|name| name.strip_prefix(&expected_prefix))
+            .is_none_or(|change_id| {
+                change_id.is_empty()
+                    || change_id.contains('/')
+                    || change_id.chars().any(char::is_control)
+            })
     {
         return Err(Status::invalid_argument(
             "page_token is invalid for this parent or filter",
         ));
     }
-    Ok(Some(PageCursor {
+    Ok(Some(ChangeRecordPageCursor {
         create_time_unix_ms: create_time.expect("checked above"),
         name: name.expect("checked above"),
     }))
 }
 
-fn make_page_token(change: &ChangeRecord, status_filter: i32) -> String {
+fn make_page_token(cursor: &ChangeRecordPageCursor, status_filter: i32) -> String {
     format!(
         "v1:{status_filter}:{}:{}",
-        change.create_time_unix_ms,
-        hex::encode(change.name.as_bytes())
+        cursor.create_time_unix_ms,
+        hex::encode(cursor.name.as_bytes())
     )
-}
-
-fn compare_to_cursor(change: &ChangeRecord, cursor: &PageCursor) -> Ordering {
-    change
-        .create_time_unix_ms
-        .cmp(&cursor.create_time_unix_ms)
-        .then_with(|| change.name.cmp(&cursor.name))
 }
 
 fn patch_from_mask(
@@ -627,5 +616,92 @@ fn timestamp_from_millis(millis: i64) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: millis.div_euclid(1_000),
         nanos: (millis.rem_euclid(1_000) * 1_000_000) as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cursor() -> ChangeRecordPageCursor {
+        ChangeRecordPageCursor {
+            create_time_unix_ms: 1_000,
+            name: "projects/acme/repos/commerce/changes/change-a".to_string(),
+        }
+    }
+
+    #[test]
+    fn change_page_token_round_trips_its_parent_filter_and_cursor() {
+        // Arrange
+        let cursor = cursor();
+        let status = pb::ChangeStatus::Draft as i32;
+        let token = make_page_token(&cursor, status);
+
+        // Act
+        let parsed = parse_page_token(&token, "projects/acme/repos/commerce", status);
+
+        // Assert
+        assert_eq!(parsed.unwrap(), Some(cursor));
+    }
+
+    #[test]
+    fn change_page_token_cannot_cross_parent() {
+        // Arrange
+        let status = pb::ChangeStatus::Draft as i32;
+        let token = make_page_token(&cursor(), status);
+
+        // Act
+        let result = parse_page_token(&token, "projects/acme/repos/other", status);
+
+        // Assert
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn change_page_token_cannot_cross_status_filter() {
+        // Arrange
+        let token = make_page_token(&cursor(), pb::ChangeStatus::Draft as i32);
+
+        // Act
+        let result = parse_page_token(
+            &token,
+            "projects/acme/repos/commerce",
+            pb::ChangeStatus::Ready as i32,
+        );
+
+        // Assert
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn change_page_token_rejects_negative_time() {
+        // Arrange
+        let status = pb::ChangeStatus::Draft as i32;
+        let negative = format!(
+            "v1:{status}:-1:{}",
+            hex::encode("projects/acme/repos/commerce/changes/change-a")
+        );
+
+        // Act
+        let result = parse_page_token(&negative, "projects/acme/repos/commerce", status);
+
+        // Assert
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn change_page_token_rejects_nested_change_name() {
+        // Arrange
+        let status = pb::ChangeStatus::Draft as i32;
+        let nested = format!(
+            "v1:{status}:1000:{}",
+            hex::encode("projects/acme/repos/commerce/changes/change-a/child")
+        );
+
+        // Act
+        let result = parse_page_token(&nested, "projects/acme/repos/commerce", status);
+
+        // Assert
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 }

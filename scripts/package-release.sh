@@ -45,12 +45,22 @@ fi
 
 SERVER_BIN="$BIN_DIR/schemahub-server$EXE_SUFFIX"
 CLI_BIN="$BIN_DIR/schemahub$EXE_SUFFIX"
+GUI_DIST_DIR="$REPO_ROOT/apps/schemahub-gui/dist"
 for binary in "$SERVER_BIN" "$CLI_BIN"; do
   if [[ ! -x "$binary" ]]; then
     echo "release binary is missing or not executable: $binary" >&2
     exit 2
   fi
 done
+if [[ ! -f "$GUI_DIST_DIR/index.html" || ! -d "$GUI_DIST_DIR/assets" ]]; then
+  echo "production GUI bundle is missing; run pnpm build in apps/schemahub-gui" >&2
+  exit 2
+fi
+if find "$GUI_DIST_DIR" -mindepth 1 ! -type f ! -type d -print -quit \
+  | grep -q .; then
+  echo "production GUI bundle must contain only regular files and directories" >&2
+  exit 2
+fi
 
 EXPECTED_SERVER_VERSION="schemahub-server $VERSION"
 EXPECTED_CLI_VERSION="schemahub $VERSION"
@@ -78,6 +88,8 @@ trap cleanup EXIT
 mkdir -p "$STAGE_DIR/$PACKAGE_NAME"
 cp "$SERVER_BIN" "$CLI_BIN" "$STAGE_DIR/$PACKAGE_NAME/"
 cp "$REPO_ROOT/README.md" "$STAGE_DIR/$PACKAGE_NAME/"
+mkdir -p "$STAGE_DIR/$PACKAGE_NAME/schemahub-gui"
+cp -R "$GUI_DIST_DIR/." "$STAGE_DIR/$PACKAGE_NAME/schemahub-gui/"
 OPENAPI_FILE="$STAGE_DIR/$PACKAGE_NAME/schemahub-http-openapi.json"
 "$SERVER_BIN" --print-openapi >"$OPENAPI_FILE"
 if [[ ! -s "$OPENAPI_FILE" ]]; then
@@ -94,7 +106,59 @@ printf '%s\n' \
   "protobuf_rs_revision=$PROTOBUF_RS_REVISION" \
   "flatbuffers_rs_revision=$FLATBUFFERS_RS_REVISION" \
   "http_openapi=schemahub-http-openapi.json" \
+  "gui=schemahub-gui/index.html" \
   >"$STAGE_DIR/$PACKAGE_NAME/BUILD-METADATA.txt"
 
-tar -C "$STAGE_DIR" -czf "$OUTPUT_DIR/$PACKAGE_NAME.tar.gz" "$PACKAGE_NAME"
-echo "$OUTPUT_DIR/$PACKAGE_NAME.tar.gz"
+PACKAGE_DIR="$STAGE_DIR/$PACKAGE_NAME"
+find "$PACKAGE_DIR" -type f -exec chmod 0644 {} +
+chmod 0755 \
+  "$PACKAGE_DIR/schemahub-server$EXE_SUFFIX" \
+  "$PACKAGE_DIR/schemahub$EXE_SUFFIX"
+TZ=UTC find "$PACKAGE_DIR" -type f -exec touch -t 200001010000.00 {} +
+
+while IFS= read -r -d '' packaged_file; do
+  if [[ "$packaged_file" == *$'\n'* ]]; then
+    echo "release archive paths must not contain newlines: $packaged_file" >&2
+    exit 2
+  fi
+done < <(find "$PACKAGE_DIR" -type f -print0)
+
+FILE_LIST="$STAGE_DIR/release-files.txt"
+(
+  cd "$STAGE_DIR"
+  find "$PACKAGE_NAME" -type f -print | LC_ALL=C sort >"$FILE_LIST"
+)
+
+UNCOMPRESSED_ARCHIVE="$STAGE_DIR/$PACKAGE_NAME.tar"
+TAR_VERSION="$(tar --version 2>/dev/null || true)"
+if [[ "$TAR_VERSION" == *"GNU tar"* ]]; then
+  (
+    cd "$STAGE_DIR"
+    LC_ALL=C tar \
+      --format=ustar \
+      --owner=0 \
+      --group=0 \
+      --numeric-owner \
+      --verbatim-files-from \
+      -cf "$UNCOMPRESSED_ARCHIVE" \
+      -T "$FILE_LIST"
+  )
+else
+  (
+    cd "$STAGE_DIR"
+    LC_ALL=C tar \
+      --format ustar \
+      --uid 0 \
+      --gid 0 \
+      --numeric-owner \
+      --no-xattrs \
+      --no-acls \
+      --no-fflags \
+      -cf "$UNCOMPRESSED_ARCHIVE" \
+      -T "$FILE_LIST"
+  )
+fi
+
+ARCHIVE="$OUTPUT_DIR/$PACKAGE_NAME.tar.gz"
+gzip -n -9 -c "$UNCOMPRESSED_ARCHIVE" >"$ARCHIVE"
+echo "$ARCHIVE"

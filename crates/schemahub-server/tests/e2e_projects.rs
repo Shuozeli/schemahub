@@ -74,7 +74,7 @@ async fn create_project(
 async fn create_repo(
     client: &mut pb::project_service_client::ProjectServiceClient<tonic::transport::Channel>,
     project: &str,
-) {
+) -> pb::RepoConfig {
     client
         .create_repo(with_token(
             Request::new(pb::CreateRepoRequest {
@@ -89,7 +89,10 @@ async fn create_repo(
             "owner-token",
         ))
         .await
-        .expect("create repository");
+        .expect("create repository")
+        .into_inner()
+        .repo
+        .expect("repository resource")
 }
 
 #[tokio::test]
@@ -228,6 +231,88 @@ async fn project_listing_uses_stable_cursor_pagination() {
     assert!(!first.next_page_token.is_empty());
     assert_eq!(second.projects[0].name, "charlie");
     assert!(second.next_page_token.is_empty());
+}
+
+#[tokio::test]
+async fn member_listing_pages_past_tombstones_in_stable_identity_order() {
+    // Arrange
+    let url = start_server_with(project_config()).await;
+    let mut clients = clients(&url).await;
+    create_project(&mut clients.project, "acme").await;
+    for identity in ["a-removed", "b-active"] {
+        clients
+            .project
+            .add_member(with_token(
+                Request::new(pb::AddMemberRequest {
+                    project: "acme".to_string(),
+                    identity: identity.to_string(),
+                    role: pb::Role::Writer as i32,
+                }),
+                "owner-token",
+            ))
+            .await
+            .expect("add member");
+    }
+    clients
+        .project
+        .remove_member(with_token(
+            Request::new(pb::RemoveMemberRequest {
+                project: "acme".to_string(),
+                identity: "a-removed".to_string(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("remove first member");
+
+    // Act
+    let first = clients
+        .project
+        .list_members(with_token(
+            Request::new(pb::ListMembersRequest {
+                project: "acme".to_string(),
+                page_size: 1,
+                page_token: String::new(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("first member page")
+        .into_inner();
+    let second = clients
+        .project
+        .list_members(with_token(
+            Request::new(pb::ListMembersRequest {
+                project: "acme".to_string(),
+                page_size: 1,
+                page_token: first.next_page_token.clone(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("second member page")
+        .into_inner();
+    let third = clients
+        .project
+        .list_members(with_token(
+            Request::new(pb::ListMembersRequest {
+                project: "acme".to_string(),
+                page_size: 1,
+                page_token: second.next_page_token.clone(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("third member page")
+        .into_inner();
+
+    // Assert
+    assert!(first.members.is_empty());
+    assert!(!first.next_page_token.is_empty());
+    assert_eq!(second.members[0].identity, "alice");
+    assert!(!second.next_page_token.is_empty());
+    assert_eq!(third.members[0].identity, "b-active");
+    assert!(third.next_page_token.is_empty());
 }
 
 #[tokio::test]
@@ -377,6 +462,8 @@ async fn legacy_json_projects_and_members_are_imported_into_object_db() {
         .list_members(with_token(
             Request::new(pb::ListMembersRequest {
                 project: "legacy".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             }),
             "owner-token",
         ))
@@ -397,4 +484,325 @@ async fn legacy_json_projects_and_members_are_imported_into_object_db() {
             ("alice".to_string(), pb::Role::Owner as i32),
         ]
     );
+}
+
+#[tokio::test]
+async fn control_plane_audit_exposes_actor_and_typed_resource_snapshots() {
+    // Arrange
+    let url = start_server_with(project_config()).await;
+    let mut clients = clients(&url).await;
+    let project = create_project(&mut clients.project, "acme").await;
+    let mut project_update = project.clone();
+    project_update.is_public = true;
+    let updated_project = clients
+        .project
+        .update_project(with_token(
+            Request::new(pb::UpdateProjectRequest {
+                project: Some(project_update),
+                update_mask: Some(prost_types::FieldMask {
+                    paths: vec!["is_public".to_string()],
+                }),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("update project")
+        .into_inner()
+        .project
+        .expect("updated project");
+    let mut stale_project_update = project;
+    stale_project_update.is_public = false;
+    let stale_result = clients
+        .project
+        .update_project(with_token(
+            Request::new(pb::UpdateProjectRequest {
+                project: Some(stale_project_update),
+                update_mask: Some(prost_types::FieldMask {
+                    paths: vec!["is_public".to_string()],
+                }),
+            }),
+            "owner-token",
+        ))
+        .await;
+    assert_eq!(
+        stale_result.expect_err("stale update must fail").code(),
+        tonic::Code::Aborted
+    );
+    clients
+        .project
+        .add_member(with_token(
+            Request::new(pb::AddMemberRequest {
+                project: "acme".to_string(),
+                identity: "schema-agent".to_string(),
+                role: pb::Role::Writer as i32,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("add agent member");
+    clients
+        .project
+        .update_member_role(with_token(
+            Request::new(pb::UpdateMemberRoleRequest {
+                project: "acme".to_string(),
+                identity: "schema-agent".to_string(),
+                new_role: pb::Role::Reader as i32,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("change agent role");
+    clients
+        .project
+        .remove_member(with_token(
+            Request::new(pb::RemoveMemberRequest {
+                project: "acme".to_string(),
+                identity: "schema-agent".to_string(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("remove agent");
+    let repository = create_repo(&mut clients.project, "acme").await;
+    let mut repository_update = repository.clone();
+    repository_update.default_branch = "stable".to_string();
+    let updated_repository = clients
+        .project
+        .update_repo(with_token(
+            Request::new(pb::UpdateRepoRequest {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                repo_config: Some(repository_update),
+                update_mask: Some(prost_types::FieldMask {
+                    paths: vec!["default_branch".to_string()],
+                }),
+                ..Default::default()
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("update repository")
+        .into_inner()
+        .repo
+        .expect("updated repository");
+    clients
+        .project
+        .delete_repo(with_token(
+            Request::new(pb::DeleteRepoRequest {
+                project: "acme".to_string(),
+                repo: "commerce".to_string(),
+                force: false,
+                etag: updated_repository.etag,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("archive repository");
+    clients
+        .project
+        .delete_project(with_token(
+            Request::new(pb::DeleteProjectRequest {
+                name: "acme".to_string(),
+                force: true,
+                etag: updated_project.etag,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("archive project");
+
+    // Act
+    let response = clients
+        .project
+        .list_control_plane_audit_events(with_token(
+            Request::new(pb::ListControlPlaneAuditEventsRequest {
+                parent: "projects/acme".to_string(),
+                page_size: 0,
+                page_token: String::new(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("list control-plane audit events")
+        .into_inner();
+
+    // Assert
+    assert_eq!(response.audit_events.len(), 9);
+    assert!(response.next_page_token.is_empty());
+    assert!(response
+        .audit_events
+        .iter()
+        .all(|event| event.actor == "alice" && event.event_time.is_some()));
+
+    let project_created = response
+        .audit_events
+        .iter()
+        .find(|event| event.action == pb::ControlPlaneAuditAction::ProjectCreated as i32)
+        .expect("project-created event");
+    assert!(project_created.before.is_none());
+    assert!(matches!(
+        project_created
+            .after
+            .as_ref()
+            .and_then(|snapshot| snapshot.resource.as_ref()),
+        Some(pb::control_plane_audit_snapshot::Resource::Project(project))
+            if project.name == "acme" && project.etag == "v1"
+    ));
+
+    let member_added = response
+        .audit_events
+        .iter()
+        .find(|event| event.action == pb::ControlPlaneAuditAction::MemberAdded as i32)
+        .expect("member-added event");
+    assert!(matches!(
+        member_added
+            .after
+            .as_ref()
+            .and_then(|snapshot| snapshot.resource.as_ref()),
+        Some(pb::control_plane_audit_snapshot::Resource::Member(member))
+            if member.identity == "schema-agent"
+                && member.role == pb::Role::Writer as i32
+                && member.active
+    ));
+
+    let repository_created = response
+        .audit_events
+        .iter()
+        .find(|event| event.action == pb::ControlPlaneAuditAction::RepositoryCreated as i32)
+        .expect("repository-created event");
+    assert!(matches!(
+        repository_created
+            .after
+            .as_ref()
+            .and_then(|snapshot| snapshot.resource.as_ref()),
+        Some(pb::control_plane_audit_snapshot::Resource::Repository(repository))
+            if repository.project == "acme"
+                && repository.name == "commerce"
+                && repository.etag == "v1"
+    ));
+
+    let actions: std::collections::BTreeSet<_> = response
+        .audit_events
+        .iter()
+        .map(|event| event.action)
+        .collect();
+    assert_eq!(
+        actions,
+        std::collections::BTreeSet::from([
+            pb::ControlPlaneAuditAction::ProjectCreated as i32,
+            pb::ControlPlaneAuditAction::ProjectUpdated as i32,
+            pb::ControlPlaneAuditAction::ProjectArchived as i32,
+            pb::ControlPlaneAuditAction::MemberAdded as i32,
+            pb::ControlPlaneAuditAction::MemberRoleUpdated as i32,
+            pb::ControlPlaneAuditAction::MemberRemoved as i32,
+            pb::ControlPlaneAuditAction::RepositoryCreated as i32,
+            pb::ControlPlaneAuditAction::RepositoryUpdated as i32,
+            pb::ControlPlaneAuditAction::RepositoryArchived as i32,
+        ])
+    );
+    let member_removed = response
+        .audit_events
+        .iter()
+        .find(|event| event.action == pb::ControlPlaneAuditAction::MemberRemoved as i32)
+        .expect("member-removed event");
+    assert!(member_removed.before.is_some());
+    assert!(member_removed.after.is_none());
+}
+
+#[tokio::test]
+async fn control_plane_audit_is_owner_only_even_for_project_members() {
+    // Arrange
+    let url = start_server_with(project_config()).await;
+    let mut clients = clients(&url).await;
+    create_project(&mut clients.project, "acme").await;
+    clients
+        .project
+        .add_member(with_token(
+            Request::new(pb::AddMemberRequest {
+                project: "acme".to_string(),
+                identity: "stranger".to_string(),
+                role: pb::Role::Reader as i32,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("add reader");
+
+    // Act
+    let result = clients
+        .project
+        .list_control_plane_audit_events(with_token(
+            Request::new(pb::ListControlPlaneAuditEventsRequest {
+                parent: "projects/acme".to_string(),
+                page_size: 0,
+                page_token: String::new(),
+            }),
+            "stranger-token",
+        ))
+        .await;
+
+    // Assert
+    assert_eq!(
+        result.expect_err("non-owner audit read must fail").code(),
+        tonic::Code::PermissionDenied
+    );
+}
+
+#[tokio::test]
+async fn control_plane_audit_pagination_resumes_without_duplicates() {
+    // Arrange
+    let url = start_server_with(project_config()).await;
+    let mut clients = clients(&url).await;
+    create_project(&mut clients.project, "acme").await;
+    create_repo(&mut clients.project, "acme").await;
+    clients
+        .project
+        .add_member(with_token(
+            Request::new(pb::AddMemberRequest {
+                project: "acme".to_string(),
+                identity: "schema-agent".to_string(),
+                role: pb::Role::Writer as i32,
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("add agent");
+    let first = clients
+        .project
+        .list_control_plane_audit_events(with_token(
+            Request::new(pb::ListControlPlaneAuditEventsRequest {
+                parent: "projects/acme".to_string(),
+                page_size: 2,
+                page_token: String::new(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("first audit page")
+        .into_inner();
+
+    // Act
+    let second = clients
+        .project
+        .list_control_plane_audit_events(with_token(
+            Request::new(pb::ListControlPlaneAuditEventsRequest {
+                parent: "projects/acme".to_string(),
+                page_size: 2,
+                page_token: first.next_page_token.clone(),
+            }),
+            "owner-token",
+        ))
+        .await
+        .expect("second audit page")
+        .into_inner();
+
+    // Assert
+    assert_eq!(first.audit_events.len(), 2);
+    assert!(!first.next_page_token.is_empty());
+    assert_eq!(second.audit_events.len(), 1);
+    assert!(second.next_page_token.is_empty());
+    assert!(first
+        .audit_events
+        .iter()
+        .all(|first_event| second.audit_events[0].event_id != first_event.event_id));
 }

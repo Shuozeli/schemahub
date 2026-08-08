@@ -1,0 +1,8 @@
+syntax = "proto3";
+package codelab.orders.v1;
+
+message OrderRecord {
+  string id = 1;
+  int64 created_at_unix_ms = 2;
+  bytes payload = 3;
+}

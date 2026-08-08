@@ -21,7 +21,8 @@ pub use runtime::{
     ChangeClock, ChangeIdGenerator, ChangeRuntimeError, SystemChangeClock, UuidChangeIdGenerator,
 };
 pub use store::{
-    ChangeRecordStore, ChangeStoreError, MemoryChangeRecordStore, ObjectDbChangeRecordStore,
+    ChangeRecordPage, ChangeRecordPageCursor, ChangeRecordStore, ChangeStoreError,
+    MemoryChangeRecordStore, ObjectDbChangeRecordStore,
 };
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-<!-- agent-updated: 2026-07-23T14:57:16Z -->
+<!-- agent-updated: 2026-07-30T04:23:54Z -->
 # schemahub
 
 A collaborative schema-change and serving platform. Humans and software agents
@@ -67,14 +67,20 @@ Start with
 [the human-and-agent workflow codelab](docs/codelab-human-agent-schema-workflow.md)
 to run the primary agent proposal, human review, Apply, and immutable artifact
 serving path end to end. Its interactive companion lives in
-[`apps/schemahub-demo`](apps/schemahub-demo). Four executable domain codelabs
-then exercise a
+[`apps/schemahub-demo`](apps/schemahub-demo). Seven executable real-world
+codelabs exercise the primary workflow plus a
 [Protobuf commerce rollout](docs/codelab-commerce-protobuf.md),
 [FlatBuffers mobile telemetry evolution](docs/codelab-mobile-telemetry-flatbuffers.md),
 [concurrent human/agent editing](docs/codelab-concurrent-human-agent.md), and a
-[producer/consumer data-pipeline handoff](docs/codelab-data-pipeline-handoff.md).
-Run all four real-server scenarios with
-`./codelabs/real-world/run-all.sh`.
+[producer/consumer data-pipeline handoff](docs/codelab-data-pipeline-handoff.md),
+then add
+[multi-file payments dependency closure](docs/codelab-payments-dependency-closure.md)
+and [private tenant isolation](docs/codelab-private-tenant-isolation.md).
+Run all seven real-server scenarios with
+`./codelabs/real-world/run-all.sh`. A successful run also emits normalized
+`GA-READINESS.md` and `ga-readiness.json` reports under its evidence directory;
+candidate CI retains the same secret-free evidence as a checksummed release
+input.
 
 ---
 
@@ -237,12 +243,21 @@ schemahub project get <name> [--include-archived]
 schemahub project list [--prefix P] [--page-size N] [--include-archived]
 schemahub project set-visibility <name> <public|private> --etag <etag>
 schemahub project archive <name> --etag <etag> [--force]
+schemahub project member list       <project> [--page-size N] [--json]
 schemahub project member add        <project> <identity_id> [--role Reader]
 schemahub project member remove     <project> <identity_id>
 schemahub project member set-role   <project> <identity_id> --role <role>
+schemahub project audit <project> [--page-size N] [--json]
 ```
 
-Roles: `Reader` / `Writer` / `Maintainer` / `Owner`. `CreateProject` requires an authenticated identity (anonymous callers are rejected); the caller becomes the project's Owner in the same database transaction. Updates and archive require the current ETag. Archive retains repository/schema history, is Owner-only, and needs `--force` when repository records exist. Member CRUD is Owner-only and enforces the "last Owner" invariant.
+Roles: `Reader` / `Writer` / `Maintainer` / `Owner`. `CreateProject` requires an authenticated identity (anonymous callers are rejected); the caller becomes the project's Owner in the same database transaction. Updates and archive require the current ETag. Archive retains repository/schema history, is Owner-only, and needs `--force` when repository records exist. Member mutation is Owner-only and enforces the "last Owner" invariant; readable project members can traverse the bounded identity-ordered list.
+Every successful project, member, and repository mutation appends a typed
+before/after audit event in the same database transaction. `project audit` is
+Owner-only; `--json` emits stable machine-readable event resources.
+Each page is read through an immutable newest-first index and a bounded backend
+range query; it does not load the project's complete history.
+Project-keyed cross-instance coordination keeps authorization and the
+last-Owner invariant valid under concurrent administration.
 
 ### `change` — human/agent change notes
 
@@ -310,7 +325,7 @@ schemahub field rename [--branch B] [--base-revision H] <project/repo/schema> <M
 ```
 schemahub branch create [--from B] [--project P] [--repo R] <name>
 schemahub branch delete [--project P] [--repo R] <name>
-schemahub branch list   [--project P] [--repo R] [--prefix PREFIX]
+schemahub branch list   <project/repo> [--prefix PREFIX] [--page-size N]
 schemahub branch merge  [--into B] [--base-revision H] [--message MSG] [--project P] [--repo R] <source>
 ```
 
@@ -321,7 +336,7 @@ Merge is a real jj 3-way merge: the server creates a 2-parent merge commit whose
 ```
 schemahub tag create [--commit H | --branch B] [--message MSG] [--project P] [--repo R] <name>
 schemahub tag delete --force [--project P] [--repo R] <name>
-schemahub tag list   [--project P] [--repo R] [--prefix PREFIX]
+schemahub tag list   <project/repo> [--prefix PREFIX] [--page-size N]
 ```
 
 Providing `--message` creates an annotated tag. Without it, the tag is lightweight.
@@ -428,8 +443,8 @@ Branch names map to jj **bookmarks**; the branch RPCs are a compatibility-shaped
 | `GetCommit` | Fetch commit metadata by hash. |
 | `ListCommits` | Stream real commit-graph entries newest-first, with an optional exclusive retained stop commit and schema-touch filter. Initial metadata reports the exact traversal root. |
 | `Diff` | Per-declaration semantic diff between two immutable resolved snapshots; the response reports both exact commit IDs. |
-| `CreateBranch` / `DeleteBranch` / `ListBranches` / `GetBranch` | Branch CRUD. |
-| `CreateTag` / `DeleteTag` / `ListTags` | Tag CRUD. `DeleteTag` requires `force=true`. |
+| `CreateBranch` / `DeleteBranch` / `ListBranches` / `GetBranch` | Branch CRUD. Lists use repository/filter-bound opaque pagination over stable name order; Get is a direct named lookup. |
+| `CreateTag` / `DeleteTag` / `ListTags` | Tag CRUD. Lists use repository/filter-bound opaque pagination over stable name order. `DeleteTag` requires `force=true`. |
 | `Merge` | Real jj 3-way merge with first-class conflicts; produces a 2-parent merge commit. Same-declaration divergence is recorded as a stored conflict, not an error. |
 
 ### HistoryService
@@ -496,11 +511,12 @@ redb/PostgreSQL database.
 
 | RPC | Description |
 |---|---|
-| `CreateProject` / `GetProject` / `UpdateProject` / `ListProjects` | Durable resources with caller-owned creation, ETags, field masks, timestamps, RBAC-filtered pagination, and Owner-only archived audit reads. |
+| `CreateProject` / `GetProject` / `UpdateProject` / `ListProjects` | Durable resources with caller-owned creation, ETags, field masks, timestamps, and RBAC-filtered pagination over bounded active/all name-index ranges. A filtered page can be empty while still carrying a continuation token. |
 | `DeleteProject` | Soft archive; requires ETag and `force=true` when repositories exist. Descendant history is retained and normal runtime access fails closed. |
-| `CreateRepo` / `GetRepo` / `UpdateRepo` / `ListRepos` | Durable repository resources and effective compatibility/review/serving policy with ETags and pagination. |
+| `CreateRepo` / `GetRepo` / `UpdateRepo` / `ListRepos` | Durable repository resources and effective compatibility/review/serving policy with ETags and bounded per-project name-index pagination. |
 | `DeleteRepo` | Soft archive; retained JJ refs require `force=true`. |
-| `AddMember` / `RemoveMember` / `UpdateMemberRole` / `ListMembers` | Real role-based membership. Owner-only. Enforces the "last Owner" invariant. |
+| `AddMember` / `RemoveMember` / `UpdateMemberRole` / `ListMembers` | Real role-based membership with Owner-only mutation, the "last Owner" invariant, and project-bound pagination over bounded identity-key ranges. An inactive-tombstone page can be empty while carrying a continuation token. |
+| `ListControlPlaneAuditEvents` | Owner-only, cursor-paginated immutable project/member/repository events with server-derived actor, event time, and typed before/after snapshots. |
 
 ### ChangeService
 
@@ -510,7 +526,7 @@ and PostgreSQL.
 | RPC | Description |
 |---|---|
 | `CreateChange` | Create a note-only or executable draft under `projects/{project}/repos/{repo}`. Actor metadata is server-derived. |
-| `GetChange` / `ListChanges` | Read one record or page through a repository ledger in stable creation order. List supports status filtering and opaque cursors. |
+| `GetChange` / `ListChanges` | Read one record or a bounded repository-index page in stable creation order. List supports status filtering and parent/filter-bound opaque cursors. |
 | `UpdateChange` | Patch draft fields with a field mask and ETag. Stale ETags return `ABORTED`. |
 | `ValidateChange` / `MarkChangeReady` | Resolve and validate the exact edit snapshot, persist findings, and advance a passing record to review-ready state. |
 | `ApproveChange` / `RejectChange` | Record an authenticated maintainer review without allowing self-review. |
@@ -658,8 +674,8 @@ schemahub uses the **Jujutsu (jj) model** via `jj-lib` (default features off —
 
 - **Commits** — Immutable, content-addressed (`CommitId` via blake2b). Each carries a stable **`ChangeId`** that survives rewrite/rebase/squash — the durable identity of an edit even after history is rewritten.
 - **Trees** — Per-declaration storage: a schema file is a jj subtree `<schema-file>/`; each top-level declaration is a file entry `<schema-file>/<Decl>` holding the `DeclBlob`; `<schema-file>/__meta__` holds the file's `MetaBlob` (package, imports, syntax/edition).
-- **Branches (bookmarks)** — Mutable named refs. Names support glob patterns for protection rules (e.g., `main`, `release/*`). The branch RPCs are a compatibility-shaped face over jj bookmarks.
-- **Tags** — Immutable refs. Lightweight tags are just a ref; annotated tags carry a message, tagger, and timestamp.
+- **Branches (bookmarks)** — Mutable named refs. Names support glob patterns for protection rules (e.g., `main`, `release/*`). The branch RPCs are a compatibility-shaped face over jj bookmarks; list responses are bounded and cursor-paginated.
+- **Tags** — Immutable refs. Lightweight tags are just a ref; annotated tags carry a message, tagger, and timestamp. Tag lists use the same bounded cursor contract.
 - **First-class conflicts** — Concurrent edits to the **same** declaration produce a stored conflict (a multi-side tree entry), surfaced in `conflicted_decls` on the response, not a hard error. The caller resolves it later via `HistoryService.ResolveConflict`. Concurrent edits to **different** declarations merge automatically.
 - **Merge** — Real 3-way merge via `jj_lib::rewrite::merge_commit_trees`, producing a 2-parent merge commit. Same-decl divergence becomes a stored conflict; the merge itself never fails for this reason.
 - **Operation log + undo** — Every write (mutation, transaction, bookmark move, tag, GC, resolve) is one jj `Operation`. `Undo` is a linear monotonic walk-back stack — consecutive `undo` calls step further back through content ops, rather than redoing the previous undo.
@@ -758,6 +774,9 @@ requires `iss`, `aud`, `sub`, and `exp`, supports trusted human/agent/service
 audit claims, atomically rotates key sets, retains the last known-good set on a
 refresh failure, and fails closed when that set exceeds its configured age.
 `/readyz` reports stale verification keys as an authentication failure.
+The locked verifier uses jsonwebtoken's AWS-LC backend, including tested RS256
+JWK verification; release CI rejects known vulnerable or unsound Rust
+dependency drift.
 
 SchemaHub is the resource server, not the token issuer: OAuth login, token
 issuance, and revocation live at the external identity provider. See
@@ -791,7 +810,18 @@ Internally, schema state is content-addressed via jj-lib's blake2b hashing —
 files (`DeclBlob`/`MetaBlob`), trees, commits, views, plus a per-`(project,
 repo)` operation log. Mutable ChangeRecords, projects, memberships, and
 repository policies live in independent ObjectDb resource-record collections
-with transactions and compare-and-swap.
+with transactions and compare-and-swap. Project/member/repository mutations
+atomically append immutable, project-partitioned control-plane audit events;
+the resource update cannot commit without its event and ordered index entry.
+Audit reads page that index with bounded range queries on redb and PostgreSQL
+and validate every index target and typed event before returning it.
+Membership reads use the existing project-prefixed, hex-identity primary keys
+as their ordered range and never scan another project's roles.
+ChangeRecord creates and lifecycle transitions likewise maintain
+repository-scoped creation-order and status indexes atomically. Public
+`ListChanges` pages use bounded range reads and validate each index target.
+An existing pre-index database is backfilled once on the first ChangeRecord
+ledger operation and records a durable completion marker.
 
 PostgreSQL uses a fixed long-lived async executor instead of spawning a thread
 per query. Embedded, checksum-verified SQLx migrations run before readiness;
@@ -817,6 +847,7 @@ The `ObjectDb` trait is the only persistence seam: implementing it (plus the per
 | `--db-url` | _(none)_ | Postgres connection URL (honored when `storage.backend = "postgres"`; requires `--features postgres`) |
 | `--config` | `./schemahub.toml` when present | Path to a required server config file; missing or unreadable explicit paths fail startup |
 | `--http-listen` | _(disabled)_ | HTTP BFF plus `/healthz`, `/readyz`, `/metrics`, and `/api/openapi.json` listener |
+| `--gui-dir` | `[http].gui_dir` | Production Vite bundle to serve from the HTTP listener; requires `index.html`, `assets/`, and `--http-listen` |
 | `--shutdown-timeout-seconds` | `30` | Maximum HTTP/gRPC graceful-drain period; env: `SCHEMAHUB_SHUTDOWN_TIMEOUT_SECONDS` |
 | `--log-format` | `json` | Structured `json` or interactive `pretty`; env: `SCHEMAHUB_LOG_FORMAT` |
 
@@ -832,6 +863,8 @@ path    = "schemahub.db"  # for redb
 
 [http]
 max_request_body_bytes = 8388608
+# Serve the version-matched production console from the same origin:
+# gui_dir = "/usr/share/schemahub/gui"
 # Exact browser origins only when the GUI is hosted separately:
 # allowed_origins = ["https://schemahub-gui.example.com"]
 
@@ -873,7 +906,16 @@ no CORS permission headers. Cross-origin GUI deployments must list each trusted
 canonical `http://` or `https://` origin exactly, including a non-default port;
 wildcards, paths, credentials, query strings, fragments, and duplicates fail
 startup. Browser cookies are never enabled. `max_request_body_bytes` defaults
-to 8 MiB and must remain between 1 KiB and 64 MiB.
+to 8 MiB and must remain between 1 KiB and 64 MiB. When `gui_dir` is set,
+startup fails unless it resolves to a directory containing a regular
+`index.html` and `assets/`, and the complete tree contains only regular files
+and directories. Symbolic links fail startup so static assets cannot escape
+the configured root. Configuring it without `--http-listen` also fails. The CLI
+`--gui-dir` flag overrides the config value. Successful console responses deny
+framing, camera, geolocation, and microphone use and apply a self-only content
+security policy. Inline scripts, form submission, frames, objects, and
+third-party runtime origins are blocked; inline styles remain allowed for the
+bundled component library.
 
 For production, replace the static token tables above with an explicit JWT
 resource-server policy (do not configure both):
@@ -925,16 +967,37 @@ file is always an error.
 The prepared tag workflow builds tagged Linux, macOS, and Windows archives,
 SHA-256 checksums, distribution/container SPDX SBOMs, and a PostgreSQL-capable
 multi-architecture image. Release binaries embed auditable Rust dependency
-metadata. Binary `--version`, `/healthz`, gRPC server configuration,
+metadata. The Node GUI builder, Rust builder, and distroless runtime are pinned
+to exact multi-architecture manifest digests. The Dockerfile frontend and
+PostgreSQL/curl CI helpers are digest-pinned too, and the image build's pnpm
+coordinate is non-overridable. Native GUI release builds use the same exact
+Node 24.18.0 runtime. Binary `--version`, `/healthz`, gRPC server configuration,
 `schemahub_build_info`, the archive's generated HTTP OpenAPI document, archive
-metadata, and OCI labels all use the tag version.
+metadata, and OCI labels all use the tag version. Every native archive contains
+the exact production console under `schemahub-gui/`; the release container
+serves that same locked build at `/` from `/usr/share/schemahub/gui`. The
+console's read-only source viewer is self-contained, and the build contract
+rejects known runtime CDN references.
+
+Release CI verifies the exact cargo-audit 0.22.2 crates.io archive, overlays a
+repository-reviewed dependency lock, installs that graph with `--locked`, and
+self-audits it before scanning SchemaHub. The SchemaHub scan accepts only zero
+vulnerabilities plus the exact two reviewed non-runtime warnings. A new,
+changed, or disappeared warning fails until the policy is reviewed.
+Low-severity pnpm audits cover both frozen web lockfiles. Static contracts guard
+the auditor source and lock identities, cargo-auditable's exact clean release
+tool graph and isolated invocation, JWT crypto backend, patched dependency
+versions, every audit step, and the GUI's sole unused-RSC advisory exception.
 
 Every tag also requires version-matched release notes that state the upgrade,
 migration, mixed-version, rollback, compatibility, and known-issue contract.
 The workflow validates that source before any artifact publication, injects the
 exact SchemaHub/compiler revisions and multi-architecture image digest, then
 includes the rendered `RELEASE-NOTES.md` in the SBOM, checksums, release assets,
-and GitHub release body.
+and GitHub release body. The 1.0 contract also requires the stable staging
+evidence and frozen API/limitation boundaries. A finding can declare a
+`must_fix_before` version; the release workflow permits prerelease validation
+but rejects the stable deadline and every later release until it is fixed.
 
 The runtime image is distroless, runs as UID/GID `65532`, and listens inside the
 container on gRPC 50051 and HTTP 8080. Bind published ports to Tailscale:
@@ -951,16 +1014,21 @@ docker run --detach --name schemahub \
   "$SCHEMAHUB_IMAGE"
 
 curl --fail --silent "http://$TAILSCALE_HOST:8080/readyz" | jq
+curl --fail --silent "http://$TAILSCALE_HOST:8080/" \
+  | grep '<title>SchemaHub Console</title>'
 ```
 
 No 0.9 tag/image has been published yet. The compiler boundary is reproducible
 from independent checkouts: `protobuf-rs` is pinned at
 `a7cb7c6d54d79bd6029278a36f1ad6f5aacdf8ac` and `flatbuffers-rs` at
-`7dc2c76c08f452b9a208230057c0cb6327e65f24`. See
+`59756d23993538b722f68675c35129c3cebb7aa1`. See
 [docs/release.md](docs/release.md) for the artifact matrix and candidate gate,
 [docs/codelab-deploy.md](docs/codelab-deploy.md) for a complete Tailscale-safe
-rehearsal, and [docs/compatibility-policy.md](docs/compatibility-policy.md) for
-the intended 1.0 freeze.
+rehearsal,
+[docs/codelab-stable-release-staging.md](docs/codelab-stable-release-staging.md)
+for the protected exact-digest stable promotion, and
+[docs/compatibility-policy.md](docs/compatibility-policy.md) for the intended
+1.0 freeze.
 
 ---
 
@@ -1001,18 +1069,50 @@ catch-all path semantics, drift tests, and boundary metadata; see
 
 ## Web console
 
-An experimental React operator console lives in `apps/schemahub-gui`. It is a
-Vite + React + TypeScript + Mantine app with a typed `SchemaHubClient` boundary.
+The React operator console lives in `apps/schemahub-gui`. It uses Vite, React,
+TypeScript, and Mantine behind a typed `SchemaHubClient` boundary.
 The production path uses the live HTTP/JSON BFF by default (same-origin unless
 `VITE_SCHEMAHUB_API_BASE` is set); demo data is explicit with
 `VITE_SCHEMAHUB_USE_MOCKS=true`.
+Production code views use a bundled accessible line-numbered viewer rather
+than fetching Monaco or another editor from a third-party CDN.
 
 Current screens include persisted project/repository navigation, schema detail,
-compare, history, ChangeRecord drafting/review/apply, conflict resolution,
-repository search, immutable artifact download, authenticated human/agent
-identity, and admin config.
+compare, history, direct executable source/deletion ChangeRecord authoring,
+draft editing, review/apply, conflict resolution, repository search, immutable
+artifact download, authenticated human/agent identity, and admin config.
+Project and repository navigation consumes bounded 50-item BFF pages and
+offers explicit continuation controls. The BFF binds each opaque token to its
+catalog kind, project scope, and name prefix; project summaries no longer
+trigger a repository scan merely to calculate a count.
+Repository dashboards likewise page schemas, branches, and tags with one
+repository/ref-bound continuation while retaining the immutable commit chosen
+by the first page. The selected schema page and repository-local name inventory
+load together in one tree traversal; declaration counts remain
+compiler-validated and dependency counts represent unique declared direct
+imports without traversing their targets. ChangeRecord lists page the durable
+repository/status index; both screens request additional rows explicitly.
+CI exercises both isolated mock edit authoring and a live Chromium governance
+journey backed by the real HTTP BFF, redb server, and release CLI: an agent
+authors source, a human reviews it, the agent applies it, and descriptor/audit
+identity is verified again after restart. The remote-CDP path asserts the
+identity control's exact accessible name and closes its connection on every
+outcome.
 
-Run it on the Tailscale interface:
+The release container enables the version-matched same-origin console by
+default. With its HTTP port mapped to the Tailscale interface, open
+`http://shuoze25-yuacx.tail8f3b66.ts.net:8080/`. From a native release archive,
+serve its bundled directory explicitly:
+
+```bash
+schemahub-server \
+  --listen "${TAILSCALE_IP}:50051" \
+  --http-listen "${TAILSCALE_IP}:8080" \
+  --gui-dir ./schemahub-gui \
+  --config schemahub.toml
+```
+
+For console development, run Vite separately on the Tailscale interface:
 
 ```bash
 cd apps/schemahub-gui
@@ -1025,6 +1125,13 @@ VITE_SCHEMAHUB_API_BASE="http://$TAILSCALE_HOST:8080" pnpm run dev -- --force
 ```
 
 Open `http://$TAILSCALE_HOST:5173/`.
+
+Successful Vite assets matching
+`/assets/<name>-<eight-character-content-hash>.<extension>` receive one-year
+immutable caching. Any successful unhashed asset is served with `no-cache`, so
+a custom bundle cannot pin mutable GUI code across an upgrade. Both HTML and
+assets receive the console's CSP, framing denial, browser-feature restrictions,
+MIME-sniffing protection, and same-origin referrer policy.
 
 See `docs/gui.md` for the GUI architecture, BFF route map, Tailscale setup, and
 troubleshooting. See `docs/ui-design.md` for the product and component design.
@@ -1039,13 +1146,13 @@ troubleshooting. See `docs/ui-design.md` for the product and component design.
 | OpenAPI external dependency scope | Supported schema, parameter, response, and request-body component `$ref` values using logical SchemaHub paths participate in dependency discovery, immutable closure serving, `FollowType`, and deletion guards. Explicit `./`/`../` paths resolve within the repository. Network URLs, arbitrary fragments, repository escapes, `$ref` siblings, and standalone reference shapes that the selected AST cannot preserve are rejected; other OpenAPI component categories are outside the 1.0 dependency guarantee. Source refs are live/unpinned. |
 | `CodegenService.PreviewCodegen` | Implemented for Protobuf and FlatBuffers. For OpenAPI it returns `UNIMPLEMENTED` (OpenAPI client/server codegen is out of scope). |
 | Cross-repo `Search` | Not supported. `SearchRequest.project` + `repo` are required; cross-repo search returns `INVALID_ARGUMENT`. |
-| Durable resource contract | D3 is implemented: project/repository persistence, ETags, archive, policy, JSON migration, immutable tag names, repository-owned causal bases, and bounded restart-safe direct-write receipts. |
-| ChangeRecord workflow | Executable draft edits, compiler validation, Ready/review, policy-gated durable Apply, JJ correlation/recovery, idempotent receipts, and CLI JSON are implemented. Redb process-restart recovery and 32-writer lease/receipt convergence are covered by release tests. |
+| Durable resource contract | D3 is implemented: project/repository persistence, ETags, archive, policy, JSON migration, atomically maintained bounded catalogs, immutable tag names, repository-owned causal bases, and bounded restart-safe direct-write receipts. |
+| ChangeRecord workflow | Executable draft edits, compiler validation, Ready/review, policy-gated durable Apply, JJ correlation/recovery, idempotent receipts, and CLI JSON are implemented. The GUI can create or ETag-update note-only drafts with complete source replacements and schema deletions; compiler-specific granular mutation builders remain a CLI/gRPC workflow. Redb process-restart recovery and 32-writer lease/receipt convergence are covered by release tests. |
 | Cross-repo dependency coordination | `ListDependents` and `schema dependents --json` provide a bounded, authorization-filtered direct-edge scan with per-repository immutable snapshots. There is no global snapshot, transitive reverse traversal, automatic rename propagation, or cross-repository transaction; callers issue explicit downstream ChangeRecords and should prefer immutable pins for durable data. |
 | Atomic publication policy | Delivered. A backend repository guard spans final merge, protected-conflict and live-import validation, JJ commit, and operation-head publication; PostgreSQL coordinates it across instances. |
 | Transaction deadline | Delivered. Requests are bounded to 100 operations/20 schemas and `ApplyTransaction` has an independent 30-second server timer plus a cooperative Core deadline checked again at the atomic publication boundary. Clients may use a shorter deadline. |
 | Cross-release artifact bytes | Delivered through versioned first-materialization storage. The first successful response is persisted atomically and reused byte-for-byte after restart or renderer upgrade; corrupt records fail closed. Servers that predate this contract are excluded from rolling upgrade/downgrade windows. |
 | Production identity | External JWT/JWKS verification with strict claims, key rotation, delegated-agent audit metadata, and stale-key readiness is implemented. Interactive browser login and per-token revocation remain the external identity provider's responsibility. |
 | Browser HTTP boundary | Same-origin by default. Cross-origin bearer-token access requires an exact `[http].allowed_origins` entry; request bodies are bounded by `[http].max_request_body_bytes`. Cookies/credentialed CORS are not enabled. |
-| Public API versus BFF | `schemahub.v1` gRPC/protobuf is the public 1.0 API. Unversioned `/api/*` is a GUI-only, same-release BFF excluded from the 1.x API compatibility promise and labeled in responses/OpenAPI. A future public REST API requires a separate versioned contract. |
-| Release publication | CI, archives, the distroless image, checksums, provenance, and auditable SBOMs are prepared and locally rehearsed. A tag cannot publish before the full CI matrix passes or with mutable/missing compiler provenance. No RC is published; clean compiler refs and staged candidate acceptance remain. |
+| Public API versus BFF | `schemahub.v1` gRPC/protobuf is the public 1.0 API. Unversioned `/api/*` is a GUI-only, same-release BFF excluded from the 1.x API compatibility promise and labeled in responses/OpenAPI. Project/repository navigators, repository dashboards, and ChangeRecord lists all use bounded continuations; dashboard schema pages remain pinned to their first immutable commit. These DTOs are still same-release projections, not public REST list contracts. A future public REST API requires a separate versioned contract. |
+| Release publication | CI, archives, the distroless image, checksums, provenance, dependency audits, and auditable SBOMs are prepared and locally rehearsed. A tag cannot publish before the full CI matrix passes or with mutable/missing compiler provenance. Stable publication additionally requires a protected-environment attestation that matches the exact source, image digest, and retained GA evidence. The live `PROTOBUF_RS_REF` and `FLATBUFFERS_RS_REF` repository variables now match the immutable compiler coordinates in `Cargo.lock`. No RC is published; publication of the current SchemaHub tree, protected staging/provider configuration, clean candidate evidence, and explicit tag authorization remain. |

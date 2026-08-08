@@ -1,8 +1,8 @@
-mod v1 {
+pub mod v1 {
     include!(env!("SCHEMAHUB_FBS_V1_RS"));
 }
 
-mod v2 {
+pub mod v2 {
     include!(env!("SCHEMAHUB_FBS_V2_RS"));
 }
 
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut old_builder = flatbuffers::FlatBufferBuilder::new();
     let old_id = old_builder.create_string("event-1001");
     let legacy_session = old_builder.create_string("legacy-session-7");
-    let old_event = v1::telemetry::createMobileEvent(
+    let old_event = v1::telemetry::MobileEvent::create(
         &mut old_builder,
         &v1::telemetry::MobileEventArgs {
             event_id: Some(old_id),
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut new_builder = flatbuffers::FlatBufferBuilder::new();
     let new_id = new_builder.create_string("event-1002");
-    let new_event = v2::telemetry::createMobileEvent(
+    let new_event = v2::telemetry::MobileEvent::create(
         &mut new_builder,
         &v2::telemetry::MobileEventArgs {
             event_id: Some(new_id),

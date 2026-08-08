@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 
 import { chromium } from "playwright-core";
+import { resolveRemoteCdpEndpoint } from "../../browser-cdp.mjs";
 
 const demoUrl = process.env.SCHEMAHUB_DEMO_URL;
 const localChromium = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
+const remoteCdp =
+  process.env.PLAYWRIGHT_CDP_ENDPOINT ??
+  "http://ubuntu-gui-browser-arm2.tail8f3b66.ts.net:9223";
 
 if (!demoUrl) {
   throw new Error(
@@ -16,7 +20,7 @@ const browser = localChromium
       executablePath: localChromium,
       headless: true,
     })
-  : await chromium.connectOverCDP("http://10.0.0.149:9000");
+  : await chromium.connectOverCDP(await resolveRemoteCdpEndpoint(remoteCdp));
 const context = browser.contexts()[0] ?? (await browser.newContext());
 const page = await context.newPage();
 const consoleErrors = [];
@@ -48,12 +52,12 @@ try {
   );
   assert.equal(
     await page.locator('[data-testid="scenario-portfolio"] article').count(),
-    5,
+    7,
   );
-  await page.getByText("5 scenarios passing", { exact: true }).waitFor();
+  await page.getByText("7 scenarios passing", { exact: true }).waitFor();
   assert.equal(
     await page.getByRole("link", { name: "Open runnable codelab" }).count(),
-    4,
+    7,
   );
   await page.getByRole("button", { name: "Run this step" }).click();
   await page.getByText("schemahub.change.draft", { exact: true }).waitFor();

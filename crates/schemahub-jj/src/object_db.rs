@@ -92,6 +92,51 @@ pub enum ObjectDbError {
 
 pub type ObjectDbResult<T> = Result<T, ObjectDbError>;
 
+/// One preconditioned mutation in an atomic mutable-record transaction.
+///
+/// Every mutation in a [`ObjectDb::transact_records`] call must target a
+/// distinct `(collection, key)`. The transaction commits only when every
+/// precondition matches; otherwise it returns `false` without writing
+/// anything. This is the storage seam used to couple a control-plane resource
+/// mutation to its immutable audit event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordMutation<'a> {
+    Create {
+        collection: &'a str,
+        key: &'a str,
+        value: &'a [u8],
+    },
+    CompareAndSwap {
+        collection: &'a str,
+        key: &'a str,
+        expected: &'a [u8],
+        replacement: &'a [u8],
+    },
+    CompareAndDelete {
+        collection: &'a str,
+        key: &'a str,
+        expected: &'a [u8],
+    },
+}
+
+impl RecordMutation<'_> {
+    pub fn collection(&self) -> &str {
+        match self {
+            Self::Create { collection, .. }
+            | Self::CompareAndSwap { collection, .. }
+            | Self::CompareAndDelete { collection, .. } => collection,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Create { key, .. }
+            | Self::CompareAndSwap { key, .. }
+            | Self::CompareAndDelete { key, .. } => key,
+        }
+    }
+}
+
 /// Lifetime token for a backend maintenance lock. Normal mutations hold a
 /// shared token; global GC holds an exclusive token across mark and sweep.
 pub trait ObjectDbLockGuard: std::fmt::Debug {}
@@ -215,6 +260,20 @@ pub trait ObjectDb: std::fmt::Debug + Send + Sync + 'static {
     /// List all `(key, value)` records in a collection. Ordering is unspecified.
     fn list_records(&self, collection: &str) -> ObjectDbResult<Vec<(String, Vec<u8>)>>;
 
+    /// List at most `limit` records in stable key order, starting strictly
+    /// after `start_after` when supplied.
+    ///
+    /// Durable backends must implement this as a bounded range query rather
+    /// than loading the complete collection. Immutable audit and ChangeRecord
+    /// indexes use this seam so every indexed public page has bounded storage
+    /// and memory cost.
+    fn list_records_page(
+        &self,
+        collection: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> ObjectDbResult<Vec<(String, Vec<u8>)>>;
+
     /// Atomically replace a resource only when its current bytes equal
     /// `expected`. Returns `true` on replacement and `false` on mismatch or
     /// absence.
@@ -234,4 +293,170 @@ pub trait ObjectDb: std::fmt::Debug + Send + Sync + 'static {
         key: &str,
         expected: &[u8],
     ) -> ObjectDbResult<bool>;
+
+    /// Apply a set of distinct-key record mutations in one database
+    /// transaction. Returns `false` and writes nothing when any create target
+    /// exists, any compare target is absent or stale, or a target appears more
+    /// than once in `mutations`.
+    fn transact_records(&self, mutations: &[RecordMutation<'_>]) -> ObjectDbResult<bool>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MemoryObjectDb, RedbObjectDb};
+
+    fn assert_failed_record_transaction_writes_nothing(db: &dyn ObjectDb) {
+        // Arrange
+        db.create_record("resources", "acme", b"v1").unwrap();
+        let stale = [
+            RecordMutation::CompareAndSwap {
+                collection: "resources",
+                key: "acme",
+                expected: b"stale",
+                replacement: b"v2",
+            },
+            RecordMutation::Create {
+                collection: "audit",
+                key: "event-a",
+                value: b"created",
+            },
+        ];
+
+        // Act
+        let rejected = db.transact_records(&stale).unwrap();
+
+        // Assert
+        assert!(!rejected);
+        assert_eq!(
+            db.get_record("resources", "acme").unwrap(),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(db.get_record("audit", "event-a").unwrap(), None);
+    }
+
+    fn assert_successful_record_transaction_writes_everything(db: &dyn ObjectDb) {
+        // Arrange
+        db.create_record("resources", "acme", b"v1").unwrap();
+        let valid = [
+            RecordMutation::CompareAndSwap {
+                collection: "resources",
+                key: "acme",
+                expected: b"v1",
+                replacement: b"v2",
+            },
+            RecordMutation::Create {
+                collection: "audit",
+                key: "event-a",
+                value: b"created",
+            },
+        ];
+
+        // Act
+        let committed = db.transact_records(&valid).unwrap();
+
+        // Assert
+        assert!(committed);
+        assert_eq!(
+            db.get_record("resources", "acme").unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(
+            db.get_record("audit", "event-a").unwrap(),
+            Some(b"created".to_vec())
+        );
+    }
+
+    fn assert_record_pages_are_bounded_stable_and_collection_scoped(db: &dyn ObjectDb) {
+        // Arrange
+        db.create_record("audit", "c", b"third").unwrap();
+        db.create_record("audit", "a", b"first").unwrap();
+        db.create_record("audit", "b", b"second").unwrap();
+        db.create_record("other", "aa", b"outside").unwrap();
+
+        // Act
+        let first = db.list_records_page("audit", None, 2).unwrap();
+        let second = db.list_records_page("audit", Some("b"), 2).unwrap();
+        let empty = db.list_records_page("audit", None, 0).unwrap();
+
+        // Assert
+        assert_eq!(
+            first,
+            vec![
+                ("a".to_string(), b"first".to_vec()),
+                ("b".to_string(), b"second".to_vec()),
+            ]
+        );
+        assert_eq!(second, vec![("c".to_string(), b"third".to_vec())]);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn memory_record_transaction_rejection_writes_nothing() {
+        // Arrange
+        let db = MemoryObjectDb::new();
+
+        // Act
+        assert_failed_record_transaction_writes_nothing(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
+
+    #[test]
+    fn memory_record_transaction_success_writes_everything() {
+        // Arrange
+        let db = MemoryObjectDb::new();
+
+        // Act
+        assert_successful_record_transaction_writes_everything(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
+
+    #[test]
+    fn redb_record_transaction_rejection_writes_nothing() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let db = RedbObjectDb::open(directory.path().join("objects.redb")).unwrap();
+
+        // Act
+        assert_failed_record_transaction_writes_nothing(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
+
+    #[test]
+    fn redb_record_transaction_success_writes_everything() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let db = RedbObjectDb::open(directory.path().join("objects.redb")).unwrap();
+
+        // Act
+        assert_successful_record_transaction_writes_everything(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
+
+    #[test]
+    fn memory_record_pages_are_bounded_stable_and_collection_scoped() {
+        // Arrange
+        let db = MemoryObjectDb::new();
+
+        // Act
+        assert_record_pages_are_bounded_stable_and_collection_scoped(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
+
+    #[test]
+    fn redb_record_pages_are_bounded_stable_and_collection_scoped() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let db = RedbObjectDb::open(directory.path().join("objects.redb")).unwrap();
+
+        // Act
+        assert_record_pages_are_bounded_stable_and_collection_scoped(&db);
+
+        // Assert is performed by the shared backend contract.
+    }
 }

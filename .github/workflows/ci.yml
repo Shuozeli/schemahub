@@ -80,6 +80,30 @@ jobs:
               sha256:0000000000000000000000000000000000000000000000000000000000000000 \
               "$output_dir/$version.md" >/dev/null
           done
+      - name: Test versioned release-note failure contracts
+        run: scripts/test-render-release-notes.sh
+      - name: Test release finding deadlines
+        run: scripts/test-validate-release-findings.sh
+      - name: Test the fail-closed GA readiness report contract
+        run: scripts/test-render-ga-readiness-report.sh
+      - name: Test the stable-release staging attestation contract
+        run: scripts/test-validate-staging-attestation.sh
+      - name: Test immutable container tag promotion
+        run: scripts/test-promote-container-tag.sh
+      - name: Test exact release assembly verification
+        run: scripts/test-verify-release-assembly.sh
+      - name: Test the release package GUI contract
+        run: scripts/test-package-release.sh
+      - name: Test dependency audit policy
+        run: scripts/test-dependency-audit-policy.sh
+      - name: Test exact Rust dependency warning policy
+        run: scripts/test-audit-rust-dependencies.sh
+      - name: Test pinned auditor installation failure contracts
+        run: scripts/test-install-cargo-audit.sh
+      - name: Test cargo-auditable supply-chain failure contracts
+        run: scripts/test-verify-cargo-auditable.sh
+      - name: Test container and workflow supply-chain policy
+        run: scripts/test-container-supply-chain-policy.sh
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
@@ -90,6 +114,18 @@ jobs:
         with:
           workspaces: shuozeli/codegen/schemahub -> target
           shared-key: quality
+      - name: Install and self-audit the pinned RustSec auditor
+        env:
+          SCHEMAHUB_CARGO_AUDIT_INSTALL_ROOT: ${{ runner.temp }}/schemahub-cargo-audit
+        run: scripts/install-cargo-audit.sh
+      - name: Reject vulnerable or unreviewed locked Rust dependencies
+        env:
+          SCHEMAHUB_CARGO_AUDIT_BIN: ${{ runner.temp }}/schemahub-cargo-audit/bin/cargo-audit
+        run: scripts/audit-rust-dependencies.sh
+      - name: Reject an unsafe release-binary instrumentation tool
+        env:
+          SCHEMAHUB_CARGO_AUDIT_BIN: ${{ runner.temp }}/schemahub-cargo-audit/bin/cargo-audit
+        run: scripts/verify-cargo-auditable.sh
       - name: Validate the immutable compiler dependency layout
         run: cargo metadata --locked --format-version=1 >/dev/null
       - name: Check formatting
@@ -124,7 +160,33 @@ jobs:
         env:
           SCHEMAHUB_CODELAB_BIND_IP: 0.0.0.0
           SCHEMAHUB_CODELAB_CLIENT_HOST: 127.0.0.1
+          SCHEMAHUB_CODELAB_EVIDENCE_ROOT: ${{ runner.temp }}/schemahub-real-world
+          SCHEMAHUB_GA_REQUIRE_CLEAN: "1"
+          SCHEMAHUB_GA_RUN_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+          SCHEMAHUB_GA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCHEMAHUB_GA_SOURCE_REVISION: ${{ github.sha }}
         run: ./codelabs/real-world/run-all.sh
+      - name: Package normalized GA readiness evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="$RUNNER_TEMP/schemahub-real-world/ga-readiness"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf "$RUNNER_TEMP/schemahub-ga-readiness.tar.gz" \
+            -C "$report_dir" \
+            .
+      - name: Retain GA readiness evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: schemahub-ga-readiness
+          path: ${{ runner.temp }}/schemahub-ga-readiness.tar.gz
+          if-no-files-found: error
+          retention-days: 30
       - name: Validate generated HTTP OpenAPI output
         shell: bash
         run: |
@@ -143,7 +205,7 @@ jobs:
                       or .key == "delete" or .key == "options"
                       or .key == "head" or .key == "patch" or .key == "trace"
                     )
-                ] | length == 23)
+                ] | length == 24)
                 and ([
                   .paths
                   | to_entries[]
@@ -175,8 +237,8 @@ jobs:
                     )
                   | .value.operationId
                 ] as $ids
-                  | ($ids | length) == 23
-                    and ($ids | unique | length) == 23)
+                  | ($ids | length) == 24
+                    and ($ids | unique | length) == 24)
               ' >/dev/null
 
   postgres-tests:
@@ -185,7 +247,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:17-bookworm
+        image: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
         env:
           POSTGRES_DB: schemahub_test
           POSTGRES_PASSWORD: schemahub
@@ -225,9 +287,9 @@ jobs:
           -- --test-threads=4
 
   gui:
-    name: GUI typecheck and production build
+    name: GUI build and mock/live browser acceptance
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: apps/schemahub-gui
@@ -242,13 +304,77 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: pnpm
           cache-dependency-path: apps/schemahub-gui/pnpm-lock.yaml
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: . -> target
+          shared-key: gui-live
       - name: Install locked GUI dependencies
         run: pnpm install --frozen-lockfile
+      - name: Audit GUI build and runtime dependencies
+        run: pnpm audit --audit-level low
       - name: Build the production GUI
         run: pnpm run build
+      - name: Enforce the production GUI entry bundle budget
+        run: pnpm run test:bundle
+      - name: Test remote CDP endpoint normalization
+        run: pnpm run test:cdp
+      - name: Exercise mock executable edit authoring in Chromium
+        shell: bash
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: /usr/bin/google-chrome
+          SCHEMAHUB_GUI_URL: http://127.0.0.1:5173
+          VITE_SCHEMAHUB_USE_MOCKS: "true"
+        run: |
+          set -euo pipefail
+          pnpm exec vite --host 0.0.0.0 >"$RUNNER_TEMP/schemahub-gui.log" 2>&1 &
+          gui_pid=$!
+          cleanup() {
+            kill "$gui_pid" >/dev/null 2>&1 || true
+            wait "$gui_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error "$SCHEMAHUB_GUI_URL" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error "$SCHEMAHUB_GUI_URL" >/dev/null
+          pnpm run test:browser
+      - name: Build the release server and CLI for live browser acceptance
+        working-directory: .
+        run: >-
+          cargo build --release --locked
+          -p schemahub-server
+          -p schemahub-cli
+      - name: Exercise live agent, human review, Apply, and restart serving
+        working-directory: .
+        env:
+          PLAYWRIGHT_CHROMIUM_EXECUTABLE: /usr/bin/google-chrome
+          SCHEMAHUB_CODELAB_BIND_IP: 0.0.0.0
+          SCHEMAHUB_CODELAB_CLIENT_HOST: 127.0.0.1
+          SCHEMAHUB_CODELAB_EVIDENCE_DIR: ${{ runner.temp }}/schemahub-gui-live
+          SCHEMAHUB_CODELAB_SKIP_BUILD: "1"
+          SCHEMAHUB_GUI_BIND_IP: 0.0.0.0
+          SCHEMAHUB_GUI_URL: http://127.0.0.1:5173
+        run: ./apps/schemahub-gui/scripts/run-live-browser-smoke.sh
+      - name: Retain sanitized live GUI acceptance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-schemahub-gui-live-acceptance
+          path: |
+            ${{ runner.temp }}/schemahub-gui-live/result.json
+            ${{ runner.temp }}/schemahub-gui-live/browser.png
+          if-no-files-found: error
+          retention-days: 30
 
   workflow-demo:
     name: Workflow demo typecheck and Sites build
@@ -268,11 +394,13 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: pnpm
           cache-dependency-path: apps/schemahub-demo/pnpm-lock.yaml
       - name: Install locked demo dependencies
         run: pnpm install --frozen-lockfile
+      - name: Audit demo build and runtime dependencies
+        run: pnpm audit --audit-level low
       - name: Typecheck the workflow demo
         run: pnpm run typecheck
       - name: Build the static Sites bundle
@@ -308,42 +436,8 @@ jobs:
             BUILD_DATE=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Verify probes, capabilities, and graceful shutdown
+      - name: Verify bundled GUI, named-volume persistence, and graceful shutdown
         shell: bash
-        run: |
-          set -euo pipefail
-          container="schemahub-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          network="schemahub-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() {
-            docker rm -f -v "$container" >/dev/null 2>&1 || true
-            docker network rm "$network" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          docker network create "$network" >/dev/null
-          docker run --detach --name "$container" --network "$network" schemahub:ci >/dev/null
-
-          for _ in $(seq 1 30); do
-            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
-            if [[ "$status" == healthy ]]; then
-              break
-            fi
-            if [[ "$status" == unhealthy ]]; then
-              docker logs "$container" >&2
-              exit 1
-            fi
-            sleep 2
-          done
-
-          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy
-          docker run --rm --network "$network" curlimages/curl:8.14.1 \
-            --fail --silent "http://$container:8080/readyz" >/dev/null
-          docker run --rm --network "$network" curlimages/curl:8.14.1 \
-            --fail --silent "http://$container:8080/metrics" \
-            | grep -q 'schemahub_build_info'
-          docker exec "$container" schemahub \
-            --server http://127.0.0.1:50051 capabilities --json \
-            | grep -q '"matrix_version"'
-
-          docker stop --timeout 35 "$container" >/dev/null
-          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+        env:
+          SCHEMAHUB_CONTAINER_IMAGE: schemahub:ci
+        run: scripts/test-runtime-container.sh

@@ -40,6 +40,9 @@ pub enum TagAction {
         repo: String,
         #[arg(long, default_value = "")]
         prefix: String,
+        /// Number of tags fetched per RPC.
+        #[arg(long, default_value_t = 50)]
+        page_size: i32,
     },
 }
 
@@ -110,27 +113,41 @@ pub async fn run(args: TagArgs, channel: Channel, token: &str) -> anyhow::Result
                 .context("DeleteTag RPC")?;
             println!("Deleted tag '{name}'");
         }
-        TagAction::List { repo, prefix } => {
+        TagAction::List {
+            repo,
+            prefix,
+            page_size,
+        } => {
             let (project, repo_name) = parse_repo(&repo)?;
             let mut client = RefServiceClient::new(channel);
-            let resp = client
-                .list_tags(bearer(
-                    ListTagsRequest {
-                        project,
-                        repo: repo_name,
-                        name_prefix: prefix,
-                    },
-                    token,
-                )?)
-                .await
-                .context("ListTags RPC")?;
-
-            let tags = resp.into_inner().tags;
-            if tags.is_empty() {
-                println!("(no tags)");
+            let mut page_token = String::new();
+            let mut found = false;
+            loop {
+                let response = client
+                    .list_tags(bearer(
+                        ListTagsRequest {
+                            project: project.clone(),
+                            repo: repo_name.clone(),
+                            name_prefix: prefix.clone(),
+                            page_size,
+                            page_token,
+                        },
+                        token,
+                    )?)
+                    .await
+                    .context("ListTags RPC")?
+                    .into_inner();
+                for tag in response.tags {
+                    found = true;
+                    println!("  {} → {}", tag.name, tag.commit_hash);
+                }
+                if response.next_page_token.is_empty() {
+                    break;
+                }
+                page_token = response.next_page_token;
             }
-            for tag in tags {
-                println!("  {} → {}", tag.name, tag.commit_hash);
+            if !found {
+                println!("(no tags)");
             }
         }
     }

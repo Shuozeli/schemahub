@@ -1,4 +1,4 @@
-mod schema {
+pub mod schema {
     include!(env!("SCHEMAHUB_PIPELINE_FBS_RS"));
 }
 
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut builder = flatbuffers::FlatBufferBuilder::new();
             let event_id = builder.create_string("pipeline-event-1");
             let order_id = builder.create_string("pipeline-order-1");
-            let event = schema::pipeline::createPipelineEvent(
+            let event = schema::pipeline::PipelineEvent::create(
                 &mut builder,
                 &schema::pipeline::PipelineEventArgs {
                     event_id: Some(event_id),

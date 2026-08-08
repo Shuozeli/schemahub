@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use jsonwebtoken::{Algorithm, AlgorithmFamily};
@@ -98,6 +99,10 @@ pub struct HttpConfig {
     pub allowed_origins: Vec<String>,
     #[serde(default = "default_http_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// Optional production Vite bundle served from the same HTTP listener.
+    /// The directory must contain `index.html` and an `assets` directory.
+    #[serde(default)]
+    pub gui_dir: Option<PathBuf>,
 }
 
 impl Default for HttpConfig {
@@ -105,6 +110,7 @@ impl Default for HttpConfig {
         Self {
             allowed_origins: Vec::new(),
             max_request_body_bytes: default_http_max_request_body_bytes(),
+            gui_dir: None,
         }
     }
 }
@@ -147,8 +153,77 @@ impl HttpConfig {
                 anyhow::bail!("[http].allowed_origins contains duplicate origin {configured:?}");
             }
         }
+        if let Some(gui_dir) = &self.gui_dir {
+            validate_gui_directory(gui_dir)?;
+        }
         Ok(())
     }
+}
+
+pub(crate) fn validate_gui_directory(path: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("[http].gui_dir {path:?} is not readable: {error}"))?;
+    if !canonical.is_dir() {
+        anyhow::bail!("[http].gui_dir {path:?} must be a directory");
+    }
+
+    let index = canonical.join("index.html");
+    if !index.exists() {
+        anyhow::bail!("[http].gui_dir {path:?} must contain a regular index.html file");
+    }
+    let index_metadata = std::fs::symlink_metadata(&index).map_err(|error| {
+        anyhow::anyhow!("[http].gui_dir index.html cannot be inspected safely: {error}")
+    })?;
+    if !index_metadata.file_type().is_file() {
+        anyhow::bail!("[http].gui_dir {path:?} must contain a regular index.html file");
+    }
+
+    let assets = canonical.join("assets");
+    if !assets.exists() {
+        anyhow::bail!("[http].gui_dir {path:?} must contain an assets directory");
+    }
+    let assets_metadata = std::fs::symlink_metadata(&assets).map_err(|error| {
+        anyhow::anyhow!("[http].gui_dir assets directory cannot be inspected safely: {error}")
+    })?;
+    if !assets_metadata.file_type().is_dir() {
+        anyhow::bail!("[http].gui_dir {path:?} must contain an assets directory");
+    }
+    validate_gui_tree(&canonical)?;
+    Ok(canonical)
+}
+
+fn validate_gui_tree(root: &Path) -> anyhow::Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory).map_err(|error| {
+            anyhow::anyhow!("[http].gui_dir entry {directory:?} is not readable: {error}")
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                anyhow::anyhow!("[http].gui_dir entry in {directory:?} is not readable: {error}")
+            })?;
+            let entry_path = entry.path();
+            let metadata = std::fs::symlink_metadata(&entry_path).map_err(|error| {
+                anyhow::anyhow!(
+                    "[http].gui_dir entry {entry_path:?} cannot be inspected safely: {error}"
+                )
+            })?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                anyhow::bail!("[http].gui_dir must not contain symbolic links: {entry_path:?}");
+            }
+            if file_type.is_dir() {
+                pending.push(entry_path);
+            } else if !file_type.is_file() {
+                anyhow::bail!(
+                    "[http].gui_dir must contain only regular files and directories: \
+                     {entry_path:?}"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -684,6 +759,7 @@ mod tests {
         assert_eq!(config.storage.backend, "redb");
         assert!(config.http.allowed_origins.is_empty());
         assert_eq!(config.http.max_request_body_bytes, 8 * 1_024 * 1_024);
+        assert!(config.http.gui_dir.is_none());
     }
 
     #[test]
@@ -778,6 +854,115 @@ max_request_body_bytes = 16777216
             .expect_err("oversized body limit must fail")
             .to_string()
             .contains("between 1024 and 67108864"));
+    }
+
+    #[test]
+    fn http_policy_accepts_a_complete_gui_bundle_directory() {
+        // Arrange
+        let temp = tempfile::tempdir().expect("GUI tempdir");
+        std::fs::write(temp.path().join("index.html"), "<!doctype html>").expect("write GUI index");
+        std::fs::create_dir(temp.path().join("assets")).expect("create GUI assets");
+        let config = HttpConfig {
+            gui_dir: Some(temp.path().to_path_buf()),
+            ..HttpConfig::default()
+        };
+
+        // Act
+        let result = config.validate();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn http_policy_rejects_a_gui_directory_without_an_index() {
+        // Arrange
+        let temp = tempfile::tempdir().expect("GUI tempdir");
+        std::fs::create_dir(temp.path().join("assets")).expect("create GUI assets");
+        let config = HttpConfig {
+            gui_dir: Some(temp.path().to_path_buf()),
+            ..HttpConfig::default()
+        };
+
+        // Act
+        let error = config
+            .validate()
+            .expect_err("GUI directory without index must fail");
+
+        // Assert
+        assert!(error.to_string().contains("regular index.html"));
+    }
+
+    #[test]
+    fn http_policy_rejects_a_gui_directory_without_assets() {
+        // Arrange
+        let temp = tempfile::tempdir().expect("GUI tempdir");
+        std::fs::write(temp.path().join("index.html"), "<!doctype html>").expect("write GUI index");
+        let config = HttpConfig {
+            gui_dir: Some(temp.path().to_path_buf()),
+            ..HttpConfig::default()
+        };
+
+        // Act
+        let error = config
+            .validate()
+            .expect_err("GUI directory without assets must fail");
+
+        // Assert
+        assert!(error.to_string().contains("assets directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_policy_rejects_a_symlinked_gui_assets_directory() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange
+        let gui = tempfile::tempdir().expect("GUI tempdir");
+        let external = tempfile::tempdir().expect("external tempdir");
+        std::fs::write(gui.path().join("index.html"), "<!doctype html>").expect("write GUI index");
+        symlink(external.path(), gui.path().join("assets")).expect("link GUI assets");
+        let config = HttpConfig {
+            gui_dir: Some(gui.path().to_path_buf()),
+            ..HttpConfig::default()
+        };
+
+        // Act
+        let error = config
+            .validate()
+            .expect_err("symlinked GUI assets directory must fail");
+
+        // Assert
+        assert!(error.to_string().contains("assets directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_policy_rejects_a_symlink_inside_the_gui_tree() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange
+        let gui = tempfile::tempdir().expect("GUI tempdir");
+        let external = tempfile::NamedTempFile::new().expect("external file");
+        std::fs::write(gui.path().join("index.html"), "<!doctype html>").expect("write GUI index");
+        std::fs::create_dir(gui.path().join("assets")).expect("create GUI assets");
+        symlink(
+            external.path(),
+            gui.path().join("assets").join("outside.js"),
+        )
+        .expect("link external asset");
+        let config = HttpConfig {
+            gui_dir: Some(gui.path().to_path_buf()),
+            ..HttpConfig::default()
+        };
+
+        // Act
+        let error = config.validate().expect_err("GUI tree symlink must fail");
+
+        // Assert
+        assert!(error
+            .to_string()
+            .contains("must not contain symbolic links"));
     }
 
     #[test]

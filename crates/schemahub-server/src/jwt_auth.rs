@@ -577,6 +577,26 @@ mod tests {
         0xd5, 0x82, 0x34,
     ];
     const TEST_PUBLIC_KEY_X: &str = "2-Jj2UvNCvQiUPNYRgSi0cJSPiJI6Rs6D0UTeEpQVj8";
+    const TEST_RSA_PUBLIC_KEY_N: &str = concat!(
+        "ulO9t-Y5o42oUVP9u5H0MniNtylCphWjifCFb1wogUVSgBuEbI2qc23hyxSVMuFu",
+        "fCGolZBMJfjztAfKG5PBpA0TkPGAO4wNzkuBaGZvHILIODUv-vYSv1a2jAB8Wt_K",
+        "Uu9m4YfMweKurxJG9TQXp8vQm645BI8xlqWSXV1Xo3nuqcERo5QPt_h2IP0qrFLw",
+        "0hSA0Pv-zUlL4P4KbQEKp9VdR6b0KNVY8cKuxXNU8TJz8GsULtYY7Rp4d709xvMg",
+        "knclwwBkMfVl-K_E6zqytjcsdU3yKOLrLEPt1_eBnUiVeFG3M0AasKwDu8Vs6uUL",
+        "vE0opLj8wcaiJgIagS1vHQ",
+    );
+    const TEST_RS256_TOKEN: &str = concat!(
+        "eyJhbGciOiJSUzI1NiIsImtpZCI6InJzYS1rZXkiLCJ0eXAiOiJhdCtqd3QifQ.",
+        "eyJpc3MiOiJodHRwczovL2lkZW50aXR5LmV4YW1wbGUudGVzdCIsInN1YiI6InJz",
+        "YS11c2VyIiwiYXVkIjoic2NoZW1haHViIiwiZXhwIjoyMDAwLCJuYmYiOjkwMCwiaW",
+        "F0Ijo5MDAsIm5hbWUiOiJSU0EgVXNlciJ9.",
+        "Y8f8LnTcJgGLTrQee6vRu4HeSZBQijnnWja2PgY2ZlEILOyVQjJUmMWR6wg30093y",
+        "eEqh05D0oSpDdo4DNmpxiuDoIAYXd1QgNdK3O99hPTGC7eIpz12yVRTgzPOwMeHa-",
+        "hgb1E8Id1Bk-P4c4v3ituP9s-HgeecFqKO3qn3-lAWtd6nNAF1ZOPed9GyQtNYAh7",
+        "ICr-sxSiD24UXGqYLOjFo1rPIQgpFktpANxbn2J0b1CT5gph-2t3QKgg9J5_Xmng",
+        "vPrv0g1LA66sS6dprV0L2GH_9TUc0cm5Lf71rqH_PuRRpq25Gl7wJoUY9kycGVJKH",
+        "3EkoKTjcn7akSc4EUA",
+    );
 
     #[derive(Debug)]
     struct FakeClock {
@@ -634,6 +654,21 @@ mod tests {
         .expect("valid test JWKS")
     }
 
+    fn rsa_jwks() -> JwkSet {
+        serde_json::from_value(json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "key_ops": ["verify"],
+                "n": TEST_RSA_PUBLIC_KEY_N,
+                "e": "AQAB",
+                "kid": "rsa-key",
+                "alg": "RS256"
+            }]
+        }))
+        .expect("valid RSA test JWKS")
+    }
+
     fn claims(exp: u64) -> JwtClaims {
         JwtClaims {
             iss: "https://identity.example.test".to_string(),
@@ -673,6 +708,25 @@ mod tests {
         // Assert
         assert_eq!(identity.id(), Some("oidc:alice"));
         assert_eq!(identity.display(), Some("Alice"));
+        assert_eq!(identity.kind(), IdentityKind::Human);
+    }
+
+    #[test]
+    fn rs256_jwk_verification_works_with_the_aws_lc_backend() {
+        // Arrange
+        let clock = Arc::new(FakeClock::new(1_000));
+        let mut rsa_config = config();
+        rsa_config.algorithms = vec!["RS256".to_string()];
+        let authn = JwtAuthn::new(&rsa_config, &rsa_jwks(), clock).expect("build RSA JWT verifier");
+
+        // Act
+        let identity = authn
+            .identify(Some(TEST_RS256_TOKEN))
+            .expect("valid RS256 identity");
+
+        // Assert
+        assert_eq!(identity.id(), Some("oidc:rsa-user"));
+        assert_eq!(identity.display(), Some("RSA User"));
         assert_eq!(identity.kind(), IdentityKind::Human);
     }
 

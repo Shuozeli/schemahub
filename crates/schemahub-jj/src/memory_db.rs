@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::object_db::{
     ObjectDb, ObjectDbError, ObjectDbLockGuard, ObjectDbResult, ObjectId, ObjectKind, OpId,
+    RecordMutation,
 };
 
 fn hash(kind: ObjectKind, bytes: &[u8]) -> Vec<u8> {
@@ -255,6 +256,33 @@ impl ObjectDb for MemoryObjectDb {
             .collect())
     }
 
+    fn list_records_page(
+        &self,
+        collection: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> ObjectDbResult<Vec<(String, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let mut records: Vec<_> = inner
+            .records
+            .iter()
+            .filter(|((record_collection, key), _)| {
+                record_collection == collection
+                    && start_after.is_none_or(|cursor| key.as_str() > cursor)
+            })
+            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .collect();
+        records.sort_by(|left, right| left.0.cmp(&right.0));
+        records.truncate(limit);
+        Ok(records)
+    }
+
     fn compare_and_swap_record(
         &self,
         collection: &str,
@@ -292,6 +320,50 @@ impl ObjectDb for MemoryObjectDb {
             return Ok(false);
         }
         inner.records.remove(&record_key);
+        Ok(true)
+    }
+
+    fn transact_records(&self, mutations: &[RecordMutation<'_>]) -> ObjectDbResult<bool> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| ObjectDbError::Backend(format!("poisoned memory db: {error}")))?;
+        let mut keys = std::collections::HashSet::with_capacity(mutations.len());
+        for mutation in mutations {
+            let record_key = (
+                mutation.collection().to_string(),
+                mutation.key().to_string(),
+            );
+            if !keys.insert(record_key.clone()) {
+                return Ok(false);
+            }
+            let current = inner.records.get(&record_key).map(Vec::as_slice);
+            let matches = match mutation {
+                RecordMutation::Create { .. } => current.is_none(),
+                RecordMutation::CompareAndSwap { expected, .. }
+                | RecordMutation::CompareAndDelete { expected, .. } => current == Some(*expected),
+            };
+            if !matches {
+                return Ok(false);
+            }
+        }
+        for mutation in mutations {
+            let record_key = (
+                mutation.collection().to_string(),
+                mutation.key().to_string(),
+            );
+            match mutation {
+                RecordMutation::Create { value, .. } => {
+                    inner.records.insert(record_key, value.to_vec());
+                }
+                RecordMutation::CompareAndSwap { replacement, .. } => {
+                    inner.records.insert(record_key, replacement.to_vec());
+                }
+                RecordMutation::CompareAndDelete { .. } => {
+                    inner.records.remove(&record_key);
+                }
+            }
+        }
         Ok(true)
     }
 }

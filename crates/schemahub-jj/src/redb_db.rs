@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::object_db::{
     ObjectDb, ObjectDbError, ObjectDbLockGuard, ObjectDbResult, ObjectId, ObjectKind, OpId,
+    RecordMutation,
 };
 
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
@@ -368,6 +369,41 @@ impl ObjectDb for RedbObjectDb {
         Ok(records)
     }
 
+    fn list_records_page(
+        &self,
+        collection: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> ObjectDbResult<Vec<(String, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut prefix = collection.as_bytes().to_vec();
+        prefix.push(0);
+        let mut end = collection.as_bytes().to_vec();
+        end.push(1);
+        let start_key = start_after.map(|cursor| scoped_key(collection, cursor.as_bytes()));
+        let start_bound = match start_key.as_ref() {
+            Some(key) => std::ops::Bound::Excluded(key.as_slice()),
+            None => std::ops::Bound::Included(prefix.as_slice()),
+        };
+        let end_bound = std::ops::Bound::Excluded(end.as_slice());
+        let rtx = self.db.begin_read().map_err(map_db)?;
+        let table = rtx.open_table(RECORDS).map_err(map_db)?;
+        let mut records = Vec::with_capacity(limit);
+        for entry in table
+            .range::<&[u8]>((start_bound, end_bound))
+            .map_err(map_db)?
+            .take(limit)
+        {
+            let (key, value) = entry.map_err(map_db)?;
+            let stable_key = String::from_utf8(key.value()[prefix.len()..].to_vec())
+                .map_err(|error| ObjectDbError::Backend(error.to_string()))?;
+            records.push((stable_key, value.value().to_vec()));
+        }
+        Ok(records)
+    }
+
     fn compare_and_swap_record(
         &self,
         collection: &str,
@@ -415,5 +451,54 @@ impl ObjectDb for RedbObjectDb {
         };
         wtx.commit().map_err(map_db)?;
         Ok(deleted)
+    }
+
+    fn transact_records(&self, mutations: &[RecordMutation<'_>]) -> ObjectDbResult<bool> {
+        let keys: Vec<_> = mutations
+            .iter()
+            .map(|mutation| scoped_key(mutation.collection(), mutation.key().as_bytes()))
+            .collect();
+        let wtx = self.db.begin_write().map_err(map_db)?;
+        let committed = {
+            let mut table = wtx.open_table(RECORDS).map_err(map_db)?;
+            let mut unique = std::collections::HashSet::with_capacity(keys.len());
+            let mut matches = true;
+            for (mutation, key) in mutations.iter().zip(&keys) {
+                if !unique.insert(key.clone()) {
+                    matches = false;
+                    break;
+                }
+                let current = table.get(key.as_slice()).map_err(map_db)?;
+                let precondition_matches = match mutation {
+                    RecordMutation::Create { .. } => current.is_none(),
+                    RecordMutation::CompareAndSwap { expected, .. }
+                    | RecordMutation::CompareAndDelete { expected, .. } => {
+                        current.is_some_and(|value| value.value() == *expected)
+                    }
+                };
+                if !precondition_matches {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                for (mutation, key) in mutations.iter().zip(&keys) {
+                    match mutation {
+                        RecordMutation::Create { value, .. } => {
+                            table.insert(key.as_slice(), *value).map_err(map_db)?;
+                        }
+                        RecordMutation::CompareAndSwap { replacement, .. } => {
+                            table.insert(key.as_slice(), *replacement).map_err(map_db)?;
+                        }
+                        RecordMutation::CompareAndDelete { .. } => {
+                            table.remove(key.as_slice()).map_err(map_db)?;
+                        }
+                    }
+                }
+            }
+            matches
+        };
+        wtx.commit().map_err(map_db)?;
+        Ok(committed)
     }
 }

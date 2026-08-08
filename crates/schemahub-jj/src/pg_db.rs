@@ -45,6 +45,7 @@ use tokio::sync::oneshot;
 
 use crate::object_db::{
     ObjectDb, ObjectDbError, ObjectDbLockGuard, ObjectDbResult, ObjectId, ObjectKind, OpId,
+    RecordMutation,
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -730,6 +731,65 @@ impl ObjectDb for PgObjectDb {
         .map_err(map_db)
     }
 
+    fn list_records_page(
+        &self,
+        collection: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> ObjectDbResult<Vec<(String, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| ObjectDbError::Backend("record page limit exceeds i64".to_string()))?;
+        let collection = collection.to_string();
+        let start_after = start_after.map(str::to_string);
+        let pool = self.pool.clone();
+        self.block_on(async move {
+            let mut tx = pool.begin().await?;
+            // Keep the cursor predicate out of a nullable `OR`. Separate SQL
+            // shapes let PostgreSQL use the `(collection, record_key)` primary
+            // key as a true bounded range even after it selects a generic
+            // prepared-statement plan.
+            let rows = if let Some(start_after) = start_after.as_deref() {
+                sqlx::query(
+                    "SELECT record_key, record_bytes FROM resource_records
+                     WHERE collection = $1 AND record_key > $2
+                     ORDER BY record_key ASC
+                     LIMIT $3",
+                )
+                .bind(&collection)
+                .bind(start_after)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?
+            } else {
+                sqlx::query(
+                    "SELECT record_key, record_bytes FROM resource_records
+                     WHERE collection = $1
+                     ORDER BY record_key ASC
+                     LIMIT $2",
+                )
+                .bind(&collection)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?
+            };
+            let records = rows
+                .into_iter()
+                .map(|row| {
+                    Ok((
+                        row.try_get::<String, _>("record_key")?,
+                        row.try_get::<Vec<u8>, _>("record_bytes")?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, sqlx::Error>>()?;
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(records)
+        })
+        .map_err(map_db)
+    }
+
     fn compare_and_swap_record(
         &self,
         collection: &str,
@@ -783,6 +843,130 @@ impl ObjectDb for PgObjectDb {
             .await?;
             tx.commit().await?;
             Ok::<_, sqlx::Error>(result.rows_affected() == 1)
+        })
+        .map_err(map_db)
+    }
+
+    fn transact_records(&self, mutations: &[RecordMutation<'_>]) -> ObjectDbResult<bool> {
+        #[derive(Debug)]
+        enum OwnedMutation {
+            Create {
+                collection: String,
+                key: String,
+                value: Vec<u8>,
+            },
+            CompareAndSwap {
+                collection: String,
+                key: String,
+                expected: Vec<u8>,
+                replacement: Vec<u8>,
+            },
+            CompareAndDelete {
+                collection: String,
+                key: String,
+                expected: Vec<u8>,
+            },
+        }
+
+        let mut keys = std::collections::HashSet::with_capacity(mutations.len());
+        let mut owned = Vec::with_capacity(mutations.len());
+        for mutation in mutations {
+            let target = (
+                mutation.collection().to_string(),
+                mutation.key().to_string(),
+            );
+            if !keys.insert(target.clone()) {
+                return Ok(false);
+            }
+            owned.push(match mutation {
+                RecordMutation::Create { value, .. } => OwnedMutation::Create {
+                    collection: target.0,
+                    key: target.1,
+                    value: value.to_vec(),
+                },
+                RecordMutation::CompareAndSwap {
+                    expected,
+                    replacement,
+                    ..
+                } => OwnedMutation::CompareAndSwap {
+                    collection: target.0,
+                    key: target.1,
+                    expected: expected.to_vec(),
+                    replacement: replacement.to_vec(),
+                },
+                RecordMutation::CompareAndDelete { expected, .. } => {
+                    OwnedMutation::CompareAndDelete {
+                        collection: target.0,
+                        key: target.1,
+                        expected: expected.to_vec(),
+                    }
+                }
+            });
+        }
+
+        let pool = self.pool.clone();
+        self.block_on(async move {
+            let mut tx = pool.begin().await?;
+            for mutation in owned {
+                let affected = match mutation {
+                    OwnedMutation::Create {
+                        collection,
+                        key,
+                        value,
+                    } => sqlx::query(
+                        "INSERT INTO resource_records
+                             (collection, record_key, record_bytes)
+                             VALUES ($1, $2, $3)
+                             ON CONFLICT (collection, record_key) DO NOTHING",
+                    )
+                    .bind(collection)
+                    .bind(key)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected(),
+                    OwnedMutation::CompareAndSwap {
+                        collection,
+                        key,
+                        expected,
+                        replacement,
+                    } => sqlx::query(
+                        "UPDATE resource_records SET record_bytes = $4
+                             WHERE collection = $1
+                               AND record_key = $2
+                               AND record_bytes = $3",
+                    )
+                    .bind(collection)
+                    .bind(key)
+                    .bind(expected)
+                    .bind(replacement)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected(),
+                    OwnedMutation::CompareAndDelete {
+                        collection,
+                        key,
+                        expected,
+                    } => sqlx::query(
+                        "DELETE FROM resource_records
+                             WHERE collection = $1
+                               AND record_key = $2
+                               AND record_bytes = $3",
+                    )
+                    .bind(collection)
+                    .bind(key)
+                    .bind(expected)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected(),
+                };
+                if affected != 1 {
+                    tx.rollback().await?;
+                    return Ok::<_, sqlx::Error>(false);
+                }
+            }
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(true)
         })
         .map_err(map_db)
     }
@@ -1434,6 +1618,32 @@ mod tests {
     }
 
     #[test]
+    fn resource_record_pages_are_bounded_stable_and_collection_scoped() {
+        // Arrange
+        let t = TestDb::new();
+        t.db.create_record("audit", "c", b"third").unwrap();
+        t.db.create_record("audit", "a", b"first").unwrap();
+        t.db.create_record("audit", "b", b"second").unwrap();
+        t.db.create_record("other", "aa", b"outside").unwrap();
+
+        // Act
+        let first = t.db.list_records_page("audit", None, 2).unwrap();
+        let second = t.db.list_records_page("audit", Some("b"), 2).unwrap();
+        let empty = t.db.list_records_page("audit", None, 0).unwrap();
+
+        // Assert
+        assert_eq!(
+            first,
+            vec![
+                ("a".to_string(), b"first".to_vec()),
+                ("b".to_string(), b"second".to_vec()),
+            ]
+        );
+        assert_eq!(second, vec![("c".to_string(), b"third".to_vec())]);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn resource_record_compare_and_swap_rejects_stale_bytes_atomically() {
         // Arrange
         let t = TestDb::new();
@@ -1505,6 +1715,71 @@ mod tests {
         assert_eq!(
             t.db.get_record("roles", "commerce/alice").unwrap(),
             Some(b"owner".to_vec())
+        );
+    }
+
+    #[test]
+    fn resource_record_transaction_rejection_writes_nothing() {
+        // Arrange
+        let t = TestDb::new();
+        t.db.create_record("resources", "acme", b"v1").unwrap();
+        let mutations = [
+            RecordMutation::CompareAndSwap {
+                collection: "resources",
+                key: "acme",
+                expected: b"stale",
+                replacement: b"v2",
+            },
+            RecordMutation::Create {
+                collection: "audit",
+                key: "event-a",
+                value: b"created",
+            },
+        ];
+
+        // Act
+        let committed = t.db.transact_records(&mutations).unwrap();
+
+        // Assert
+        assert!(!committed);
+        assert_eq!(
+            t.db.get_record("resources", "acme").unwrap(),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(t.db.get_record("audit", "event-a").unwrap(), None);
+    }
+
+    #[test]
+    fn resource_record_transaction_success_writes_everything() {
+        // Arrange
+        let t = TestDb::new();
+        t.db.create_record("resources", "acme", b"v1").unwrap();
+        let mutations = [
+            RecordMutation::CompareAndSwap {
+                collection: "resources",
+                key: "acme",
+                expected: b"v1",
+                replacement: b"v2",
+            },
+            RecordMutation::Create {
+                collection: "audit",
+                key: "event-a",
+                value: b"created",
+            },
+        ];
+
+        // Act
+        let committed = t.db.transact_records(&mutations).unwrap();
+
+        // Assert
+        assert!(committed);
+        assert_eq!(
+            t.db.get_record("resources", "acme").unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(
+            t.db.get_record("audit", "event-a").unwrap(),
+            Some(b"created".to_vec())
         );
     }
 
